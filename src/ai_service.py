@@ -54,7 +54,8 @@ def clean_ai_output(text: str) -> str:
     # 5. Convert Markdown headers (### Header) to Slack bold (*Header*)
     text = re.sub(r"^[ \t]*#{1,4}[ \t]+(.+)$", r"*\1*", text, flags=re.MULTILINE)
 
-    # 6. Convert Markdown bold **text** to Slack bold *text*
+    # 6. Convert Markdown bold-italic ***text*** to Slack *_text_* and bold **text** to *text*
+    text = re.sub(r"\*\*\*([^*\n]+)\*\*\*", r"*_\1_*", text)
     text = re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", text)
 
     return text.strip()
@@ -108,7 +109,7 @@ def build_system_instructions() -> str:
         community_context = (
             f"\n\nLIVE COMMUNITY & PROJECT CONTEXT:\n"
             f"- Bot Identity: goose-lee (@gooselee), resident hacker and cheerleader in Hack Club's `#loadout-development` channel.\n"
-            f"- GitHub Repository: <https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>. Drop this link if anyone asks for the code or repo!\n"
+            f"- GitHub Repository: <https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>. Drop this link ONLY if someone asks for our bot's code or repository! When someone talks about their own project, ask for their project link instead.\n"
             f"- Anyone in the channel is allowed to view anyone's level, points, rank, or card. This is public, non-sensitive data.\n"
             f"- Level Progression Tiers:\n{tier_lines}\n"
             f"- Current Tracked Members:\n" + ("\n".join(user_lines) if user_lines else "  • No activity recorded yet.") + "\n"

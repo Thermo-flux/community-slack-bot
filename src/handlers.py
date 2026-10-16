@@ -38,7 +38,7 @@ def clean_mention_text(text: str) -> str:
     """Removes Slack user mention tags like <@U12345678> from text."""
     if not text:
         return ""
-    return re.sub(r"<@[A-Z0-9]+(?:\|[^>]+)?>", "", text).strip()
+    return re.sub(r"<@[A-Z0-9]+(?:\|[^>]+)?>", "", text, flags=re.IGNORECASE).strip()
 
 
 def parse_card_request_targets(text: str, caller_id: str, bot_user_id: Optional[str] = None) -> Optional[List[str]]:
@@ -59,7 +59,7 @@ def parse_card_request_targets(text: str, caller_id: str, bot_user_id: Optional[
         clean = re.sub(rf"<@{re.escape(bot_user_id)}(?:\|[^>]+)?>", "", clean).strip()
     clean_lower = clean.lower().strip()
 
-    # 1. Exact self card commands
+    # 1. Exact and conversational self card commands
     self_triggers = (
         "/level", "!level", ".level", "level",
         "/rank", "!rank", ".rank", "rank",
@@ -67,9 +67,14 @@ def parse_card_request_targets(text: str, caller_id: str, bot_user_id: Optional[
         "/stats", "!stats", ".stats", "stats",
         "/xp", "!xp", ".xp", "xp",
         "my level", "my rank", "my card", "my stats", "my xp", "my points",
-        "check level", "check my level"
+        "my rank card", "what is my level", "what's my level", "what is my rank", "what's my rank",
+        "what is my card", "what's my card", "what is my rank card", "what's my rank card",
+        "check level", "check my level", "show my stats", "show me my stats",
+        "show my card", "show me my card", "show my level", "show me my level",
+        "give me my card", "give me my stats"
     )
-    if clean_lower in self_triggers:
+    self_regex = r"^(?:what(?:'s|\s+is)\s+my|show\s+(?:me\s+)?my|give\s+me\s+my|check\s+my)\s+(?:rank|card|level|stats|xp|points)(?:\s+card)?.*$"
+    if clean_lower in self_triggers or re.match(self_regex, clean_lower):
         return [caller_id]
 
     # 2. Conversational card queries like "give me the card for X", "card for X and Y"
@@ -77,7 +82,6 @@ def parse_card_request_targets(text: str, caller_id: str, bot_user_id: Optional[
         r"^(?:please\s+)?(?:give\s+me|show\s+me|show|fetch|get|check|display|view|send)\s+(?:the\s+)?(?:card|level|rank|stats|xp|points)\s+(?:for|of)\s+(.+)$",
         r"^(?:what\s+is|what\'?s|how\s+much\s+is|check)\s+(?:the\s+)?(?:level|rank|stats|xp|points)\s+(?:of|for)\s+(.+)$",
         r"^(?:card|stats|level|rank|xp|points)\s+(?:for|of)\s+(.+)$",
-        r"^(?:who\s+is)\s+(.+)$",
     ]
     for pat in conversational_patterns:
         m = re.match(pat, clean, re.IGNORECASE)
@@ -222,49 +226,53 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             return
 
         clean_lower = text.lower().strip()
+        is_direct_bot_mention = bool(bot_user_id and f"<@{bot_user_id}>" in text)
 
-        # Check if the user is asking for their card or anyone else's card
-        card_targets = parse_card_request_targets(text, caller_id=user_id, bot_user_id=bot_user_id)
-        if card_targets is not None:
-            reply_text = get_cards_response_for_targets(card_targets, caller_id=user_id)
-            try:
-                say(text=reply_text, channel=channel_id, thread_ts=target_thread_ts)
-            except Exception as e:
-                logger.error(f"Failed to send rank card via chat command: {e}")
-            return
+        # Only process in-chat commands if the message is NOT directly mentioning the bot.
+        # When mentioning the bot, handle_app_mentions will handle the command/reply, avoiding double-replies!
+        if not is_direct_bot_mention:
+            # Check if the user is asking for their card or anyone else's card
+            card_targets = parse_card_request_targets(text, caller_id=user_id, bot_user_id=bot_user_id)
+            if card_targets is not None:
+                reply_text = get_cards_response_for_targets(card_targets, caller_id=user_id)
+                try:
+                    say(text=reply_text, channel=channel_id, thread_ts=target_thread_ts)
+                except Exception as e:
+                    logger.error(f"Failed to send rank card via chat command: {e}")
+                return
 
-        # Leaderboard in-chat trigger
-        if clean_lower in ("/leaderboard", "!leaderboard", ".leaderboard", "leaderboard", "/top", "!top", "top", "ranks"):
-            leaders = get_leaderboard(limit=10)
-            board = format_leaderboard(leaders)
-            try:
-                say(text=board, channel=channel_id, thread_ts=target_thread_ts)
-            except Exception as e:
-                logger.error(f"Failed to send leaderboard via chat command: {e}")
-            return
+            # Leaderboard in-chat trigger
+            if clean_lower in ("/leaderboard", "!leaderboard", ".leaderboard", "leaderboard", "/top", "!top", "top", "ranks"):
+                leaders = get_leaderboard(limit=10)
+                board = format_leaderboard(leaders)
+                try:
+                    say(text=board, channel=channel_id, thread_ts=target_thread_ts)
+                except Exception as e:
+                    logger.error(f"Failed to send leaderboard via chat command: {e}")
+                return
 
-        # Repo in-chat trigger
-        if clean_lower in ("/repo", "!repo", ".repo", "repo", "github", "gh repo", "!github"):
-            repo_msg = "🚀 *Community Slack Bot GitHub Repository:*\n<https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>\nFeel free to explore the code, open issues, or contribute! ✨"
-            try:
-                say(text=repo_msg, channel=channel_id, thread_ts=target_thread_ts)
-            except Exception as e:
-                logger.error(f"Failed to send repo: {e}")
-            return
+            # Repo in-chat trigger
+            if clean_lower in ("/repo", "!repo", ".repo", "repo", "github", "gh repo", "!github"):
+                repo_msg = "🚀 *Community Slack Bot GitHub Repository:*\n<https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>\nFeel free to explore the code, open issues, or contribute! ✨"
+                try:
+                    say(text=repo_msg, channel=channel_id, thread_ts=target_thread_ts)
+                except Exception as e:
+                    logger.error(f"Failed to send repo: {e}")
+                return
 
-        # Help in-chat trigger
-        if clean_lower in ("!help", "/help", "bot help", "bothelp", "help"):
-            templates = CONFIG.get("templates", {})
-            help_msg = templates.get("help_message", "Type `/level` or `/leaderboard`!")
-            formatted_help = help_msg.format(
-                bot_id=bot_user_id or "bot",
-                cooldown=rules.get("cooldown_seconds", 30)
-            )
-            try:
-                say(text=formatted_help, channel=channel_id, thread_ts=target_thread_ts)
-            except Exception as e:
-                logger.error(f"Failed to send help: {e}")
-            return
+            # Help in-chat trigger
+            if clean_lower in ("!help", "/help", "bot help", "bothelp", "help"):
+                templates = CONFIG.get("templates", {})
+                help_msg = templates.get("help_message", "Type `/level` or `/leaderboard`!")
+                formatted_help = help_msg.format(
+                    bot_id=bot_user_id or "bot",
+                    cooldown=rules.get("cooldown_seconds", 30)
+                )
+                try:
+                    say(text=formatted_help, channel=channel_id, thread_ts=target_thread_ts)
+                except Exception as e:
+                    logger.error(f"Failed to send help: {e}")
+                return
 
         # Anti-spam cooldown check
         cooldown_sec = rules.get("cooldown_seconds", 30)

@@ -57,6 +57,9 @@ def test_parse_card_request_targets():
     assert handlers.parse_card_request_targets("/level", "U_CALLER") == ["U_CALLER"]
     assert handlers.parse_card_request_targets("level", "U_CALLER") == ["U_CALLER"]
     assert handlers.parse_card_request_targets("my rank", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("what's my rank card? show me my stats", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("show me my stats", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("what is my level", "U_CALLER") == ["U_CALLER"]
 
     # Conversational & multiple targets
     assert handlers.parse_card_request_targets("give me the card for X", "U_CALLER") == ["X"]
@@ -69,6 +72,8 @@ def test_parse_card_request_targets():
     # Non-card regular messages must return None
     assert handlers.parse_card_request_targets("hello there how are you?", "U_CALLER") is None
     assert handlers.parse_card_request_targets("I think the level of difficulty is high", "U_CALLER") is None
+    assert handlers.parse_card_request_targets("who is netic", "U_CALLER") is None
+    assert handlers.parse_card_request_targets("who is the bot", "U_CALLER") is None
 
 
 def test_get_cards_response_for_targets():
