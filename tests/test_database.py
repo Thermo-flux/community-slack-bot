@@ -106,3 +106,45 @@ def test_increment_message_count_only(temp_db):
     user = database.get_user(user_id, db_path=temp_db)
     assert user["message_count"] == 2
     assert user["xp"] == 0
+
+
+def test_user_aliases_and_resolution(temp_db):
+    """Verifies registering aliases, resolving via mentions, raw IDs, and aliases."""
+    database.record_message_and_add_xp("U0C7811N0CT", "C1", 200, 3, db_path=temp_db)
+    database.register_user_alias("netic", "U0C7811N0CT", db_path=temp_db)
+
+    # Resolve via mention <@U0C7811N0CT>
+    uid, udata = database.resolve_user("<@U0C7811N0CT>", db_path=temp_db)
+    assert uid == "U0C7811N0CT"
+    assert udata["xp"] == 200
+
+    # Resolve via mention with nickname <@U0C7811N0CT|netic_alias>
+    uid2, udata2 = database.resolve_user("<@U0C7811N0CT|netic_alias>", db_path=temp_db)
+    assert uid2 == "U0C7811N0CT"
+
+    # Resolve via friendly alias
+    uid3, udata3 = database.resolve_user("netic", db_path=temp_db)
+    assert uid3 == "U0C7811N0CT"
+    assert udata3["xp"] == 200
+
+    # Resolve via raw ID
+    uid4, udata4 = database.resolve_user("U0C7811N0CT", db_path=temp_db)
+    assert uid4 == "U0C7811N0CT"
+
+    # Unknown user returns None, None
+    uid_none, udata_none = database.resolve_user("unknown_ghost_user", db_path=temp_db)
+    assert uid_none is None
+    assert udata_none is None
+
+
+def test_get_all_users_summary(temp_db):
+    """Verifies summary contains member stats and concatenated aliases."""
+    database.record_message_and_add_xp("U100", "C1", 50, 2, db_path=temp_db)
+    database.register_user_alias("sam", "U100", db_path=temp_db)
+
+    summary = database.get_all_users_summary(limit=10, db_path=temp_db)
+    assert len(summary) >= 1
+    u100 = [u for u in summary if u["user_id"] == "U100"][0]
+    assert u100["xp"] == 50
+    assert "sam" in (u100["aliases"] or "")
+

@@ -9,9 +9,11 @@ import ai_service
 
 def test_offline_fallback():
     """Verifies that without an API key, the bot returns a friendly template instead of crashing."""
-    response = ai_service.generate_response(user_id="U_GUEST", user_message="Hello bot!")
-    assert "<@U_GUEST>" in response
-    assert "standby mode" in response or "tracking" in response
+    with patch("ai_service.AI_API_KEY", ""):
+        response = ai_service.generate_response(user_id="U_GUEST", user_message="Hello bot!")
+        assert "<@U_GUEST>" in response
+        assert "standby mode" in response or "tracking" in response
+
 
 
 def test_load_soul_prompt():

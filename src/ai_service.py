@@ -46,7 +46,35 @@ def build_system_instructions() -> str:
         f"- Only use these approved emojis where appropriate: {' '.join(allowed_emojis)}\n"
         f"- Keep responses concise and formatted cleanly with Slack Markdown (*bold*, _italic_, `code`)."
     )
-    return base_soul + emoji_instruction
+
+    # Inject live community data so AI can accurately answer queries about any user's stats
+    community_context = ""
+    try:
+        from database import get_all_users_summary
+        from leveling import get_level_tiers
+
+        tiers = get_level_tiers()
+        tier_lines = "\n".join([f"  • Level {t['level']}: {t['min_xp']} XP ({t['title']})" for t in tiers])
+
+        users_summary = get_all_users_summary(limit=20)
+        user_lines = []
+        for u in users_summary:
+            alias_part = f" (aliases: {u['aliases']})" if u.get("aliases") else ""
+            user_lines.append(
+                f"  • <@{u['user_id']}>{alias_part}: Level {u['level']}, {u['xp']} XP, {u['message_count']} contributions"
+            )
+
+        community_context = (
+            f"\n\nLIVE COMMUNITY SYSTEM & LEADERBOARD DATA:\n"
+            f"- Anyone in the channel is allowed to view anyone's level, points, rank, or card. This is public, non-sensitive community data.\n"
+            f"- Level Progression Tiers:\n{tier_lines}\n"
+            f"- Current Tracked Members:\n" + ("\n".join(user_lines) if user_lines else "  • No activity recorded yet.") + "\n"
+            f"- If a user asks for anyone's card, level, XP, or ranking (such as for Netic, Jerry, or others), you have access to the data above. Accurately report their stats and celebrate their progress!"
+        )
+    except Exception as e:
+        logger.warning(f"Could not load live community context into AI prompt: {e}")
+
+    return base_soul + emoji_instruction + community_context
 
 
 def get_offline_fallback(user_id: str) -> str:
@@ -92,7 +120,9 @@ def _call_gemini(prompt: str, system_prompt: str, timeout: int) -> str:
         if candidates:
             parts = candidates[0].get("content", {}).get("parts", [])
             if parts:
-                return parts[0].get("text", "").strip()
+                text = parts[0].get("text") or ""
+                if text.strip():
+                    return text.strip()
         return "I'm here and listening! Keep up the great discussion! 🚀"
     raise RuntimeError(f"Gemini API status {response.status_code}")
 
@@ -119,7 +149,12 @@ def _call_openai_compatible(prompt: str, system_prompt: str, timeout: int) -> st
     if response.status_code == 200:
         choices = response.json().get("choices", [])
         if choices:
-            return choices[0].get("message", {}).get("content", "").strip()
+            msg = choices[0].get("message", {})
+            content = msg.get("content") or ""
+            if not content and "reasoning_content" in msg:
+                content = msg.get("reasoning_content") or ""
+            if content.strip():
+                return content.strip()
         return "I'm listening and tracking your activity! 🚀"
     raise RuntimeError(f"OpenAI API status {response.status_code}")
 
@@ -138,6 +173,9 @@ def _call_anthropic(prompt: str, system_prompt: str, timeout: int) -> str:
     if response.status_code == 200:
         content = response.json().get("content", [])
         if content and content[0].get("type") == "text":
-            return content[0].get("text", "").strip()
+            text = content[0].get("text") or ""
+            if text.strip():
+                return text.strip()
         return "I'm listening and tracking your activity! 🚀"
     raise RuntimeError(f"Anthropic API status {response.status_code}")
+

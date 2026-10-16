@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import pytest
+from unittest.mock import patch
 
 import database
 import leveling
@@ -216,9 +217,11 @@ def test_ai_service_offline_stress():
     Tests 100 rapid calls to AI service when offline.
     Must respond in under 0.1 seconds without any errors.
     """
-    start = time.time()
-    for i in range(100):
-        reply = ai_service.generate_response(user_id=f"U_AI_{i}", user_message="Hello bot")
-        assert f"<@U_AI_{i}>" in reply
-    duration = time.time() - start
-    assert duration < 1.0  # 100 instant template responses in < 1s
+    with patch("ai_service.AI_API_KEY", ""):
+        start = time.time()
+        for i in range(100):
+            reply = ai_service.generate_response(user_id=f"U_AI_{i}", user_message="Hello bot")
+            assert f"<@U_AI_{i}>" in reply
+        duration = time.time() - start
+        assert duration < 1.0  # 100 instant template responses in < 1s
+
