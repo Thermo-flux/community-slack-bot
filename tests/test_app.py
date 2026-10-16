@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import types
 
 import pytest
@@ -13,7 +14,7 @@ import pytest
 from goose.config import default_config
 from goose.core.db import Database
 from goose.gateway import app
-from goose.types import Action, Result, VoiceJob, VoiceResult
+from goose.types import Action, Event, Result, VoiceJob, VoiceResult
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFEST = os.path.join(ROOT, "slack", "manifest.json")
@@ -58,7 +59,7 @@ class FakeVoice:
         self.requests = []
         self.junk = []
 
-    def call(self, request):
+    def call(self, request, user_id=""):
         self.requests.append(request)
         if not self.ok:
             return VoiceResult(ok=False, reason=self.reason)
@@ -103,11 +104,35 @@ def test_check_config_fails_closed_on_a_missing_file(tmp_path, capsys):
     assert "not found" in capsys.readouterr().out
 
 
-def test_check_config_real_files_print_ok(capsys):
+def test_check_config_real_files_are_valid_but_not_configured_yet(capsys):
+    """The shipped file validates, but its organizers, owner and channel ids are still placeholders: exit 0 with the list."""
     if not os.path.exists(REAL_LINES):
         pytest.skip("config/lines.yaml is not written yet (agent B)")
     assert app.main(["--config", REAL_CONFIG, "--check-config"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("OK, not configured yet:")
+    assert "people.organizers" in out and "people.owner" in out
+    assert "channels.scored" in out and "channels.organizer" in out
+
+
+def test_check_config_prints_plain_ok_when_fully_set_up(tmp_path, capsys):
+    text = (open(REAL_CONFIG, encoding="utf-8").read()
+            .replace('owner: ""', 'owner: "U0OWNER001"')
+            .replace("organizers: []", 'organizers: ["U0ORG00001"]')
+            .replace('scored: ["C_LOADOUT"]', 'scored: ["C0LOADOUT1"]')
+            .replace('organizer: "C_ORGANIZERS"', 'organizer: "C0ORGANIZ1"')
+            .replace("lines: config/lines.yaml", "lines: %s" % REAL_LINES.replace("\\", "/")))
+    path = tmp_path / "goose.yaml"
+    path.write_text(text, encoding="utf-8")
+    assert app.main(["--config", str(path), "--check-config"]) == 0
     assert capsys.readouterr().out.strip() == "OK"
+
+
+def test_check_config_empty_file_is_a_validation_error(tmp_path, capsys):
+    path = tmp_path / "goose.yaml"
+    path.write_text("# only a comment\n", encoding="utf-8")
+    assert app.main(["--config", str(path), "--check-config"]) == 1
+    assert "config file is empty" in capsys.readouterr().out
 
 
 def test_start_refuses_without_tokens(monkeypatch):
@@ -272,7 +297,7 @@ def test_voice_jobs_run_on_the_voice_pool():
 
 def test_voice_job_failure_posts_nothing_and_does_not_raise(caplog):
     class BrokenVoice(FakeVoice):
-        def call(self, request):
+        def call(self, request, user_id=""):
             raise RuntimeError("timeout details must not be logged")
 
     job = VoiceJob(request={"v": 1, "request_id": "r2", "input": {"message": {"text": "hi"}}}, channel="C1",
@@ -329,3 +354,377 @@ def test_manifest_slash_command_socket_mode_and_switches():
 def test_manifest_has_no_dashes_in_text():
     raw = open(MANIFEST, encoding="utf-8").read()
     assert chr(0x2014) not in raw and chr(0x2013) not in raw
+
+
+# ------------------------------------------------------------------------------------------- voice gates and admission
+
+from goose.core.lines import LineBank  # noqa: E402
+
+LINES_OK = {"v": 1, "request_id": "r1", "action": "speak", "text": "Quack to you.", "reaction": None,
+            "flags": {"roasted": False, "mentions_rank": False, "uses_german": False, "numbers_used": []}}
+
+
+def _real_ctx(voice=None, db=None):
+    """A context with the real line bank and a real database, for jobs that go through PostFilter."""
+    return types.SimpleNamespace(bot_user_id="UBOT", organizer_channel="CORG", config=default_config(),
+                                 voice_client=voice, lines=LineBank.from_file(REAL_LINES),
+                                 db=db if db is not None else Database(":memory:"),
+                                 clock=types.SimpleNamespace(now=lambda: 1_760_000_000.0))
+
+
+def _job(request_id="r1", channel="C1", fallback="Quack."):
+    return VoiceJob(request={"v": 1, "request_id": request_id, "kind": "addressed",
+                             "input": {"message": {"text": "hi"}}},
+                    channel=channel, user="U1", thread_ts="", message_ts="1.1", ephemeral=False, fallback=fallback)
+
+
+def test_paused_skips_the_voice_and_posts_nothing():
+    db = Database(":memory:")
+    db.set_setting("paused", "1")
+    voice = FakeVoice(response=LINES_OK)
+    client = FakeClient()
+    app.run_voice_job(_real_ctx(voice, db), client, _job())
+    assert voice.requests == []
+    assert client.calls == []
+
+
+def test_resumed_voice_job_posts_again():
+    db = Database(":memory:")
+    db.set_setting("paused", "0")
+    voice = FakeVoice(response=LINES_OK)
+    client = FakeClient()
+    app.run_voice_job(_real_ctx(voice, db), client, _job())
+    assert len(voice.requests) == 1
+    assert client.calls and client.calls[0][1]["text"] == "Quack to you."
+
+
+def test_job_older_than_six_seconds_posts_the_fallback_without_a_voice_call():
+    voice = FakeVoice(response=LINES_OK)
+    client = FakeClient()
+    job = _job(fallback="Quack.")
+    job.created_ts = 100.0
+    app.run_voice_job(_real_ctx(voice), client, job, now_fn=lambda: 106.5)
+    assert voice.requests == []
+    assert [c[1]["text"] for c in client.calls] == ["Quack."]
+
+
+def test_job_exactly_six_seconds_old_still_calls_the_voice():
+    voice = FakeVoice(response=LINES_OK)
+    client = FakeClient()
+    job = _job()
+    job.created_ts = 100.0
+    app.run_voice_job(_real_ctx(voice), client, job, now_fn=lambda: 106.0)
+    assert len(voice.requests) == 1
+    assert client.calls[0][1]["text"] == "Quack to you."
+
+
+def test_handlers_stamp_the_admission_time_and_expire_stale_jobs():
+    now = {"t": 100.0}
+    voice = FakeVoice(response=LINES_OK)
+    client = FakeClient()
+    deferred = []
+    router = FakeRouter(Result(jobs=[_job()]))
+    handlers = app.build_handlers(_real_ctx(voice), router, client,
+                                  voice_submit=lambda fn, *a: deferred.append((fn, a)),
+                                  now_fn=lambda: now["t"])
+    handlers["message"](_envelope(MESSAGE))
+    assert len(deferred) == 1
+    fn, args = deferred[0]
+    assert args[2].created_ts == 100.0, "args are (ctx, client, job, clock, admission)"
+    now["t"] = 107.0
+    fn(*args)
+    assert voice.requests == []
+    assert [c[1]["text"] for c in client.calls] == ["Quack."]
+
+
+class EchoVoice(FakeVoice):
+    """Answers every request with a reply that echoes the request id."""
+
+    def call(self, request, user_id=""):
+        self.requests.append(request)
+        return VoiceResult(ok=True, response=dict(LINES_OK, request_id=request["request_id"]))
+
+
+def test_eighth_pending_voice_job_is_refused_with_the_default_settings():
+    """Defaults: concurrency 2 and queue_size 5, so 7 jobs are admitted and the 8th gets its canned line at once."""
+    voice = EchoVoice()
+    client = FakeClient()
+    deferred = []
+    jobs = [_job(request_id="r%d" % i, fallback="Quack.") for i in range(8)]
+    router = FakeRouter(Result(jobs=jobs))
+    handlers = app.build_handlers(_real_ctx(voice), router, client,
+                                  voice_submit=lambda fn, *a: deferred.append((fn, a)),
+                                  now_fn=lambda: 50.0)
+    handlers["message"](_envelope(MESSAGE))
+    assert len(deferred) == 7
+    assert [c[1]["text"] for c in client.calls] == ["Quack."], "the 8th job posts its canned line immediately"
+    for fn, args in deferred:
+        fn(*args)
+    assert len(voice.requests) == 7
+    assert len(client.calls) == 8
+
+
+def test_admission_slots_are_released_when_a_job_fails():
+    class BrokenVoice(FakeVoice):
+        def call(self, request, user_id=""):
+            raise RuntimeError("boom")
+
+    client = FakeClient()
+    admission = app.VoiceAdmission(1)
+    assert admission.try_admit() is True
+    job = _job()
+    app.run_voice_job(_real_ctx(BrokenVoice()), client, job, admission=admission)
+    assert admission.pending == 0
+    assert admission.try_admit() is True
+
+
+def test_admission_refuses_at_the_limit_and_counts_down():
+    admission = app.VoiceAdmission(2)
+    assert admission.try_admit() and admission.try_admit()
+    assert admission.try_admit() is False
+    admission.release()
+    assert admission.try_admit() is True
+    admission.release()
+    admission.release()
+    admission.release()
+    assert admission.pending == 0
+
+
+def test_repeated_reply_is_refused_inside_24_hours_and_allowed_after(tmp_path):
+    db = Database(":memory:")
+    voice = FakeVoice(response=LINES_OK)
+    client = FakeClient()
+    ctx = _real_ctx(voice, db)
+
+    def run(request_id):
+        voice.response = dict(LINES_OK, request_id=request_id)   # the reply must echo the job's request id
+        app.run_voice_job(ctx, client, _job(request_id=request_id))
+        return client.calls[-1][1]["text"]
+
+    assert run("r1") == "Quack to you."
+    assert db.query("SELECT text FROM posted_texts")[0]["text"] == "Quack to you."
+    assert run("r2") == "Quack.", "the same text is refused and the canned line is posted"
+    assert len(db.query("SELECT text FROM posted_texts")) == 1
+
+    db.execute("UPDATE posted_texts SET ts = ?", (1_760_000_000.0 - 90000,))
+    assert run("r3") == "Quack to you.", "after 24 hours the text may come back"
+
+
+def test_recent_texts_are_only_read_for_the_same_channel():
+    db = Database(":memory:")
+    db.execute("INSERT INTO posted_texts (channel, ts, text) VALUES ('C9', ?, 'elsewhere')", (1_760_000_000.0,))
+    db.execute("INSERT INTO posted_texts (channel, ts, text) VALUES ('C1', ?, 'here')", (1_760_000_000.0,))
+    ctx = _real_ctx(None, db)
+    assert app._recent_texts(ctx, "C1") == ["here"]
+
+
+# ------------------------------------------------------------------------------------------------ thread lookups
+
+class ThreadClient(FakeClient):
+    """Records every read call. `replies` and `history` are the responses; `fail` is an exception to raise."""
+
+    def __init__(self, replies=None, history=None, fail=None):
+        super().__init__()
+        self.replies = replies if replies is not None else []
+        self.history = history if history is not None else []
+        self.fail = fail
+
+    def conversations_replies(self, **kwargs):
+        self.calls.append(("conversations_replies", kwargs))
+        if self.fail is not None:
+            raise self.fail
+        return {"messages": list(self.replies)}
+
+    def conversations_history(self, **kwargs):
+        self.calls.append(("conversations_history", kwargs))
+        if self.fail is not None:
+            raise self.fail
+        return {"messages": list(self.history)}
+
+
+class SlackError(Exception):
+    def __init__(self, code):
+        super().__init__("slack says something with user text")
+        self.response = {"error": code}
+
+
+def _thread_event(message_ts="3.0", thread_ts="1.0"):
+    return Event(kind="message", ts=3.0, channel="C1", user="U1", message_ts=message_ts, thread_ts=thread_ts,
+                 text="hello duck")
+
+
+def test_thread_reply_gets_parent_author_and_excerpt_without_the_current_message():
+    replies = [
+        {"ts": "1.0", "user": "UPARENT", "text": "parent text"},
+        {"ts": "2.0", "user": "U2", "text": "first reply"},
+        {"ts": "3.0", "user": "U1", "text": "hello duck"},
+    ]
+    client = ThreadClient(replies=replies)
+    event = _thread_event()
+    app.ThreadLookup(client).enrich(event)
+    assert client.calls == [("conversations_replies", {"channel": "C1", "ts": "1.0", "limit": 7})]
+    assert event.thread_parent_user == "UPARENT"
+    assert event.thread_excerpt == ["parent text", "first reply"]
+
+
+def test_thread_excerpt_keeps_the_newest_six_and_skips_missing_keys():
+    replies = [{"ts": "1.0", "user": "UP", "text": "p"}]
+    replies += [{"ts": "%d.0" % (2 + i), "user": "U2", "text": "t%d" % i} for i in range(6)]
+    replies += [{"ts": "9.0"}, {"ts": "20.0", "user": "U1", "text": "current"}]
+    client = ThreadClient(replies=replies)
+    event = _thread_event(message_ts="20.0")
+    app.ThreadLookup(client).enrich(event)
+    assert event.thread_excerpt == ["t0", "t1", "t2", "t3", "t4", "t5"]
+    assert event.thread_parent_user == "UP"
+    no_user = ThreadClient(replies=[{"ts": "1.0"}])
+    other = _thread_event()
+    app.ThreadLookup(no_user).enrich(other)
+    assert other.thread_parent_user == "" and other.thread_excerpt == []
+
+
+def test_slack_error_leaves_fields_empty_and_logs_only_the_code(caplog):
+    client = ThreadClient(fail=SlackError("ratelimited"))
+    event = _thread_event()
+    with caplog.at_level("WARNING"):
+        app.ThreadLookup(client).enrich(event)
+    assert event.thread_parent_user == "" and event.thread_excerpt == []
+    assert "ratelimited" in caplog.text
+    assert "user text" not in caplog.text
+
+
+def test_reaction_on_a_thread_reply_sets_the_thread_and_parent_author():
+    client = ThreadClient(
+        history=[{"ts": "2.0", "thread_ts": "1.0", "user": "U2"}],
+        replies=[{"ts": "1.0", "user": "UPARENT"}])
+    event = Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts="2.0", item_user="U2",
+                  reaction="duck")
+    app.ThreadLookup(client).enrich(event)
+    assert client.calls[0] == ("conversations_history",
+                               {"channel": "C1", "latest": "2.0", "inclusive": True, "limit": 1})
+    assert client.calls[1] == ("conversations_replies", {"channel": "C1", "ts": "1.0", "limit": 1})
+    assert event.thread_ts == "1.0" and event.thread_parent_user == "UPARENT"
+
+
+def test_reaction_on_a_plain_message_or_a_mismatched_history_changes_nothing():
+    plain = ThreadClient(history=[{"ts": "2.0", "thread_ts": "2.0"}])
+    event = Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts="2.0")
+    app.ThreadLookup(plain).enrich(event)
+    assert event.thread_ts == "" and len(plain.calls) == 1
+
+    other = ThreadClient(history=[{"ts": "1.0", "thread_ts": "0.5"}])
+    event2 = Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts="2.0")
+    app.ThreadLookup(other).enrich(event2)
+    assert event2.thread_ts == "" and event2.thread_parent_user == ""
+
+
+def test_thread_lookups_are_cached_and_the_cache_is_bounded():
+    client = ThreadClient(history=[{"ts": "2.0", "thread_ts": "1.0"}], replies=[{"ts": "1.0", "user": "UP"}])
+    lookup = app.ThreadLookup(client)
+    for _ in range(2):
+        lookup.enrich(Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts="2.0"))
+    assert [c[0] for c in client.calls].count("conversations_history") == 1
+
+    small = app.ThreadLookup(ThreadClient(history=[{"ts": "9.0", "thread_ts": ""}]), max_entries=2)
+    for ts in ("7.0", "8.0", "9.0"):
+        small.enrich(Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts=ts))
+    assert len(small._cache) == 2
+
+
+def test_handlers_fill_thread_fields_before_the_router_sees_the_event():
+    client = ThreadClient(replies=[{"ts": "1.0", "user": "UP", "text": "parent"},
+                                   {"ts": "2.0", "user": "U1", "text": "hello"}])
+    router = FakeRouter()
+    handlers = app.build_handlers(_ctx(), router, client)
+    body = _envelope({"type": "message", "channel": "C1", "user": "U1", "ts": "2.0", "thread_ts": "1.0",
+                      "text": "hello duck"})
+    handlers["message"](body)
+    assert router.events[0].thread_parent_user == "UP"
+    assert router.events[0].thread_excerpt == ["parent"]
+
+
+# ------------------------------------------------------------------------------------------------- official channel
+
+class ChannelClient:
+    def __init__(self, info=None, fail=None):
+        self.info = info
+        self.fail = fail
+        self.calls = []
+
+    def conversations_info(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.fail is not None:
+            raise self.fail
+        return {"channel": self.info}
+
+
+def test_official_channel_must_be_public_and_named_loadout():
+    good = ChannelClient({"name": "loadout", "is_private": False})
+    assert app.verify_official_channel(good, "C0LOADOUT1") is True
+    assert good.calls == [{"channel": "C0LOADOUT1"}]
+    assert app.verify_official_channel(ChannelClient({"name": "loadout", "is_private": True}), "C0LOADOUT1") is False
+    assert app.verify_official_channel(ChannelClient({"name": "general", "is_private": False}), "C0LOADOUT1") is False
+    assert app.verify_official_channel(ChannelClient({"name": "loadout"}), "C0LOADOUT1") is False
+
+
+def test_official_channel_refuses_wildcards_empty_ids_and_slack_errors(caplog):
+    client = ChannelClient({"name": "loadout", "is_private": False})
+    assert app.verify_official_channel(client, "*") is False
+    assert app.verify_official_channel(client, "") is False
+    assert client.calls == [], "no Slack call for a wildcard or an empty id"
+    failing = ChannelClient(fail=SlackError("channel_not_found"))
+    with caplog.at_level("ERROR"):
+        assert app.verify_official_channel(failing, "C0LOADOUT1") is False
+    assert "channel_not_found" in caplog.text and "user text" not in caplog.text
+
+
+def test_start_refuses_when_a_scored_channel_is_not_the_official_one(tmp_path, monkeypatch):
+    """The real start path, with slack_bolt replaced by a stub so no network is used."""
+    class StubClient:
+        def auth_test(self):
+            return {"user_id": "UBOT"}
+
+        def conversations_info(self, **kwargs):
+            return {"channel": {"name": "random", "is_private": False}}
+
+    class StubApp:
+        def __init__(self, token):
+            self.client = StubClient()
+
+        def event(self, name):
+            return lambda fn: fn
+
+        def command(self, name):
+            return lambda fn: fn
+
+    class StubSocket:
+        def __init__(self, *a, **k):
+            raise AssertionError("must not connect to Slack")
+
+    bolt = types.ModuleType("slack_bolt")
+    bolt.App = StubApp
+    adapter = types.ModuleType("slack_bolt.adapter")
+    socket_mode = types.ModuleType("slack_bolt.adapter.socket_mode")
+    socket_mode.SocketModeHandler = StubSocket
+    monkeypatch.setitem(sys.modules, "slack_bolt", bolt)
+    monkeypatch.setitem(sys.modules, "slack_bolt.adapter", adapter)
+    monkeypatch.setitem(sys.modules, "slack_bolt.adapter.socket_mode", socket_mode)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
+
+    text = (open(REAL_CONFIG, encoding="utf-8").read()
+            .replace('owner: ""', 'owner: "U0OWNER001"')
+            .replace("organizers: []", 'organizers: ["U0ORG00001"]')
+            .replace('scored: ["C_LOADOUT"]', 'scored: ["C0LOADOUT1"]')
+            .replace('organizer: "C_ORGANIZERS"', 'organizer: "C0ORGANIZ1"')
+            .replace("db: data/goose.db", "db: %s" % (tmp_path / "goose.db").as_posix())
+            .replace("audit: data/audit.log", "audit: %s" % (tmp_path / "audit.log").as_posix())
+            .replace("lines: config/lines.yaml", "lines: %s" % REAL_LINES.replace("\\", "/")))
+    path = tmp_path / "goose.yaml"
+    path.write_text(text, encoding="utf-8")
+    assert app.run_gateway(str(path)) == 2
+
+
+def test_start_refuses_while_setup_gaps_exist(tmp_path, monkeypatch):
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
+    assert app.run_gateway(REAL_CONFIG) == 2

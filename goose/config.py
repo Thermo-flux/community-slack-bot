@@ -6,6 +6,7 @@ Secrets are NOT here. They come from environment variables.
 from __future__ import annotations
 
 import dataclasses
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, get_type_hints
 
@@ -14,6 +15,11 @@ import yaml
 
 class ConfigError(Exception):
     """Raised for every config problem. The message lists all problems found."""
+
+
+# A real Slack channel id: "C" then 8 or more capitals or digits. The placeholders from the shipped file never match.
+CHANNEL_ID_RE = re.compile(r"C[A-Z0-9]{8,}")
+PLACEHOLDER_CHANNEL_IDS = ("C_LOADOUT", "C_ORGANIZERS")
 
 
 @dataclass
@@ -34,10 +40,6 @@ class LevelsConfig:
     titles: List[str] = field(default_factory=lambda: [
         "Hatchling", "Duckling", "Paddler", "Dabbler", "Mallard", "Diver",
         "Pond Scout", "Flock Leader", "Wing Commander", "Golden Beak", "Pond Elder", "Head Duck"])
-    # v6 organizer-star gate: a level above gate_level needs at least one non-voided organizer star.
-    # Without one, crumbs alone stop at gate_level; after a star, levels are uncapped.
-    gate_enabled: bool = True
-    gate_level: int = 5
     # activity bands from last confirmed week crumbs: below steady = quiet, then steady, active, very_active
     band_steady: float = 15
     band_active: float = 50
@@ -109,6 +111,7 @@ class VoiceConfig:
     secret_env: str = "VOICE_SHARED_SECRET"
     model: str = ""                        # must be on the voice's allowlist
     messages_per_person_per_hour: int = 12   # the message limit (replaces spend caps)
+    notice_version: str = "2"              # members must have accepted this privacy notice (via /goose join) before their messages go to the voice
     person_gap_s: int = 5
     reply_max_chars: int = 300
     elaborate_max_chars: int = 700
@@ -258,8 +261,6 @@ def _validate(cfg: Config, problems: List[str]) -> None:
         problems.append("levels.titles: needs exactly one title per threshold (%d)" % len(t))
     if cfg.levels.growth_above_top <= 1.0:
         problems.append("levels.growth_above_top: must be above 1.0")
-    if cfg.levels.gate_level < 1:
-        problems.append("levels.gate_level: must be at least 1")
     if cfg.scoring.message_curve not in ("log", "linear"):
         problems.append("scoring.message_curve: must be log or linear")
     if cfg.vibes.german_gloss not in ("on_request", "first_time", "always"):
@@ -274,6 +275,12 @@ def _validate(cfg: Config, problems: List[str]) -> None:
         problems.append("people.confirmations_required: must be at least 1")
     if not cfg.channels.scored:
         problems.append("channels.scored: needs at least one channel id")
+    for cid in cfg.channels.scored:
+        if str(cid).strip() in ("", "*"):
+            problems.append("channels.scored: channel ids must be real ids, not empty or '*'")
+            break
+    if str(cfg.channels.organizer).strip() in ("", "*"):
+        problems.append("channels.organizer: must be a real channel id, not empty or '*'")
     if cfg.voice.messages_per_person_per_hour < 1:
         problems.append("voice.messages_per_person_per_hour: must be at least 1")
     if cfg.voice.reply_max_chars < 20 or cfg.voice.elaborate_max_chars < cfg.voice.reply_max_chars:
@@ -293,6 +300,28 @@ def _validate(cfg: Config, problems: List[str]) -> None:
         Clock(cfg.schedule.timezone)
     except ValueError as e:
         problems.append("schedule.timezone: %s" % e)
+
+
+def _is_real_channel_id(value: str) -> bool:
+    return value not in PLACEHOLDER_CHANNEL_IDS and CHANNEL_ID_RE.fullmatch(value or "") is not None
+
+
+def missing_setup(cfg: Config) -> List[str]:
+    """Human-readable reasons the config is valid but not yet filled in for a real community (empty list when ready).
+    These are not validation errors: the file loads, but the gateway refuses to start until they are fixed."""
+    problems: List[str] = []
+    if not cfg.people.organizers:
+        problems.append("people.organizers: no organizer is listed yet")
+    if not cfg.people.owner:
+        problems.append("people.owner: not set yet")
+    for cid in cfg.channels.scored:
+        if not _is_real_channel_id(cid):
+            problems.append("channels.scored: %s is not a real channel id yet" % cid)
+    if not _is_real_channel_id(cfg.channels.organizer):
+        problems.append("channels.organizer: %s is not a real channel id yet" % cfg.channels.organizer)
+    if not str(cfg.voice.notice_version or "").strip():
+        problems.append("voice.notice_version: empty")
+    return problems
 
 
 def config_from_dict(data: Optional[Dict[str, Any]]) -> Config:
@@ -318,4 +347,6 @@ def load_config(path: str) -> Config:
         raise ConfigError("config file not found: %s" % path)
     except yaml.YAMLError as e:
         raise ConfigError("config file is not valid YAML: %s" % e)
+    if data is None:
+        raise ConfigError("config file is empty")
     return config_from_dict(data)

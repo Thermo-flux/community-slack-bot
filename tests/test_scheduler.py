@@ -250,3 +250,49 @@ def test_threading_event_works_as_the_stop_flag(octx):
     stop = threading.Event()
     stop.set()
     sched.run(stop, lambda r: None)
+
+
+# ------------------------------------------------------------------------------------------------ pruning
+
+HOUR = 3600
+DAY_S = 86400
+
+
+def _count(db, table):
+    return db.one("SELECT COUNT(*) AS n FROM %s" % table)["n"]
+
+
+def test_hourly_pass_prunes_each_table_to_its_window(octx, clock):
+    db = octx.db
+    now = clock.now()
+    db.execute("INSERT INTO seen_hash (user_id, hash, ts) VALUES ('U1', 'old', ?)", (now - 2 * HOUR,))
+    db.execute("INSERT INTO seen_hash (user_id, hash, ts) VALUES ('U1', 'new', ?)", (now - 600,))
+    db.execute("INSERT INTO voice_person (user_id, ts) VALUES ('U1', ?)", (now - 2 * HOUR,))
+    db.execute("INSERT INTO voice_person (user_id, ts) VALUES ('U1', ?)", (now - 1800,))
+    db.execute("INSERT INTO posted_texts (channel, ts, text) VALUES ('C1', ?, 'old')", (now - 25 * HOUR,))
+    db.execute("INSERT INTO posted_texts (channel, ts, text) VALUES ('C1', ?, 'new')", (now - 3 * HOUR,))
+    for table in ("reaction_log", "remark_log"):
+        db.execute("INSERT INTO %s (user_id, ts, kind) VALUES ('U1', ?, 'x')" % table, (now - 15 * DAY_S,))
+        db.execute("INSERT INTO %s (user_id, ts, kind) VALUES ('U1', ?, 'x')" % table, (now - 13 * DAY_S,))
+    db.execute("INSERT INTO voice_usage (ts, kind) VALUES (?, 'addressed')", (now - 15 * DAY_S,))
+    db.execute("INSERT INTO voice_usage (ts, kind) VALUES (?, 'addressed')", (now - 13 * DAY_S,))
+
+    Scheduler(octx, FakeRouter()).tick(now)
+
+    assert db.query("SELECT hash FROM seen_hash")[0]["hash"] == "new" and _count(db, "seen_hash") == 1
+    assert _count(db, "voice_person") == 1
+    assert db.query("SELECT text FROM posted_texts")[0]["text"] == "new"
+    assert _count(db, "reaction_log") == 1 and _count(db, "remark_log") == 1
+    assert _count(db, "voice_usage") == 1
+
+
+def test_pruning_runs_once_an_hour_not_on_every_tick(octx, clock):
+    db = octx.db
+    sched = Scheduler(octx, FakeRouter())
+    now = clock.now()
+    sched.tick(now)
+    db.execute("INSERT INTO seen_hash (user_id, hash, ts) VALUES ('U1', 'stale', ?)", (now - 2 * HOUR,))
+    sched.tick(now + 600)
+    assert _count(db, "seen_hash") == 1, "not pruned again within the hour"
+    sched.tick(now + HOUR + 1)
+    assert _count(db, "seen_hash") == 0

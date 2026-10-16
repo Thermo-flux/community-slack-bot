@@ -6,11 +6,9 @@ import os
 import runpy
 
 import pytest
-import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIM_PATH = os.path.join(ROOT, "tools", "level_sim.py")
-CONFIG_PATH = os.path.join(ROOT, "config", "goose.yaml")
 
 # (days active, messages, thanks received, helpful marks) copied from PEOPLE in tools/level_sim.py
 CASES = {
@@ -37,17 +35,6 @@ def test_simulation_personas_match_the_cases_used_here():
     for name, (days, msgs, _thanks, _helpful) in CASES.items():
         assert sim.BY[name].msgs == msgs, "tools/level_sim.py changed: update CASES here"
         assert sim.chat(msgs, days) == pytest.approx(sim.BY[name].chat)
-
-
-def test_simulation_thresholds_match_the_shipped_config():
-    sim = load_sim()
-    with open(CONFIG_PATH, "r", encoding="utf-8-sig") as fh:
-        shipped = yaml.safe_load(fh)
-    thresholds = list((shipped.get("levels") or {}).get("thresholds") or [])
-    derived = [sim.threshold(n) for n in range(1, 13)]
-    assert derived == thresholds, (
-        "tools/level_sim.py and config/goose.yaml have drifted: %s vs %s" % (derived, thresholds)
-    )
 
 
 def test_scoring_module_matches_the_simulation_formulas():

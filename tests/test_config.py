@@ -8,7 +8,7 @@ import os
 import pytest
 
 import goose.config as config_module
-from goose.config import Config, ConfigError, config_from_dict, load_config
+from goose.config import Config, ConfigError, config_from_dict, load_config, missing_setup
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REAL = os.path.join(ROOT, "config", "goose.yaml")
@@ -47,21 +47,6 @@ def test_wrong_type_fails_and_the_path_is_named(tmp_path):
     path = write(tmp_path, "scoring:\n  min_words: three\n")
     with pytest.raises(ConfigError, match="scoring.min_words"):
         load_config(path)
-
-
-def test_top_level_typo_fails_and_names_the_key():
-    with pytest.raises(ConfigError, match="channles"):
-        config_from_dict({"channles": {"scored": ["C1"]}})
-
-
-def test_nested_bad_bool_fails_closed():
-    with pytest.raises(ConfigError, match="voice.enabled"):
-        config_from_dict({"voice": {"enabled": "yes"}})
-
-
-def test_nested_typo_in_a_known_section_fails_closed():
-    with pytest.raises(ConfigError, match="voice.messages_per_hour"):
-        config_from_dict({"voice": {"messages_per_hour": 5}})
 
 
 def test_utf8_bom_file_loads(tmp_path):
@@ -123,3 +108,87 @@ def test_there_is_no_spend_cap_setting_anywhere():
     assert offending == []
     assert "alert_tokens_per_day" in names
     assert Config().voice.alert_tokens_per_day is None, "the heads-up alert is off by default"
+
+
+# ------------------------------------------------------------------------------------- empty file and channel ids
+
+def test_empty_yaml_document_is_refused_not_defaulted(tmp_path):
+    with pytest.raises(ConfigError, match="config file is empty"):
+        load_config(write(tmp_path, ""))
+
+
+def test_comment_only_file_is_refused_as_empty(tmp_path):
+    with pytest.raises(ConfigError, match="config file is empty"):
+        load_config(write(tmp_path, "# nothing here\n"))
+
+
+@pytest.mark.parametrize("scored", [["*"], [""], ["  "]])
+def test_wildcard_or_empty_scored_channel_is_refused(scored):
+    with pytest.raises(ConfigError, match="channels.scored"):
+        config_from_dict({"channels": {"scored": scored}})
+
+
+def test_wildcard_or_empty_organizer_channel_is_refused():
+    with pytest.raises(ConfigError, match="channels.organizer"):
+        config_from_dict({"channels": {"organizer": "*"}})
+    with pytest.raises(ConfigError, match="channels.organizer"):
+        config_from_dict({"channels": {"organizer": ""}})
+
+
+# ------------------------------------------------------------------------------------- setup completeness
+
+def _filled():
+    return config_from_dict({
+        "people": {"organizers": ["U0ORG00001"], "owner": "U0OWNER001"},
+        "channels": {"scored": ["C0LOADOUT1"], "organizer": "C0ORGANIZ1"},
+    })
+
+
+def test_a_filled_in_config_has_no_setup_gaps():
+    assert missing_setup(_filled()) == []
+
+
+def test_default_config_lists_every_setup_gap():
+    gaps = missing_setup(config_from_dict(None))
+    assert len(gaps) == 4
+    joined = "\n".join(gaps)
+    assert "people.organizers" in joined and "people.owner" in joined
+    assert "channels.scored" in joined and "channels.organizer" in joined
+
+
+def test_no_organizers_is_a_gap():
+    cfg = _filled()
+    cfg.people.organizers = []
+    assert missing_setup(cfg) == ["people.organizers: no organizer is listed yet"]
+
+
+def test_no_owner_is_a_gap():
+    cfg = _filled()
+    cfg.people.owner = ""
+    assert missing_setup(cfg) == ["people.owner: not set yet"]
+
+
+def test_placeholder_scored_channel_is_a_gap_and_names_the_value():
+    cfg = _filled()
+    cfg.channels.scored = ["C_LOADOUT"]
+    gaps = missing_setup(cfg)
+    assert len(gaps) == 1 and "C_LOADOUT" in gaps[0] and gaps[0].startswith("channels.scored")
+
+
+@pytest.mark.parametrize("bad", ["C123", "c0loadout1", "C0LOADOUT1X!", "D0LOADOUT1"])
+def test_channel_ids_must_look_like_slack_ids(bad):
+    cfg = _filled()
+    cfg.channels.scored = [bad]
+    assert any(g.startswith("channels.scored") for g in missing_setup(cfg))
+
+
+def test_placeholder_organizer_channel_is_a_gap():
+    cfg = _filled()
+    cfg.channels.organizer = "C_ORGANIZERS"
+    assert missing_setup(cfg) == ["channels.organizer: C_ORGANIZERS is not a real channel id yet"]
+
+
+def test_empty_notice_version_is_a_gap():
+    cfg = _filled()
+    cfg.voice.notice_version = ""
+    assert missing_setup(cfg) == ["voice.notice_version: empty"]

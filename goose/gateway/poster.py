@@ -33,12 +33,30 @@ MENTION_RE = re.compile(r"^<@[UW][A-Z0-9]+>$")
 SHORTCODE_RE = re.compile(r":([A-Za-z0-9_+\-]{1,40}):")
 RANK_HASH_RE = re.compile(r"#\d+")
 NUMBER_RE = re.compile(r"\d{1,3}(?:,\d{3})+|\d+")
-URL_RE = re.compile(r"https?://|www\.|\b[a-z0-9-]+\.(?:com|org|net|io|dev|gg|app|me|co|xyz|gov|edu)\b", re.I)
+FORBIDDEN_MARKUP_RE = re.compile(r"<!|<@|<#|<http|@(?=\w)", re.I)   # any @word is a mention attempt (eval case 26)
+URL_RE = re.compile(
+    r"https?:|www\.|\b(?:youtu\.be|bit\.ly|t\.co|goo\.gl|tinyurl\.com|discord\.gg)\b"
+    r"|\b[a-z0-9-]+\.(?:com|org|net|io|dev|gg|app|me|co|xyz|gov|edu)\b"
+    r"|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/\S*", re.I)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+CAPITAL_WORD_RE = re.compile(r"\b[A-Z][a-z]*\b|\b[A-Z]{2,}\b")
 
 # Rank words need mentions_rank true and a private reply (plan 10.7 step 8).
-RANK_WORDS = ["rank", "ranks", "ranked", "ranking", "rankings", "standing", "standings", "leaderboard",
+RANK_WORDS = ["rank", "ranks", "ranked", "ranking", "rankings", "leaderboard",
               "top 3", "top three", "top 10", "top ten", "first place", "second place", "third place"]
+# "top 3" and friends only count as a rank when the reply also talks about the community (a stat word), so
+# "Top 3 Bruce Lee films" in general chat is fine.
+RANK_TOP_PHRASES = ["top 3", "top three", "top 10", "top ten"]
+# Words that, in one sentence with a name taken from the user's message, make the reply a roast or a threat.
+THIRD_PARTY_TRIGGER_WORDS = ["roast", "roasts", "roasted", "burn", "burns", "burned", "trash", "ratio", "owned",
+                             "lame", "ugly", "dumb", "stupid"]
+# Capitalised words in a user message that are never treated as a name.
+NAME_STOP_WORDS = frozenset([
+    "the", "i", "i'm", "you", "a", "an", "is", "it", "who", "what", "why", "how", "when", "where", "tell", "hi", "hey",
+    "yes", "no", "and", "but", "do", "does", "can", "he", "she", "they", "we", "this", "that", "quak", "duck", "goose",
+    "loadout", "ok", "lol", "so", "are", "am", "my", "me", "your", "if", "or", "not", "of", "to", "in", "on", "at",
+    "system", "roast", "roasts", "please", "ya", "ur",
+])
 # Program words, on top of wordlists.PROGRAM_WORDS_OUT (plan 10.7 step 7 names these too).
 EXTRA_PROGRAM_WORDS = ["season", "seasons", "deadline", "deadlines", "eligible", "eligibility", "accepted", "era",
                        "launch", "launches", "launched", "launching"]
@@ -80,15 +98,12 @@ def escape_text(text: str) -> str:
 
 
 def has_forbidden_markup(text: str) -> bool:
-    """True for <!, <@, <#, <http, @channel, @here, @everyone, and any raw < or > in model text.
-
-    The voice never writes markup, so & and @ are refused too, and a bare # is refused. A rank such as #3 is allowed
-    here (the rank lint decides whether it may be posted)."""
+    """True for Slack control markup: <!, <@, <#, <http, and the words @channel, @here, @everyone. Plain & < > are not
+    refused here: escape_text turns them into entities before anything is posted. Raw URLs are caught by the URL lint
+    in PostFilter.check."""
     if not isinstance(text, str):
         return True
-    if any(ch in text for ch in "<>&@"):
-        return True
-    return "#" in RANK_HASH_RE.sub("", text)
+    return FORBIDDEN_MARKUP_RE.search(text) is not None
 
 
 @functools.lru_cache(maxsize=None)
@@ -125,6 +140,17 @@ def _user_text(request: Dict[str, Any]) -> str:
         return str(request["input"]["message"]["text"])
     except (KeyError, TypeError):
         return ""
+
+
+def _user_names(user_text: str) -> List[str]:
+    """Capitalised words of the user's own message, lowercased, minus duck words and common words. The reply must not
+    use one of these names together with a roast or insult word (step 11)."""
+    names: List[str] = []
+    for word in CAPITAL_WORD_RE.findall(user_text or ""):
+        low = word.lower()
+        if len(low) >= 2 and low not in NAME_STOP_WORDS and low not in names:
+            names.append(low)
+    return names
 
 
 def _name_token(names: Optional[Dict[str, str]], kind: str) -> str:
@@ -308,9 +334,11 @@ class PostFilter:
         for pattern in W.CLAIM_PATTERNS:
             if re.search(pattern, plain_l):
                 raise _Fail("claim")
+        # weak win words are fine in general chat when the user's own message has a word starting with "win"
+        user_has_win = re.search(r"\bwin\w*", user_l) is not None
         for word in W.REWARD_WEAK:
             if _phrase_re(word).search(plain_l):
-                if not (req.get("mode") == "chat" and _phrase_re(word).search(user_l)):
+                if not (req.get("mode") == "chat" and user_has_win):
                     raise _Fail("reward")
         if _first_word(plain_l, self._program):
             raise _Fail("program")
@@ -323,8 +351,11 @@ class PostFilter:
         if URL_RE.search(plain_l):
             raise _Fail("url")
 
-        # 8. rank lint
-        if _first_word(plain_l, RANK_WORDS) or RANK_HASH_RE.search(plain):
+        # 8. rank lint ("top N" counts only next to a community stat word)
+        plain_rank = [w for w in RANK_WORDS if w not in RANK_TOP_PHRASES]
+        top_phrase = _first_word(plain_l, RANK_TOP_PHRASES)
+        if (_first_word(plain_l, plain_rank) or (top_phrase and _first_word(plain_l, W.STAT_WORDS))
+                or RANK_HASH_RE.search(plain)):
             if flags["mentions_rank"] is not True:
                 raise _Fail("rank")
             if not private:
@@ -341,11 +372,18 @@ class PostFilter:
         if _first_word(plain_l, W.THREAT_WORDS) and text.strip() != APPROVED_TIMEOUT_JOKE:
             raise _Fail("threat")
 
-        # 11. banned idioms, profanity, animal insults aimed at a person
+        # 11. banned idioms, profanity, insults, third-party roasts, animal insults aimed at a person
         if _first_word(plain_l, W.BANNED_IDIOMS):
             raise _Fail("idiom")
         if _first_word(plain_l, W.PROFANITY):
             raise _Fail("profanity")
+        user_names = _user_names(user_text if isinstance(user_text, str) else "")
+        if user_names:
+            for sentence in SENTENCE_SPLIT_RE.split(plain_l):
+                if _first_word(sentence, user_names) and _first_word(sentence, THIRD_PARTY_TRIGGER_WORDS + W.INSULT_WORDS):
+                    raise _Fail("third_party")
+        if _first_word(plain_l, W.INSULT_WORDS):
+            raise _Fail("insult")
         if INSULT_RE.search(plain):
             raise _Fail("insult")
 

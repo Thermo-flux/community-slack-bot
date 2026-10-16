@@ -1,22 +1,30 @@
 """The voice service: one endpoint, no Slack, no database. OWNER: agent D (voice). Stdlib http.server.
 
-POST /v1/voice   header X-Voice-Secret must equal VOICE_SHARED_SECRET (constant-time compare). JSON body = request.
+POST /v1/voice   headers X-Goose-Timestamp (integer seconds) and X-Goose-Signature (hex HMAC-SHA256 of
+                 timestamp + "." + the exact body bytes, keyed with VOICE_SHARED_SECRET). JSON body = request.
+                 401 for a bad or stale signature, 400 for a replayed request_id.
 GET  /health     {"ok": true, "model": "..."}   (no secrets)
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
 import re
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from goose.voice.prompt import APPROVED_REACTIONS, ELABORATE_CAP, REPLY_CAP, build_messages, max_tokens_for
 from goose.voice.provider import Provider, ProviderError
 
 PROTOCOL_VERSION = 1
+SIGNATURE_SKEW_S = 60          # a signed timestamp may be at most this far from the server's clock
+REPLAY_WINDOW_S = 300          # a request_id seen in this window is refused
+REPLAY_MAX_IDS = 10000         # bound on the replay memory; the oldest id is dropped first
 MAX_BODY_BYTES = 16 * 1024
 MAX_INPUT_CHARS = 500
 MAX_THREAD_ITEMS = 6
@@ -37,6 +45,7 @@ OUTPUT_OPTIONAL_KEYS = {"v", "request_id"}
 FLAG_KEYS = {"roasted", "mentions_rank", "uses_german", "numbers_used"}
 _FACT_KEY = re.compile(r"^[a-z_]{1,32}$")
 _REASON_CODE = re.compile(r"^[a-z_0-9]{1,24}$")
+_TIMESTAMP = re.compile(r"[0-9]{1,12}")
 
 
 class _BadRequest(Exception):
@@ -236,14 +245,54 @@ def handle_request(body: Dict[str, Any], provider: Provider) -> Tuple[int, Dict[
     return 200, response
 
 
-def _secret_ok(presented: Optional[str], secret: str) -> bool:
-    if presented is None or not secret:
+def sign_request(secret: str, timestamp: int, body: bytes) -> str:
+    """Hex HMAC-SHA256 over str(timestamp) + "." + the exact body bytes. The gateway client signs with the same formula."""
+    message = str(int(timestamp)).encode("ascii") + b"." + body
+    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def _signature_ok(timestamp: Optional[str], signature: Optional[str], body: bytes, secret: str, now: float) -> bool:
+    """True only for a fresh timestamp (within SIGNATURE_SKEW_S of now) and a matching signature (constant-time)."""
+    if not secret or timestamp is None or signature is None:
         return False
-    return hmac.compare_digest(presented.encode("utf-8"), secret.encode("utf-8"))
+    if not _TIMESTAMP.fullmatch(timestamp):
+        return False
+    ts = int(timestamp)
+    if abs(float(now) - ts) > SIGNATURE_SKEW_S:
+        return False
+    expected = sign_request(secret, ts, body)
+    return hmac.compare_digest(signature.encode("utf-8"), expected.encode("utf-8"))
 
 
-def make_server(host: str, port: int, provider: Provider, secret: str):
-    """Return a ThreadingHTTPServer ready for serve_forever()."""
+class ReplayGuard:
+    """Remembers request_ids for REPLAY_WINDOW_S seconds. Pruned on every admit; bounded to REPLAY_MAX_IDS entries."""
+
+    def __init__(self, window_s: float = REPLAY_WINDOW_S, max_ids: int = REPLAY_MAX_IDS):
+        self._window = float(window_s)
+        self._max = max(1, int(max_ids))
+        self._seen: Dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def admit(self, request_id: str, now: float) -> bool:
+        """True the first time a request_id is seen inside the window, False for a replay."""
+        with self._lock:
+            cutoff = float(now) - self._window
+            for key in [k for k, seen in self._seen.items() if seen <= cutoff]:
+                del self._seen[key]
+            if request_id in self._seen:
+                return False
+            while len(self._seen) >= self._max:
+                del self._seen[next(iter(self._seen))]     # dict order is insertion order, so this is the oldest
+            self._seen[request_id] = float(now)
+            return True
+
+
+def make_server(host: str, port: int, provider: Provider, secret: str,
+                clock: Optional[Callable[[], float]] = None):
+    """Return a ThreadingHTTPServer ready for serve_forever(). `clock` returns the server's time in seconds (default
+    time.time); tests pass a fixed one."""
+    now_fn: Callable[[], float] = clock or time.time
+    guard = ReplayGuard()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "goose-lee-voice"
@@ -271,9 +320,6 @@ def make_server(host: str, port: int, provider: Provider, secret: str):
             if self.path.split("?", 1)[0] != "/v1/voice":
                 self._send(404, {"error": "not_found"})
                 return
-            if not _secret_ok(self.headers.get("X-Voice-Secret"), secret):
-                self._send(401, {"error": "unauthorized"})
-                return
             try:
                 length = int(self.headers.get("Content-Length") or "0")
             except ValueError:
@@ -283,10 +329,19 @@ def make_server(host: str, port: int, provider: Provider, secret: str):
                 self._send(400, {"error": "bad_request", "detail": "body size"})
                 return
             raw = self.rfile.read(length)
+            # The signature covers the exact bytes read here, so it is checked before the JSON is parsed.
+            if not _signature_ok(self.headers.get("X-Goose-Timestamp"), self.headers.get("X-Goose-Signature"),
+                                 raw, secret, now_fn()):
+                self._send(401, {"error": "unauthorized"})
+                return
             try:
                 body = json.loads(raw.decode("utf-8"))
             except (ValueError, UnicodeDecodeError):
                 self._send(400, {"error": "bad_request", "detail": "not JSON"})
+                return
+            rid = body.get("request_id") if isinstance(body, dict) else None
+            if isinstance(rid, str) and not guard.admit(rid, now_fn()):
+                self._send(400, {"error": "bad_request", "detail": "replay"})
                 return
             status, payload = handle_request(body, provider)
             self._send(status, payload)

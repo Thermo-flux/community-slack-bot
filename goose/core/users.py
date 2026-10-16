@@ -14,7 +14,8 @@ from goose.core.ledger import tombstone
 
 FLAG_KINDS = ("disqualify", "freeze", "note")
 # Per-person rows that leave() deletes outright. Ledger.anonymize_user handles facts.
-PERSONAL_TABLES = ("gloss_seen", "voice_person", "remark_log", "reaction_log", "consents", "seen_hash", "mood_events")
+PERSONAL_TABLES = ("gloss_seen", "voice_person", "remark_log", "reaction_log", "consents", "seen_hash", "mood_events",
+                   "reports")
 DAY_S = 86400.0
 
 
@@ -59,15 +60,6 @@ class Users:
     def is_owner(self, user_id: str) -> bool:
         return self.config.is_owner(user_id)
 
-    def has_organizer_star(self, user_id: str) -> bool:
-        """True when the person holds at least one non-voided organizer star (the v6 level gate, PLAN_V6 section 5).
-        Pending stars count, exactly like Ledger.star_count; a voided star does not, so revoking the last star
-        closes the gate again and Levels.effective_level falls back to at most gate_level."""
-        row = self.db.one(
-            "SELECT COUNT(*) AS n FROM facts WHERE user_id = ? AND kind IN ('star', 'bigstar') "
-            "AND state != 'voided'", (user_id,))
-        return int(row["n"]) > 0
-
     def is_frozen(self, user_id: str, now: float) -> bool:
         row = self.db.one("SELECT frozen_until FROM users WHERE user_id = ?", (user_id,))
         return row is not None and float(row["frozen_until"]) > float(now)
@@ -101,8 +93,9 @@ class Users:
         return True
 
     def leave(self, user_id: str, now: float) -> bool:
-        """Delete the person (users row, own facts, gloss_seen, voice_person, remark_log, reaction_log rows) and
-        anonymize references (Ledger.anonymize_user). False if not joined or an open flag exists.
+        """Delete the person (users row, own facts, reports, gloss_seen, voice_person, remark_log, reaction_log rows),
+        blank voice_usage.user_id, and anonymize references (Ledger.anonymize_user). False if not joined or an open flag
+        exists.
         `now` is accepted for symmetry with join; nothing is recorded with it."""
         if not self.is_joined(user_id):
             return False
@@ -114,8 +107,18 @@ class Users:
                 self.ledger.anonymize_user(user_id)  # type: ignore[attr-defined]
             for table in PERSONAL_TABLES:
                 self.db.execute("DELETE FROM %s WHERE user_id = ?" % table, (user_id,))
+            # Usage counts stay for the cost record, but no longer name the person.
+            self.db.execute("UPDATE voice_usage SET user_id = '' WHERE user_id = ?", (user_id,))
             # Closed flags stay for the record, but without the person's id.
-            self.db.execute("UPDATE flags SET user_id = ? WHERE user_id = ?", (tombstone(user_id), user_id))
+            tomb = tombstone(user_id)
+            self.db.execute("UPDATE flags SET user_id = ? WHERE user_id = ?", (tomb, user_id))
+            # Published results and stored snapshots keep their shape but lose the id.
+            self.db.execute("UPDATE results SET user_id = ? WHERE user_id = ?", (tomb, user_id))
+            quoted, tomb_quoted = '"%s"' % user_id, '"%s"' % tomb
+            self.db.execute(
+                "UPDATE week_status SET snapshot_json = replace(snapshot_json, ?, ?), "
+                "confirmers_json = replace(confirmers_json, ?, ?)",
+                (quoted, tomb_quoted, quoted, tomb_quoted))
             self.db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
         return True
 

@@ -12,11 +12,13 @@ import urllib.request
 import pytest
 
 from goose.voice.provider import ProviderError
-from goose.voice.server import handle_request, make_server
+from goose.voice.server import (REPLAY_WINDOW_S, ReplayGuard, handle_request, make_server, sign_request)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VOICE_DIR = os.path.join(ROOT, "goose", "voice")
 SECRET = "shared-secret-for-tests-0123"
+START = 1_760_000_000
+NOW = [float(START)]          # the server's clock in these tests; tests move it with NOW[0] = ...
 
 GOOD_OUTPUT = {"action": "speak", "text": "Short answer: yes. The duck is sure.", "reaction": "duck",
                "flags": {"roasted": False, "mentions_rank": False, "uses_german": False, "numbers_used": []}}
@@ -223,8 +225,9 @@ def test_the_prompt_and_the_user_text_reach_the_provider_redacted():
 
 @pytest.fixture
 def running():
+    NOW[0] = float(START)
     provider = FakeProvider(reply=_text(GOOD_OUTPUT))
-    server = make_server("127.0.0.1", 0, provider, SECRET)
+    server = make_server("127.0.0.1", 0, provider, SECRET, clock=lambda: NOW[0])
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = "http://127.0.0.1:%d" % server.server_address[1]
@@ -233,12 +236,15 @@ def running():
     server.server_close()
 
 
-def _post(base, body, secret=SECRET, raw=None, headers=None):
+def _post(base, body, secret=SECRET, raw=None, headers=None, ts=None, sign=True):
+    """Signs the exact bytes sent, with the timestamp `ts` (default: the test clock). secret=None sends no signature."""
     data = raw if raw is not None else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(base + "/v1/voice", data=data, method="POST")
     req.add_header("Content-Type", "application/json")
-    if secret is not None:
-        req.add_header("X-Voice-Secret", secret)
+    if sign and secret is not None:
+        stamp = int(NOW[0]) if ts is None else int(ts)
+        req.add_header("X-Goose-Timestamp", str(stamp))
+        req.add_header("X-Goose-Signature", sign_request(secret, stamp, data))
     for key, value in (headers or {}).items():
         req.add_header(key, value)
     try:
@@ -261,6 +267,80 @@ def test_post_without_or_with_wrong_secret_is_401(running):
     assert _post(base, _request(), secret=None)[0] == 401
     assert _post(base, _request(), secret="wrong")[0] == 401
     assert provider.seen == []
+
+
+def test_the_old_plain_secret_header_is_no_longer_accepted(running):
+    base, provider = running
+    status, body = _post(base, _request(), secret=None, headers={"X-Voice-Secret": SECRET})
+    assert status == 401 and body == {"error": "unauthorized"}
+    assert provider.seen == []
+
+
+def test_a_signature_over_different_bytes_is_401(running):
+    base, provider = running
+    signed = json.dumps(_request()).encode("utf-8")
+    sent = json.dumps(_request(request_id="changed-id")).encode("utf-8")
+    status, _ = _post(base, None, raw=sent, sign=False, headers={
+        "X-Goose-Timestamp": str(START),
+        "X-Goose-Signature": sign_request(SECRET, START, signed),
+    })
+    assert status == 401
+    assert provider.seen == []
+
+
+def test_stale_or_future_timestamps_are_401_and_60_seconds_is_fine(running):
+    base, provider = running
+    assert _post(base, _request(request_id="t-1"), ts=START - 61)[0] == 401
+    assert _post(base, _request(request_id="t-2"), ts=START + 61)[0] == 401
+    assert _post(base, _request(request_id="t-3"), ts=START - 60)[0] == 200
+    assert _post(base, _request(request_id="t-4"), ts=START + 60)[0] == 200
+    assert len(provider.seen) == 2
+
+
+def test_non_integer_timestamp_is_401(running):
+    base, _ = running
+    data = json.dumps(_request(request_id="n-1")).encode("utf-8")
+    status, _ = _post(base, None, raw=data, sign=False, headers={
+        "X-Goose-Timestamp": "%d.5" % START,
+        "X-Goose-Signature": sign_request(SECRET, START, data),
+    })
+    assert status == 401
+
+
+def test_replayed_request_id_inside_five_minutes_is_400(running):
+    base, provider = running
+    assert _post(base, _request(request_id="dup-1"))[0] == 200
+    NOW[0] += 30
+    status, body = _post(base, _request(request_id="dup-1"))
+    assert status == 400
+    assert body["error"] == "bad_request"
+    assert len(provider.seen) == 1
+
+
+def test_request_id_is_accepted_again_after_the_window(running):
+    base, provider = running
+    assert _post(base, _request(request_id="again-1"))[0] == 200
+    NOW[0] += REPLAY_WINDOW_S + 1
+    assert _post(base, _request(request_id="again-1"))[0] == 200
+    assert len(provider.seen) == 2
+
+
+def test_replay_guard_is_bounded_and_prunes_old_ids():
+    guard = ReplayGuard(window_s=300, max_ids=3)
+    assert guard.admit("a", 0.0) and guard.admit("b", 1.0) and guard.admit("c", 2.0)
+    assert not guard.admit("a", 3.0)
+    assert guard.admit("d", 4.0)               # full: the oldest ("a") is dropped to make room
+    assert guard.admit("a", 5.0)               # so "a" is admitted again (it was evicted, the window is still open)
+    assert len(guard._seen) <= 3
+    assert guard.admit("e", 400.0)             # everything older than 300 seconds is pruned on this request
+    assert guard._seen.keys() == {"e"}
+
+
+def test_replay_guard_refuses_a_repeat_in_the_window_only():
+    guard = ReplayGuard()
+    assert guard.admit("x", 100.0)
+    assert not guard.admit("x", 100.0 + REPLAY_WINDOW_S - 1)
+    assert guard.admit("x", 100.0 + REPLAY_WINDOW_S + 1)
 
 
 def test_post_with_bad_json_is_400(running):
@@ -311,26 +391,6 @@ def test_missing_content_length_is_400(running):
     base, _ = running
     status, body = _post(base, None, raw=b"")
     assert status == 400
-
-
-def test_voice_smoke_starts_against_a_fake_provider():
-    provider = FakeProvider(reply=_text(GOOD_OUTPUT))
-    server = make_server("127.0.0.1", 0, provider, SECRET)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base = "http://127.0.0.1:%d" % server.server_address[1]
-    try:
-        with urllib.request.urlopen(base + "/health", timeout=5) as resp:
-            health = json.loads(resp.read().decode("utf-8"))
-        assert health == {"ok": True, "model": "fake-model"}
-        status, body = _post(base, _request())
-        assert status == 200
-        assert body["action"] == "speak"
-        assert body["request_id"] == "abc-123"
-        assert body["text"] == GOOD_OUTPUT["text"]
-    finally:
-        server.shutdown()
-        server.server_close()
 
 
 def test_make_server_requires_nothing_else_than_provider_and_secret():

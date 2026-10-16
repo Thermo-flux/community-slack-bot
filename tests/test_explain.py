@@ -5,7 +5,6 @@ import random
 
 import pytest
 
-from goose.core import safety
 from goose.core.explain import ExplainService
 
 DAY = 86400
@@ -90,72 +89,6 @@ def test_gloss_always_glosses_every_id(svc, cfg):
     assert "look" in text and "wow" in text
     assert svc.maybe_gloss("U1", ["quak"], random.Random(1)) != ""
     assert svc.maybe_gloss("U1", [], random.Random(1)) == ""
-
-
-def test_compose_always_glosses_every_german_moment(svc, cfg, lines):
-    cfg.vibes.german_gloss = "always"
-    for de_id in lines.german_ids():
-        out = svc.compose("Pond note {de:%s} here." % de_id, "U1", random.Random(7), context="post")
-        entry = lines.german(de_id)
-        assert entry["text"] in out                    # the approved German is shown
-        assert entry["meaning"] in out                 # followed by its approved gloss
-        assert "(" in out and ")" in out
-
-
-def test_compose_gloss_is_deterministically_from_the_approved_table(svc, cfg, lines):
-    cfg.vibes.german_gloss = "always"
-    text = "Dog {de:quak} cat {de:mensch}"
-    out = svc.compose(text, "U1", random.Random(11), context="post")
-    expected = lines.expand(text) + " " + " ".join(
-        lines.gloss_text(i, random.Random(11)) for i in ["quak", "mensch"])
-    assert out == expected
-    assert lines.german("quak")["meaning"] in out
-    assert lines.german("mensch")["meaning"] in out
-
-
-def test_compose_on_request_keeps_german_without_a_gloss(svc, cfg, lines):
-    cfg.vibes.german_gloss = "on_request"
-    out = svc.compose("Hi {de:quak}", "U1", random.Random(1), context="post")
-    assert "Quak" in out
-    assert lines.german("quak")["meaning"] not in out
-
-
-def test_compose_first_time_attaches_the_gloss_only_once(svc, cfg, lines, db):
-    cfg.vibes.german_gloss = "first_time"
-    rng = random.Random(5)
-    first = svc.compose("Hi {de:quak}", "U1", rng, context="post")
-    assert lines.german("quak")["meaning"] in first
-    second = svc.compose("Hi {de:quak}", "U1", rng, context="post")
-    assert lines.german("quak")["meaning"] not in second      # already glossed for this person
-    assert "Quak" in second                                   # the German stays, only the gloss is skipped
-
-
-def test_compose_drops_german_in_a_plain_context(svc, cfg, lines):
-    cfg.vibes.german_gloss = "always"
-    out = svc.compose("Something failed {de:genau} now.", "U1", random.Random(3), context="error")
-    assert "{de:" not in out
-    assert lines.german("genau")["text"] not in out
-    assert lines.german("genau")["meaning"] not in out
-    assert "(" not in out
-
-
-def test_compose_drops_german_when_german_is_not_allowed(svc, cfg, lines):
-    cfg.vibes.german_gloss = "always"
-    out = svc.compose("Salut {de:quak}!", "U1", random.Random(3), allow_german=False)
-    assert "{de:" not in out
-    assert lines.german("quak")["text"] not in out
-    assert lines.german("quak")["meaning"] not in out
-
-
-def test_compose_has_no_german_or_gloss_for_a_distress_message(svc, cfg, lines):
-    cfg.vibes.german_gloss = "always"
-    message = "I want to die and {de:quak}"
-    assert safety.is_distress(message, cfg)
-    out = svc.compose(message.replace("{de:quak}", ""), "U1", random.Random(3), context="distress")
-    assert lines.german("quak")["meaning"] not in out
-    assert "(" not in out
-    for de_id in lines.german_ids():
-        assert lines.german(de_id)["text"] not in out
 
 
 def test_gloss_first_time_once_per_person_and_phrase(svc, cfg, db):

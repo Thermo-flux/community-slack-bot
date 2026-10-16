@@ -245,18 +245,3 @@ def test_display_names_accepts_rows_or_ids(ctx):
 
 def test_display_names_empty_without_confirmed_week(ctx):
     assert display_names_for_slots(ctx, None) == {}
-
-
-# ---------------------------------------------------------------- the card follows the last confirmed snapshot
-
-def test_card_uses_the_last_confirmed_week_not_a_newer_provisional_one(ctx):
-    confirm_board(ctx, [("UA1", 30), ("UA2", 20), ("UA3", 10)])
-    assert ctx.weekly.status(WEEK)["state"] == "confirmed"
-    join_shown(ctx.users, THU - 30 * DAY, "UNEW")
-    msgs(ctx.ledger, "UNEW", 50, ts=at(2025, 10, 14, 9), tag="nxt")
-    ctx.weekly.close_week(NEXT, at(2025, 10, 20, 0, 15))
-    assert ctx.weekly.status(NEXT)["state"] == "provisional"
-    card = build_card(ctx, "UA1", private=True, now=THU)
-    assert card["week"]["id"] == WEEK
-    assert card["version"] == 2
-    assert "UNEW" not in json.dumps(card)

@@ -11,8 +11,7 @@ from typing import List, Optional
 from goose.config import Config
 from goose.core.clock import Clock
 from goose.core.db import Database
-from goose.core.lines import DE_RE, LineBank
-from goose.core.safety import is_plain_context
+from goose.core.lines import LineBank
 
 NOTE_TTL_S = 7 * 86400
 LOG_TTL_S = 86400
@@ -72,27 +71,6 @@ class ExplainService:
     def unknown_reply(self) -> str:
         """Fixed line for a phrase that is not in the table."""
         return "That phrase is not in my table, so the duck won't guess what it means."
-
-    def compose(self, text: str, user_id: str, rng: random.Random, *,
-                allow_german: bool = True, context: str = "") -> str:
-        """The one deterministic way to put an approved German line in front of a person.
-
-        Every {de:id} (or {{de:id}} in a voice reply) is expanded from the approved table, and the approved
-        English gloss for each id is attached right after, per the german_gloss dial. The gloss is read only
-        from the table (LineBank.gloss_text); nothing here invents a gloss. Under 'always' every id is glossed.
-
-        Plain contexts and allow_german=False carry no German at all: the {de:id} slots are dropped and no
-        gloss is added, so an error, privacy line, receipt or the distress path never shows German (PLAN
-        sections 2 and 11)."""
-        normalized = self.lines.normalize_placeholders(text or "")
-        ids = self.lines.de_ids_in(normalized)
-        if not ids:
-            return normalized
-        if not allow_german or is_plain_context(context):
-            return " ".join(DE_RE.sub(" ", normalized).split())
-        expanded = self.lines.expand(normalized)
-        gloss = self.maybe_gloss(user_id, ids, rng)
-        return expanded + " " + gloss if gloss else expanded
 
     def maybe_gloss(self, user_id: str, de_ids: List[str], rng: random.Random) -> str:
         """Gloss text to append for the german_gloss dial: 'on_request' -> '', 'always' -> glosses for all ids,

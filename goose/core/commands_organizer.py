@@ -341,7 +341,23 @@ def _award(ctx: AppContext, event: Event, uid: str, kind: str, reason: str, link
     actions.append(Action(kind="ephemeral", channel=event.channel, user=actor,
                           text="Recorded: %s crumbs to <@%s> (final). The star reaction %s." % (
                               _n(points), uid, "is on the linked message" if chan and mts else "was not added (no Slack message link)")))
+    notice_channel = _first_scored(ctx)
+    if notice_channel:
+        actions.append(Action(kind="ephemeral", channel=notice_channel, user=uid,
+                              text=_star_notice(ctx, fact_kind, kind, points)))
     return Result(actions=actions)
+
+
+def _star_notice(ctx: AppContext, fact_kind: str, kind: str, points: float) -> str:
+    """The private note to the recipient of a star or bigstar: the 'star' or 'bigstar' line, or a plain sentence."""
+    moment = "bigstar" if fact_kind == "bigstar" else "star"
+    if ctx.lines.has_moment(moment) and ctx.lines.lines(moment):
+        line = ctx.lines.pick(moment, ctx.rng, slots={"kind": kind, "n": _n(points)}, allow_german=False)
+        text = ctx.lines.expand(line.text).strip()
+        if text:
+            return text
+    return "An organizer gave you a %s for %s. +%s crumbs." % (
+        "big star" if fact_kind == "bigstar" else "star", kind, _n(points))
 
 
 def _cmd_star(ctx: AppContext, event: Event, args: str, big: bool = False) -> Result:
@@ -650,6 +666,9 @@ def _set_paused(ctx: AppContext, event: Event, paused: bool) -> Result:
 def _cmd_voice(ctx: AppContext, event: Event, args: str) -> Result:
     tokens = args.split()
     sub = tokens[0].lower() if tokens else "status"
+    # Turning the voice on is the owner's call. Off and status stay open to any organizer.
+    if sub == "on" and not ctx.config.is_owner(event.user):
+        raise _Refuse(OWNER_ONLY)
     vc = ctx.voice_client
     if vc is None:
         return _private(event, "The voice is not wired in this process. The core keeps working without it.")
@@ -772,16 +791,20 @@ def _show_on(ctx: AppContext, user_id: str) -> bool:
 
 
 def _busiest(ctx: AppContext, week_id: str) -> Optional[str]:
-    """The person with the most qualified messages that week, or None when it is nobody (or a hidden or quiet person)."""
+    """The eligible person with the most qualified messages that week (eligible now: joined, shown, not disqualified,
+    not frozen, not an organizer), who is also not quiet. None when nobody qualifies."""
+    now = ctx.clock.now()
     best_uid, best_n = "", 0
     for uid, bd in sorted(ctx.ledger.week_breakdowns(week_id).items()):
+        if not ctx.weekly.eligible(uid, week_id, now):
+            continue
+        row = ctx.users.get(uid) or {}
+        if not row.get("show") or row.get("quiet"):
+            continue
         n = int(bd.n_msgs)
         if n > best_n:
             best_uid, best_n = uid, n
     if not best_uid or best_n <= 0:
-        return None
-    row = ctx.users.get(best_uid) or {}
-    if not row.get("show") or row.get("quiet"):
         return None
     return best_uid
 

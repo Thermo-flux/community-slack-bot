@@ -1,15 +1,18 @@
 """Tests for goose/gateway/voice_client.py: message limit, breakers, junk, queue, slow mode, usage and secrets."""
 from __future__ import annotations
 
+import json
 import logging
 import socket
 
 import pytest
 
 from goose.gateway.voice_client import VoiceClient
+from goose.voice.server import sign_request
 
 SECRET = "voice-secret-VALUE-9876"
 HOUR = 3600
+START = 1_760_000_000.0    # FakeClock's default start, in whole seconds
 
 
 @pytest.fixture
@@ -47,7 +50,7 @@ class Echo(Fake):
         self.calls.append({"url": url, "body": body, "headers": headers, "timeout": timeout})
         if self.hook:
             self.hook()
-        return _ok(body["request_id"])
+        return _ok(json.loads(body.decode("utf-8"))["request_id"])
 
 
 def _ok(request_id, tin=10, tout=5, action="speak"):
@@ -177,17 +180,43 @@ def test_call_succeeds_and_strips_usage(config, db, clock):
     assert c.tokens_today(clock.now()) == 15
 
 
-def test_secret_goes_in_the_header_and_never_in_logs(config, db, clock, caplog):
+def test_requests_are_signed_and_the_secret_never_leaks(config, db, clock, caplog):
     caplog.set_level(logging.DEBUG)
     post = Fake(socket.timeout("timed out " + SECRET), _ok("r-2"), _junk("r-3"))
     c = _client(config, db, clock, post)
     assert c.call(_req("r-1")).reason == "timeout"
-    assert post.calls[0]["headers"]["X-Voice-Secret"] == SECRET
+    headers = post.calls[0]["headers"]
+    assert "X-Voice-Secret" not in headers
+    assert SECRET not in json.dumps(headers)
     c.call(_req("r-2"))
     c.call(_req("r-3"))
     text = "\n".join(r.getMessage() + " " + str(r.args) for r in caplog.records)
     assert SECRET not in text
     assert SECRET not in repr(c.status(clock.now()))
+
+
+def test_signature_covers_the_exact_bytes_and_the_timestamp(config, db, clock):
+    post = Fake(_ok("r-1"))
+    c = _client(config, db, clock, post)
+    c.call(_req("r-1"))
+    call = post.calls[0]
+    body, headers = call["body"], call["headers"]
+    assert isinstance(body, bytes)
+    assert json.loads(body.decode("utf-8")) == _req("r-1")
+    ts = headers["X-Goose-Timestamp"]
+    assert ts == str(int(START))
+    assert headers["X-Goose-Signature"] == sign_request(SECRET, int(ts), body)
+    assert headers["X-Goose-Signature"] != sign_request("another-secret", int(ts), body)
+    assert headers["X-Goose-Signature"] != sign_request(SECRET, int(ts) + 1, body)
+    assert headers["X-Goose-Signature"] != sign_request(SECRET, int(ts), body + b" ")
+
+
+def test_signature_changes_with_the_body(config, db, clock):
+    post = Fake(_ok("r-1"), _ok("r-2"))
+    c = _client(config, db, clock, post)
+    c.call(_req("r-1"))
+    c.call(_req("r-2"))
+    assert post.calls[0]["headers"]["X-Goose-Signature"] != post.calls[1]["headers"]["X-Goose-Signature"]
 
 
 def test_timeout_is_handled_without_raising_and_is_not_retried(config, db, clock):

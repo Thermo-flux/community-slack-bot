@@ -69,9 +69,11 @@ def ctx(make_ctx):
     c.db.close()
 
 
-def join(ctx, *uids, show=True):
+def join(ctx, *uids, show=True, consent=None):
+    """Join people with the current privacy notice (or the given consent version)."""
+    version = str(ctx.config.voice.notice_version) if consent is None else consent
     for uid in uids:
-        ctx.users.join(uid, ctx.clock.now())
+        ctx.users.join(uid, ctx.clock.now(), consent_version=version)
         if show:
             ctx.users.set_show(uid, True)
 
@@ -376,70 +378,184 @@ def test_level_up_note_is_private_and_announced_once(ctx, ev):
     assert again.actions == []
 
 
-# ------------------------------------------------------------ dedupe and single-reply guarantees
+# ------------------------------------------------------------ gate order, distress, sad (fix list 1 to 3)
 
-def test_same_event_id_delivered_twice_is_handled_once(ctx, ev):
+def test_orry_mention_with_distress_gets_the_safety_reply_and_no_voice(make_ctx, ev, cfg):
+    from goose.core.safety import safety_reply
+    voice = FakeVoiceClient()
+    ctx = make_ctx(voice=voice)
     join(ctx, "U1")
-    route(ctx, ev(text=LONG, user="U1", message_ts="1760000700.000100", event_id="Evdup1"))
-    twin = ev(text="a different ordinary chat message", user="U1",
-              message_ts="1760000700.000200", event_id="Evdup1")
-    again = route(ctx, twin)
-    assert again.actions == [] and again.jobs == []
-    assert len(facts(ctx, "U1", "msg")) == 1
+    res = route(ctx, ev(text="<@UBOT> orry I want to die", user="U1", bot_mentioned=True, mentions=[BOT]))
+    assert res.jobs == [] and voice.recorded == []
+    eph = [a for a in res.actions if a.kind == "ephemeral"]
+    assert len(eph) == 1 and eph[0].text == safety_reply(cfg)
+    alerts = [a for a in res.actions if a.kind == "organizer_post"]
+    assert len(alerts) == 1 and alerts[0].channel == cfg.channels.organizer
 
 
-def test_reaction_redelivery_without_event_id_is_claimed_once(ctx, ev):
+def test_ambient_distress_alerts_organizers_only_without_the_text(ctx, ev, cfg):
+    join(ctx, "U1")
+    res = route(ctx, ev(text="honestly I want to die some days", user="U1", message_ts="1760000500.000001"))
+    assert [a.kind for a in res.actions] == ["organizer_post"]
+    alert = res.actions[0]
+    assert alert.channel == cfg.channels.organizer
+    assert "1760000500.000001" in alert.text and "C1" in alert.text
+    assert "want to die" not in alert.text
+    assert res.jobs == []
+
+
+def test_sad_only_addressed_message_goes_to_voice_without_german_roast_or_reaction(make_ctx, ev):
+    voice = FakeVoiceClient()
+    ctx = make_ctx(voice=voice)
+    join(ctx, "U1")
+    res = route(ctx, ev(text="<@UBOT> Bruce Lee died in 1973, right?", user="U1", bot_mentioned=True, mentions=[BOT]))
+    assert "reaction" not in kinds(res)
+    assert "organizer_post" not in kinds(res)
+    assert "ephemeral" not in kinds(res)
+    assert len(res.jobs) == 1
+    job = res.jobs[0]
+    assert job.allow_german is False and job.allow_roast is False
+    assert job.request["persona"]["german_allowed"] is False
+    assert job.request["persona"]["roast_allowed"] is False
+    assert voice.recorded == ["U1"]
+
+
+# ------------------------------------------------------------ freeze, re-credit (fix list 4 and 5)
+
+def test_frozen_person_messages_and_reactions_are_not_counted(ctx, ev, clock):
     join(ctx, "U1", "U2")
-    msg_ts = "1760000710.000001"
+    ctx.users.freeze("U1", clock.now() + 3600, "cooling off", "UORG1", clock.now())
+    route(ctx, ev(text=LONG, user="U1"))
+    assert facts(ctx, "U1", "msg") == []
+    msg_ts = "1760000600.000001"
     route(ctx, ev(text="this is a helpful long message", user="U2", message_ts=msg_ts))
-    route(ctx, ev("reaction_added", user="U1", reaction="duck", item_user="U2", message_ts=msg_ts, event_id=""))
-    again = route(ctx, ev("reaction_added", user="U1", reaction="duck", item_user="U2", message_ts=msg_ts,
-                          event_id=""))
-    assert again == Result()
-    assert len(facts(ctx, "U2", "thanks")) == 1
-    assert ctx.db.one("SELECT COUNT(*) AS n FROM processed WHERE key LIKE 'react:%'")["n"] == 1
+    ctx.users.freeze("U2", clock.now() + 3600, "cooling off", "UORG1", clock.now())
+    route(ctx, ev("reaction_added", user="U2", reaction="duck", item_user="U1", message_ts=msg_ts))
+    assert facts(ctx, "U1", "thanks") == []
+    ctx.users.unfreeze("U1", "UORG1", clock.now())
+    ctx.users.unfreeze("U2", "UORG1", clock.now())
+    clock.advance(60)
+    route(ctx, ev(text=LONG, user="U1"))
+    assert len(facts(ctx, "U1", "msg")) == 1
+    route(ctx, ev("reaction_added", user="U2", reaction="duck", item_user="U1", message_ts=msg_ts))
+    assert len(facts(ctx, "U1", "thanks")) == 1
 
 
-def test_member_command_outside_a_scored_channel_is_ignored(ctx, ev):
+def test_remove_then_readd_reaction_counts_once_and_a_live_duplicate_adds_nothing(ctx, ev, clock):
+    join(ctx, "U1", "U2")
+    week = ctx.clock.week_id(clock.now())
+    msg_ts = "1760000700.000001"
+    route(ctx, ev(text="this is a helpful long message", user="U2", message_ts=msg_ts))
+    route(ctx, ev("reaction_added", user="U1", reaction="duck", item_user="U2", message_ts=msg_ts))
+    route(ctx, ev("reaction_removed", user="U1", reaction="duck", item_user="U2", message_ts=msg_ts))
+    route(ctx, ev("reaction_added", user="U1", reaction="duck", item_user="U2", message_ts=msg_ts))
+    rows = facts(ctx, "U2", "thanks")
+    assert sorted(r["state"] for r in rows) == ["pending", "voided"]
+    assert ctx.ledger.week_breakdown("U2", week, include_pending=True).n_thanks == 1
+    route(ctx, ev("reaction_added", user="U1", reaction="duck", item_user="U2", message_ts=msg_ts))
+    assert len(facts(ctx, "U2", "thanks")) == 2                       # the live duplicate added nothing
+    assert ctx.ledger.week_breakdown("U2", week, include_pending=True).n_thanks == 1
+    route(ctx, ev("reaction_removed", user="U1", reaction="duck", item_user="U2", message_ts=msg_ts))
+    assert ctx.ledger.week_breakdown("U2", week, include_pending=True).n_thanks == 0
+
+
+# ------------------------------------------------------------ voice consent, thread context, redaction (11 to 13)
+
+def test_old_consent_person_gets_no_voice_job_until_they_rejoin(make_ctx, ev, clock):
+    voice = FakeVoiceClient()
+    ctx = make_ctx(voice=voice)
+    join(ctx, "U1", consent="1")                                    # accepted an older notice version
+    res = route(ctx, ev(text="<@UBOT> hello there friend", user="U1", bot_mentioned=True, mentions=[BOT]))
+    assert res.jobs == [] and voice.recorded == []
+    assert "post" in kinds(res)
+    route(ctx, ev("command", user="U1", command="join", args=""))   # accepts the current notice
+    assert ctx.users.get("U1")["consent_version"] == str(ctx.config.voice.notice_version)
+    clock.advance(60)
+    res = route(ctx, ev(text="<@UBOT> hello again there friend", user="U1", bot_mentioned=True, mentions=[BOT]))
+    assert len(res.jobs) == 1 and voice.recorded == ["U1"]
+
+
+def test_thread_context_is_six_redacted_items_of_200_characters_oldest_first(make_ctx, ev):
+    voice = FakeVoiceClient()
+    ctx = make_ctx(voice=voice)
     join(ctx, "U1")
-    res = route(ctx, ev("command", user="U1", command="me", args="", channel="COTHER"))
-    assert res == Result()
+    items = ["item %d " % i + "word " * 60 for i in range(8)]
+    items[-1] = "my key is xoxb-1234567890-abcdefghij ok"
+    res = route(ctx, ev(text="<@UBOT> what do you think", user="U1", bot_mentioned=True, mentions=[BOT],
+                        thread_excerpt=items))
+    thread = res.jobs[0].request["input"]["thread"]
+    assert len(thread) == 6
+    assert thread[0].startswith("item 2 ")                            # the six most recent, oldest first
+    assert all(len(t) <= 200 for t in thread)
+    assert sum(len(t) for t in thread) <= 1200
+    assert "xoxb-" not in thread[-1] and "[redacted]" in thread[-1]
 
 
-def test_ping_gets_one_duck_reaction_and_one_canned_reply(ctx, ev):
+def test_thread_context_respects_the_total_character_limit(make_ctx, ev):
+    voice = FakeVoiceClient()
+    ctx = make_ctx(voice=voice)
     join(ctx, "U1")
-    res = route(ctx, ev(text="<@UBOT> hello there", user="U1", bot_mentioned=True, mentions=[BOT]))
-    reacts = [a for a in res.actions if a.kind == "reaction"]
-    posts = [a for a in res.actions if a.kind == "post"]
-    assert len(reacts) == 1 and reacts[0].emoji == "duck"
-    assert len(posts) == 1
-    assert res.jobs == []
+    items = ["word " * 40] * 6                                      # about 200 characters each, with spaces
+    res = route(ctx, ev(text="<@UBOT> thoughts please", user="U1", bot_mentioned=True, mentions=[BOT],
+                        thread_excerpt=items))
+    thread = res.jobs[0].request["input"]["thread"]
+    assert len(thread) == 6
+    assert 1100 <= sum(len(t) for t in thread) <= 1200
 
 
-def test_name_without_ping_gets_a_reaction_and_no_reply(make_ctx, ev, cfg):
-    cfg.vibes.name_reaction_chance = 1.0
-    session = make_ctx(config=cfg)
-    join(session, "U1")
-    res = route(session, ev(text="hey goose-lee, how is the pond", user="U1"))
-    assert kinds(res) == ["reaction"]
-    assert res.actions[0].emoji == "duck"
-    assert res.jobs == []
-
-
-def test_mention_shortcut_me_replies_privately_with_the_page(ctx, ev):
+def test_redaction_replaces_slack_and_api_tokens(make_ctx, ev):
+    from goose.core.router import _redact
+    assert _redact("token xoxb-1234567890-abcdefghij here", 500) == "token [redacted] here"
+    voice = FakeVoiceClient()
+    ctx = make_ctx(voice=voice)
     join(ctx, "U1")
-    res = route(ctx, ev(text="<@UBOT> me", user="U1", bot_mentioned=True, mentions=[BOT]))
-    eph = [a for a in res.actions if a.kind == "ephemeral"]
-    assert len(eph) == 1 and eph[0].user == "U1"
-    assert "Pond level 1" in eph[0].text
-    assert res.jobs == []
+    res = route(ctx, ev(text="<@UBOT> my token is xoxb-1234567890-abcdefghij", user="U1", bot_mentioned=True,
+                        mentions=[BOT]))
+    text = res.jobs[0].request["input"]["message"]["text"]
+    assert "xoxb" not in text and "[redacted]" in text
 
 
-def test_mention_shortcut_top_replies_privately(ctx, ev):
+# ------------------------------------------------------------ level-up milestone (14)
+
+def test_jump_from_one_to_thirteen_sends_one_head_duck_note(ctx, ev):
     join(ctx, "U1")
-    res = route(ctx, ev(text="<@UBOT> top", user="U1", bot_mentioned=True, mentions=[BOT]))
-    eph = [a for a in res.actions if a.kind == "ephemeral"]
-    assert len(eph) == 1 and eph[0].user == "U1"
-    assert "confirmed" in eph[0].text.lower()
-    assert res.jobs == []
+    ctx.ledger.add_fact(idem_key="jump:star", user_id="U1", kind="star", ts=ctx.clock.now(), channel="C1",
+                        message_ts="jump1", state="final", amount=float(ctx.levels.threshold(13)))
+    res = Router(ctx).level_up_notes(["U1", "U1"])
+    assert [a.kind for a in res.actions] == ["ephemeral"]
+    assert res.actions[0].text in _rendered(ctx, "level_12", 13)   # the Head Duck moment, one note only
+    assert ctx.users.get("U1")["announced_level"] == 13
+    assert Router(ctx).level_up_notes(["U1"]).actions == []
 
+
+def test_ordinary_level_up_below_twelve_uses_the_normal_moment(ctx, ev):
+    join(ctx, "U1")
+    ctx.ledger.add_fact(idem_key="plain:star", user_id="U1", kind="star", ts=ctx.clock.now(), channel="C1",
+                        message_ts="plain1", state="final", amount=float(ctx.levels.threshold(2)))
+    res = Router(ctx).level_up_notes(["U1"])
+    assert len(res.actions) == 1
+    assert res.actions[0].text in _rendered(ctx, "level_up", 2)
+    assert res.actions[0].text not in _rendered(ctx, "level_12", 2)
+
+
+def test_over_the_message_limit_the_duck_says_one_line_per_hour(make_ctx, ev, clock):
+    voice = FakeVoiceClient(allow=False)
+    ctx = make_ctx(voice=voice)
+    join(ctx, "U1")
+
+    def ping():
+        return route(ctx, ev(text="<@UBOT> hello again friend", user="U1", bot_mentioned=True, mentions=[BOT]))
+
+    first = ping()
+    assert "post" in kinds(first) and first.jobs == []
+    clock.advance(60)
+    assert "post" not in kinds(ping())                       # quiet for the rest of the hour
+    clock.advance(3600)
+    assert "post" in kinds(ping())                           # the hour rolled over
+
+
+def _rendered(ctx, moment, level):
+    """Every line of a moment, filled in and expanded, for the level given."""
+    title = ctx.levels.title(level)
+    return {ctx.lines.expand(ctx.lines.render(line.text, {"n": level, "title": title}))
+            for line in ctx.lines.lines(moment)}

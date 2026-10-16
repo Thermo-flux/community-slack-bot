@@ -1,6 +1,11 @@
 """Tests for goose/core/mood.py: the goose meter, cases 1 to 8 of docs/APPENDIX_VOICE.md section B, plus persistence,
 table isolation and the import rule.
 
+Expectations are written from config.mood and the decay formula (heat halves every half_life_s), so a retune of the
+defaults changes the numbers here without editing the tests. The story these tests pin down with the current defaults:
+one person alone tops out at annoyed (the per-person cap is below angry_at), two people reach angry, three stay at
+angry or below, and four people reach the self-timeout.
+
 Caller duty (documented, not tested here): the router must only call Mood.register for valid goose calls from humans,
 never for bot messages (the duck's own lines included).
 """
@@ -38,6 +43,11 @@ def m(db, cfg, clock):
     return Mood(db, cfg, clock, random.Random(1234))
 
 
+def decayed(cfg, amount, seconds):
+    """What an amount of heat is worth after the given number of seconds (halves every half_life_s)."""
+    return amount * 0.5 ** (seconds / float(cfg.mood.half_life_s))
+
+
 def set_heat(mood, value, now):
     """Put the meter at a given heat at a given time (what a run of calls would have produced)."""
     mood._store_heat(value, now)
@@ -57,18 +67,43 @@ def table_snapshot(db):
     return out
 
 
+def stagger_plan(people, between_s=60, within_s=40):
+    """Each person makes three calls, within_s apart. Each person starts between_s after the one before.
+    Returns (offset, user) pairs in time order, offsets counted from the start of the plan."""
+    plan = []
+    for i, user in enumerate(people):
+        for k in range(3):
+            plan.append((i * between_s + k * within_s, user))
+    return sorted(plan)
+
+
+def play(mood, clock, plan):
+    """Register each (offset, user) call on the given meter, in order, from the clock's current time."""
+    start = clock.now()
+    results = []
+    for offset, user in plan:
+        clock.set(start + offset)
+        results.append(mood.register(user, clock.now()))
+    return results
+
+
 # ---- case 1: one person, three calls in five minutes -------------------------------------------------------
 
-def test_case1_three_calls_in_five_minutes_then_quiet_gag(m, clock, db):
+def test_case1_three_calls_in_five_minutes_then_quiet_gag(m, clock, db, cfg):
+    mc = cfg.mood
+    assert mc.first_add + 2 * mc.repeat_add == pytest.approx(mc.person_cap)   # three quick calls hit the cap
     r1 = m.register(U1, clock.now())
-    assert r1.counted and r1.heat == pytest.approx(1.0, abs=0.01)
+    assert r1.counted and r1.heat == pytest.approx(mc.first_add)
     clock.advance(1)
     r2 = m.register(U1, clock.now())
-    assert r2.heat == pytest.approx(1.5, abs=0.02)            # repeat within 10 minutes adds 0.5
+    assert r2.heat == pytest.approx(decayed(cfg, mc.first_add, 1) + mc.repeat_add, abs=1e-6)  # repeat adds repeat_add
     clock.advance(1)
     r3 = m.register(U1, clock.now())
-    assert r3.heat == pytest.approx(2.0, abs=0.02)            # the third call still counts
-    assert r3.stage == "calm" and not r3.gag
+    # the third call completes three calls in five minutes: it starts the gag and adds nothing
+    assert r3.gag and not r3.counted
+    assert not r3.reply and not r3.react and r3.stage == "silent"
+    assert r3.heat == pytest.approx(decayed(cfg, r2.heat, 1), abs=1e-6)
+    assert m.stage(clock.now()) == "calm"                     # two counted calls never reach annoyed
     clock.advance(1)
     r4 = m.register(U1, clock.now())
     clock.advance(1)
@@ -77,8 +112,8 @@ def test_case1_three_calls_in_five_minutes_then_quiet_gag(m, clock, db):
         assert r.gag and not r.counted
         assert not r.reply and not r.react
         assert r.stage == "silent"
-    assert r5.heat == pytest.approx(2.0, abs=0.03)
-    assert m.heat(clock.now()) == pytest.approx(2.0, abs=0.03)
+    assert r5.heat == pytest.approx(decayed(cfg, r2.heat, 3), abs=1e-6)
+    assert m.heat(clock.now()) == pytest.approx(decayed(cfg, r2.heat, 3), abs=1e-6)
 
 
 def test_gag_ends_after_thirty_minutes(m, clock):
@@ -91,56 +126,103 @@ def test_gag_ends_after_thirty_minutes(m, clock):
     assert not r.gag and r.counted
 
 
+def test_one_person_quick_calls_never_get_past_annoyed(m, clock, db, cfg):
+    mc = cfg.mood
+    assert mc.person_cap < mc.angry_at                        # one person's cap alone cannot reach angry
+    stages = []
+    max_heat = 0.0
+    for _ in range(30):
+        clock.advance(10)
+        r = m.register(U1, clock.now())
+        stages.append(r.stage)
+        max_heat = max(max_heat, r.heat)
+    # the two counted calls add first_add + repeat_add (2.25), below annoyed_at; the third call starts the gag
+    assert "silent" in stages
+    assert set(stages) <= {"calm", "silent"}
+    assert max_heat <= mc.first_add + mc.repeat_add + 1e-9
+    assert m.stage(clock.now()) == "calm"
+
+
 # ---- case 2: two people reach the per-person cap -----------------------------------------------------------
 
-def test_case2_two_capped_people_heat_is_the_decayed_sum_of_their_adds(m, clock, db):
+def test_case2_two_capped_people_heat_is_the_decayed_sum_of_their_adds(m, clock, db, cfg):
     start = clock.now()
-    # each person calls five times, 2.5 minutes apart (never three in five minutes, so the gag stays off)
-    plan = sorted([(t, U1) for t in (0, 150, 306, 456, 612)] + [(t + 30, U2) for t in (0, 150, 306, 456, 612)])
+    # each person makes calls 20 seconds apart: two count (1.5 then 0.75), the third starts the gag and adds nothing,
+    # and the fourth is silent too. U2 starts 80 seconds after U1.
+    plan = sorted([(t, U1) for t in (0, 20, 40, 60)] + [(t + 80, U2) for t in (0, 20, 40, 60)])
     results = {}
     for offset, user in plan:
         clock.set(start + offset)
         results.setdefault(user, []).append(m.register(user, clock.now()))
     for user in (U1, U2):
-        adds = [r.counted for r in results[user]]
-        assert adds == [True, True, True, True, True]
+        assert [r.counted for r in results[user]] == [True, True, False, False]
         raw = sum(amount for _, _, amount in event_rows(db, user))
-        assert raw == pytest.approx(3.0)                      # the per-person cap
+        assert raw == pytest.approx(cfg.mood.first_add + cfg.mood.repeat_add)   # two counted calls, under the cap
+    assert results[U2][2].stage == "silent" and results[U2][2].gag
     now = clock.now()
     expected = 0.0
     for ts, _user, amount in event_rows(db):
-        expected += amount * 0.5 ** ((now - (ts)) / 600.0)
+        expected += amount * 0.5 ** ((now - ts) / float(cfg.mood.half_life_s))
     assert m.heat(now) == pytest.approx(expected, abs=1e-6)
-    # the appendix says 6.0 for two capped people. Decay lowers it, so it reads below that.
-    assert m.heat(now) < 6.0
+    assert m.heat(now) < 2 * (cfg.mood.first_add + cfg.mood.repeat_add)
     # one more call from a capped person adds nothing
     clock.advance(10)
     assert not m.register(U1, clock.now()).counted
 
 
-def test_per_person_cap_stops_at_three_in_thirty_minutes(m, clock, db):
+def test_per_person_cap_stops_at_three_in_thirty_minutes(m, clock, db, cfg):
+    mc = cfg.mood
     adds = []
     for _ in range(6):
         clock.advance(360)                                    # six minutes apart: no gag, all within 30 minutes
         adds.append(m.register(U1, clock.now()))
-    assert [r.counted for r in adds] == [True, True, True, True, True, False]
-    assert sum(amount for _, _, amount in event_rows(db, U1)) == pytest.approx(3.0)
+    assert [r.counted for r in adds] == [True, True, True, False, False, False]
+    assert sum(amount for _, _, amount in event_rows(db, U1)) == pytest.approx(mc.person_cap)
+    # once the first add is more than thirty minutes old, the person has room again
+    clock.advance(1)
+    assert m.register(U1, clock.now()).counted
 
 
 # ---- case 3: three capped people, then a fourth calls once -------------------------------------------------
 
-def test_case3_fourth_call_reaches_timeout_then_goose_calls_are_silent(m, clock, db):
-    set_heat(m, 9.0, clock.now())                             # three capped people, no decay (appendix figure)
-    r = m.register(U4, clock.now())
-    assert r.stage == "timeout" and r.reply and r.react
-    assert r.heat == pytest.approx(10.0)
+def test_case3_fourth_call_reaches_timeout_then_goose_calls_are_silent(m, clock, db, cfg):
+    mc = cfg.mood
+    set_heat(m, 7.5, clock.now())                             # what three people leave behind: angry, under the timeout
     before = m.heat(clock.now())
+    assert mc.angry_at <= before < mc.timeout_at              # angry, just under the timeout line
+    clock.advance(10)
+    r = m.register(U4, clock.now())                           # the fourth person calls once
+    assert r.stage == "timeout" and r.reply and r.react
+    assert r.heat == pytest.approx(decayed(cfg, before, 10) + mc.first_add, abs=1e-6)
+    before_silent = m.heat(clock.now())
     clock.advance(60)
-    silent = m.register(U2, clock.now())
+    silent = m.register("U5", clock.now())                    # a fresh person, so only the timeout silence applies
     assert silent.stage == "silent" and not silent.counted and not silent.reply and not silent.react
-    assert silent.heat == pytest.approx(before * 0.5 ** (60 / 600.0), abs=1e-6)   # no new heat
-    clock.advance(480)                                        # still inside the 10 minute silence (total 9 min)
-    assert m.register(U3, clock.now()).stage == "silent"
+    assert silent.heat == pytest.approx(decayed(cfg, before_silent, 60), abs=1e-6)   # no new heat
+    clock.advance(mc.timeout_silent_s - 120)                  # nine minutes after the timeout: still silent
+    assert m.register("U6", clock.now()).stage == "silent"
+
+
+def test_gagged_third_calls_add_no_heat_so_four_stagger_people_stay_under_timeout(cfg, clock):
+    """Each person makes three calls about 40 seconds apart. The third call starts the gag and adds nothing, so each
+    person adds only first_add + repeat_add. Four people peak below the timeout line (the plan's old 'four people
+    reach timeout' figure assumed the third call added heat)."""
+    three_db = Database(":memory:")
+    four_db = Database(":memory:")
+    try:
+        three = play(Mood(three_db, cfg, clock, random.Random(1)), clock,
+                     stagger_plan([U1, U2, U3]))
+        assert all(r.stage in ("calm", "annoyed", "angry", "silent") for r in three)
+        assert max(r.heat for r in three) < cfg.mood.timeout_at
+        four = play(Mood(four_db, cfg, clock, random.Random(1)), clock,
+                    stagger_plan([U1, U2, U3, U4]))
+        assert max(r.heat for r in four) < cfg.mood.timeout_at
+        assert "timeout" not in [r.stage for r in four]
+        gagged = [r for r in four if r.gag]
+        assert len(gagged) == 4 and all(not r.counted for r in gagged)
+    finally:
+        three_db.close()
+        four_db.close()
 
 
 def test_timeout_is_not_repeated_within_thirty_minutes(m, clock):
@@ -167,30 +249,32 @@ def test_timeout_is_at_most_once_a_day(m, clock):
 # ---- case 4: an angry reply rolls a honk, and another roll 10 minutes later --------------------------------
 
 def test_case4_honk_then_no_honk_within_twenty_minutes(db, cfg, clock):
+    mc = cfg.mood
     rng = FixedRng([0.0, 0.0])
     mood = Mood(db, cfg, clock, rng)
-    set_heat(mood, 7.0, clock.now())
+    set_heat(mood, mc.angry_at, clock.now())                  # plus one first add: angry, under the timeout
     first = mood.register(U1, clock.now())
     assert first.stage == "angry" and first.honk and first.reply
-    clock.advance(600)
-    set_heat(mood, 7.0, clock.now())
+    clock.advance(mc.honk_gap_s // 2)                         # half the honk gap later: no roll
+    set_heat(mood, mc.angry_at, clock.now())
     second = mood.register(U2, clock.now())
     assert second.stage == "angry" and second.reply and not second.honk
-    clock.advance(900)                                        # 25 minutes after the first honk
-    set_heat(mood, 7.0, clock.now())
+    clock.advance(mc.honk_gap_s + 300 - mc.honk_gap_s // 2)   # honk_gap_s + 5 minutes after the first honk
+    set_heat(mood, mc.angry_at, clock.now())
     third = mood.register(U3, clock.now())
     assert third.honk
 
 
 def test_anger_lines_are_at_least_two_minutes_apart(db, cfg, clock):
+    mc = cfg.mood
     mood = Mood(db, cfg, clock, FixedRng([0.99] * 10))
-    set_heat(mood, 4.0, clock.now())
+    set_heat(mood, mc.annoyed_at, clock.now())               # plus one first add: annoyed
     first = mood.register(U1, clock.now())
     assert first.stage == "annoyed" and first.reply
     clock.advance(60)
-    second = mood.register(U2, clock.now())
+    second = mood.register(U1, clock.now())                  # a repeat from the same person: still annoyed
     assert second.stage == "annoyed" and not second.reply
-    clock.advance(70)
+    clock.advance(mc.anger_line_gap_s + 10 - 60)             # two minutes after the first line
     third = mood.register(U3, clock.now())
     assert third.reply
 
@@ -209,10 +293,14 @@ def test_case5_heat_halves_every_ten_minutes(m, clock):
 
 # ---- case 6: timeout, silence, cooling, calm ----------------------------------------------------------------
 
-def test_case6_timeout_silence_cooling_then_calm(m, clock, db):
+def test_case6_timeout_silence_cooling_then_calm(m, clock, db, cfg):
+    mc = cfg.mood
     t0 = clock.now()
-    set_heat(m, 9.0, t0)
-    assert m.register(U1, t0).stage == "timeout"
+    set_heat(m, mc.timeout_at, t0)
+    timeout = m.register(U1, t0)
+    assert timeout.stage == "timeout"
+    timeout_heat = mc.timeout_at + mc.first_add
+    assert timeout.heat == pytest.approx(timeout_heat)
     clock.set(t0 + 300)
     first = m.register(U2, clock.now())
     assert first.stage == "silent" and not first.counted and not first.reply
@@ -220,25 +308,25 @@ def test_case6_timeout_silence_cooling_then_calm(m, clock, db):
     second = m.register(U2, clock.now())
     assert second.stage == "silent" and not second.counted
     assert second.heat == pytest.approx(m.heat(clock.now()))
-    assert second.heat == pytest.approx(10.0 * 0.5 ** (480 / 600.0), abs=1e-6)  # the silent calls added nothing
+    assert second.heat == pytest.approx(decayed(cfg, timeout_heat, 480), abs=1e-6)  # the silent calls added nothing
     clock.set(t0 + 720)                                       # twelve minutes in: silence is over
     cooling = m.register(U3, clock.now())
     assert cooling.stage == "cooling" and cooling.reply
     clock.set(t0 + 780)
     quiet_line = m.register(U4, clock.now())
     assert quiet_line.stage == "cooling" and not quiet_line.reply   # one cooling line per five minutes
-    clock.set(t0 + 1500)                                      # twenty-five minutes in, heat well under 3
+    clock.set(t0 + mc.cooling_max_s)                          # the end of the cooling window: calm again
     assert m.stage(clock.now()) == "calm"
 
 
-def test_cooling_resets_heat_after_thirty_minutes(m, clock):
+def test_cooling_resets_heat_after_thirty_minutes(m, clock, cfg):
     t0 = clock.now()
-    set_heat(m, 9.0, t0)
+    set_heat(m, cfg.mood.timeout_at, t0)
     m.register(U1, t0)
-    clock.set(t0 + 1900)
-    r = m.register(U2, clock.now())                           # past the cooling window: heat resets, then this adds 1
+    clock.set(t0 + cfg.mood.cooling_max_s + 100)
+    r = m.register(U2, clock.now())                           # past the cooling window: heat resets, then this adds
     assert r.stage == "calm"
-    assert m.heat(clock.now()) == pytest.approx(1.0)
+    assert m.heat(clock.now()) == pytest.approx(cfg.mood.first_add)
 
 
 # ---- cases 7 and 8: unaddressed and ping-with-others never reach the meter ---------------------------------
@@ -321,7 +409,7 @@ def test_reset_forgets_the_meter(m, clock):
     assert m.stage(clock.now()) == "calm"
 
 
-def test_canned_stage_line_is_available_for_each_result(m, clock, lines):
-    set_heat(m, 4.0, clock.now())
+def test_canned_stage_line_is_available_for_each_result(m, clock, lines, cfg):
+    set_heat(m, cfg.mood.annoyed_at, clock.now())
     r = m.register(U1, clock.now())
     assert lines.canned_for_stage(r.stage, random.Random(1)).moment == "anger_" + r.stage

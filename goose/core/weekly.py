@@ -289,8 +289,11 @@ class Weekly:
         return {"weeks": changed, "checked": len(rows)}
 
     def skip_week(self, week_id: str, reason: str, actor: str, now: float) -> bool:
-        """No winners for this week. Refused for a confirmed week, or without a reason. `actor` is not stored here."""
+        """No winners for this week. Refused for a confirmed week, for a week that has not ended yet (its end, from
+        Clock.week_end_from_id, is still in the future), or without a reason. `actor` is not stored here."""
         if not str(reason or "").strip():
+            return False
+        if self.clock.week_end_from_id(week_id) > float(now):
             return False
         status = self.status(week_id)
         if status is not None and status["state"] in ("confirmed", "skipped"):

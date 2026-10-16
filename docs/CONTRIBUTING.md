@@ -8,9 +8,6 @@ python3.12 -m venv .venv
 python -m pip install -e ".[slack,dev]"
 ```
 
-The install also pulls in `tzdata`, the required dependency for named timezones (for example
-`Europe/Berlin`) on Windows and slim images.
-
 Python 3.9 must keep working (the dev machine runs 3.9, production runs 3.12). Do not use `match`, `X | Y`
 annotations at runtime, `zip(strict=)` or `str.removeprefix`. Start each module with `from __future__ import annotations`.
 
@@ -23,10 +20,6 @@ python tools/level_sim.py    # the scoring simulation and its assertions
 python -m goose.gateway.app --check-config --config config/goose.yaml
 ```
 
-That list is the whole Definition of done, plus the no-dash check in `tests/test_hygiene.py`. CI
-(`.github/workflows/ci.yml`) runs all of it on Python 3.9 and 3.12 against an installed package, so a change
-that breaks packaging or the dependency list fails there too.
-
 Tests run without network, without Slack and without sleeping. Use `FakeClock` (`clock.advance`) for time and the
 `rng` fixture for randomness. Tests must be deterministic.
 
@@ -34,8 +27,6 @@ Tests run without network, without Slack and without sleeping. Use `FakeClock` (
 
 - No em dashes and no en dashes anywhere: code, comments, strings and docs. Use commas, colons or a plain hyphen.
   `tests/test_hygiene.py` and the CI workflow both check this.
-- While `rewards.announced` is false, no user-facing line may contain a reward or prize word. The line bank
-  validator (`goose/core/lines.py`) and `tests/test_hygiene.py` both enforce it.
 - Log reason codes only. Never log tokens, keys, prompts, replies or message text.
 - Time comes from `ctx.clock` or a `now` argument. Core code never calls `time.time()`.
 - Randomness comes from the `rng` passed in. Core code never uses the global `random` module.

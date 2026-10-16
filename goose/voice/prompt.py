@@ -59,6 +59,15 @@ _ID_PATTERN = re.compile(r"\b(?=[UWCGB][A-Z0-9]*\d)[UWCGB][A-Z0-9]{8,10}\b")
 _TAG_PATTERN = re.compile(r"<[^>]*>")
 _URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _EMAIL_PATTERN = re.compile(r"\S+@\S+\.\S+")
+# Mirrors goose.core.wordlists.SECRET_PATTERNS (the voice package may not import goose.core). A test keeps them equal.
+_SECRET_PATTERNS = [
+    re.compile(r"xox[abpr]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"xapp-[A-Za-z0-9-]{10,}"),
+    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"AIza[0-9A-Za-z_-]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"[A-Za-z0-9+/=_-]{40,}"),
+]
 
 OUTPUT_SCHEMA = {
     "action": "speak | silent | redirect | decline",
@@ -76,8 +85,12 @@ EXAMPLE_OUTPUT = {
 
 
 def redact(text: str) -> str:
-    """Defense in depth: remove Slack ids, mention and link tokens, URLs and emails from text the voice reads."""
-    out = _TAG_PATTERN.sub("[redacted]", str(text))
+    """Defense in depth: remove token-like secrets, Slack ids, mention and link tokens, URLs and emails from text the
+    voice reads. The gateway does the main redaction; this runs again on everything that reaches the model."""
+    out = str(text)
+    for pattern in _SECRET_PATTERNS:
+        out = pattern.sub("[redacted]", out)
+    out = _TAG_PATTERN.sub("[redacted]", out)
     out = _URL_PATTERN.sub("[redacted]", out)
     out = _EMAIL_PATTERN.sub("[redacted]", out)
     out = _ID_PATTERN.sub("[redacted]", out)

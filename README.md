@@ -17,14 +17,8 @@ GATEWAY   goose/gateway   owns the Slack tokens, the database and the scheduler
                                             LLM key and a shared secret only. No Slack, no database.
 ```
 
-The gateway is the only process with Slack tokens, the database and the scheduler, and it owns the single Socket
-Mode connection. The core is deterministic and never waits for the voice: if the voice is slow, down, over its
-limits or returns junk, the gateway posts a canned line and the scores are unaffected.
-
-The voice is standard library only and can reach only the LLM provider. It has no Slack token and no database. It
-sees a small versioned context card (level, a coarse activity band, the last confirmed top 3 as slots) and never
-names, Slack ids or other people's numbers. Every voice reply passes the deterministic post-filter before it can be
-posted. `docs/PLAN.md` section 10 is the full design.
+The gateway is the only process with Slack tokens. The voice is standard library only and can reach only the LLM
+provider. See `docs/PLAN.md` section 10 for the full design.
 
 ## Quick start
 
@@ -33,13 +27,9 @@ python3.12 -m venv .venv
 . .venv/bin/activate                  # Windows: .venv\Scripts\activate
 python -m pip install ".[slack,dev]"
 cp .env.example .env                  # then fill in the Slack tokens and the shared secret
-python -m goose.gateway.app --check-config
+python -m goose.gateway.app --check-config --config config/goose.yaml
 python -m goose.gateway.app --config config/goose.yaml
 ```
-
-`pip install` pulls in `tzdata`, which is required for the named timezone (for example
-`Europe/Berlin`) in `config/goose.yaml`: on Windows and on slim images the standard library has no
-system tz database of its own.
 
 Or with Docker: `docker compose up -d`. The voice needs `voice.env` and `--profile voice`, see the runbook.
 
@@ -64,8 +54,7 @@ The voice (the LLM answers) stays **off** until all of these are done:
 - the owner's approval.
 
 There is **no spend cap** in the bot, by design. Set a spending limit in the LLM provider's console before you
-switch the voice on. The bot instead limits how often one person can address it (default 12 messages per hour in
-`config/goose.yaml`) and keeps replies short.
+switch the voice on. The bot limits each person to 12 addressed messages per hour and keeps replies short.
 
 ## Safety notes
 
@@ -74,26 +63,10 @@ switch the voice on. The bot instead limits how often one person can address it 
 - The voice never sees names or Slack ids. Places and numbers about a person appear only in private replies.
 - Rewards are not announced while `rewards.announced` is `false`.
 - Distress messages get a plain reply and an alert to the organizers. No joke, no roast.
-- Every German phrase comes from the approved table and is written with an inline English gloss; the voice may
-  use German only through approved phrase ids.
-
-## Operations
-
-Full steps are in `docs/RUNBOOK.md`. In short:
-
-- **Deploy:** `docker compose up -d`, or the hardened systemd unit in `deploy/goose.service` (users, paths and
-  hardening are in the runbook).
-- **Backups:** back up the database and the audit file together, daily, while the gateway runs
-  (`sqlite3 data/goose.db ".backup ..."`). The database is in WAL mode, so `.backup` is safe live.
-- **Restore drill:** copy the newest backup and its audit file back, start the gateway, then check
-  `/goose results week` and `/goose audit 5`. Run it before the shadow weeks and once a term.
-- **Kill switches:** `/goose pause` stops all scoring, posts and reactions; `/goose voice off` leaves the core
-  running on canned lines.
 
 ## Documentation
 
-- `docs/PLAN.md`: behavior, scoring, safety, phases and the audit re-triage (the gateway, core and voice split)
-- `docs/APPENDIX_VOICE.md`: the approved voice lines and the 36 case eval set that runs in CI
-- `docs/RUNBOOK.md`: deploy (Docker and systemd), env vars, backups, the restore drill, Monday checklist and incidents
+- `docs/PLAN.md`: behavior, scoring, safety, phases and the audit re-triage
+- `docs/RUNBOOK.md`: deploy, backups, restore, Monday checklist, incidents
 - `docs/CONTRIBUTING.md`: setup, tests, style, how to change a scoring rule
 - `BUILD_SPEC.md`: how the code is organized and built

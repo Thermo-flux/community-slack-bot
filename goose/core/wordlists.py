@@ -4,6 +4,19 @@ All matching is whole-word and case-insensitive. Multi-word entries match as phr
 """
 from __future__ import annotations
 
+import re
+
+# Token-like strings that must never reach a prompt, a log or a Slack post. Compiled regexes, shared by the gateway
+# (redaction of user text) and the voice prompt builder (defense in depth).
+SECRET_PATTERNS = [
+    re.compile(r"xox[abpr]-[A-Za-z0-9-]{10,}"),                 # Slack bot, user, app and refresh tokens
+    re.compile(r"xapp-[A-Za-z0-9-]{10,}"),                      # Slack app-level tokens
+    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),                       # OpenAI-style secret keys
+    re.compile(r"AIza[0-9A-Za-z_-]{20,}"),                      # Google API keys
+    re.compile(r"AKIA[0-9A-Z]{16}"),                            # AWS access key ids
+    re.compile(r"[A-Za-z0-9+/=_-]{40,}"),                       # long base64-like runs with no spaces
+]
+
 # Reward wording. The strong words are blocked in every voice mode while rewards.announced is false.
 REWARD_CORE = [
     "reward", "rewards", "prize", "prizes", "trophy", "badge", "merch", "sticker", "stickers",
@@ -26,9 +39,8 @@ CLAIM_PATTERNS = [
 
 # Words that make a reply "about the duck's own stats". Numbers near these must come from the card.
 STAT_WORDS = [
-    "crumbs", "crumb", "pond level", "rank", "ranks", "ranked", "ranking", "rankings", "standing", "standings",
-    "leaderboard", "streak", "busiest", "top 3", "top three", "top 10", "top ten", "your level", "your week",
-    "this week", "last week", "your score",
+    "crumbs", "crumb", "pond level", "rank", "ranks", "ranked", "ranking", "rankings", "leaderboard", "streak",
+    "busiest", "your level", "your week", "this week", "last week", "your score", "stars",
 ]
 
 # Program words. Blocked in voice output, and they trigger the redirect gate on input.
@@ -47,7 +59,9 @@ PROGRAM_CONTEXT_PATTERNS = [r"\bloadout\b", r"\bthe program\b", r"\bysws\b"]
 THREAT_WORDS = ["timeout", "time out", "ban", "banned", "mute", "muted", "suspend", "suspended", "punish", "punished"]
 
 BANNED_IDIOMS = ["lame duck", "ugly duckling", "dumme gans", "ja, ja", "na ja", "alles klar", "passt"]
-PROFANITY = ["damn", "hell", "shit", "fuck", "fucking", "bitch", "crap", "bastard", "asshole"]
+PROFANITY = ["damn", "shit", "fuck", "fucking", "bitch", "crap", "bastard", "asshole"]
+# Whole-word insults. Always blocked in voice output, in every mode.
+INSULT_WORDS = ["stupid", "dumb", "idiot", "idiots", "moron", "loser", "pathetic", "useless"]
 
 # German words that must never appear outside an approved {de:id} placeholder in voice output.
 GERMAN_STOPWORDS = [

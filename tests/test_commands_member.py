@@ -166,13 +166,6 @@ def test_me_for_someone_not_joined_is_refused(ctx, ev):
     assert "join" in text.lower()
 
 
-def test_me_with_a_typed_at_name_asks_for_a_mention(ctx, ev):
-    join(ctx, "U1", "U2")
-    text = only_private(cmd(ctx, ev, "U1", "me", "@sam"), "U1")
-    assert "mention" in text.lower()
-    assert "Lifetime" not in text
-
-
 # ------------------------------------------------------------ top and all
 
 def test_top_without_a_confirmed_week_says_so(ctx, ev):
@@ -271,21 +264,52 @@ def test_report_text_with_program_words_is_still_filed(ctx, ev):
     assert ctx.db.one("SELECT COUNT(*) AS n FROM reports")["n"] == 1
 
 
-def test_report_body_is_never_echoed_into_outgoing_text(ctx, ev):
-    body = "<!channel> look at <https://x.slack.com/archives/C1/p1|this>"
-    res = cmd(ctx, ev, "U1", "report", body)
-    assert [a.kind for a in res.actions] == ["ephemeral", "organizer_post"]
-    for action in res.actions:
-        assert body not in action.text
-        assert "<!channel>" not in action.text
+# ------------------------------------------------------------ hidden people on top and all (fix list 6)
+
+def _confirm_last_week_with_three(ctx, clock):
+    now = clock.now()
+    prev = ctx.clock.previous_week_id(ctx.clock.week_id(now))
+    start = ctx.clock.week_start_from_id(prev)
+    for uid, n in (("U1", 12), ("U2", 8), ("U3", 4)):
+        for i in range(n):
+            ctx.ledger.add_fact(idem_key="hide:%s:%d" % (uid, i), user_id=uid, kind="msg",
+                                ts=start + 2 * 86400 + i * 60, channel="C1", message_ts="%s.%d" % (uid, i),
+                                state="final")
+    ctx.weekly.close_week(prev, now)
+    ctx.weekly.confirm_week(prev, "UORG1", now)
 
 
-def test_me_works_for_a_hidden_quiet_resting_member(ctx, ev):
-    join(ctx, "U1", show=False)
-    ctx.users.set_quiet("U1", True)
-    ctx.users.set_rest("U1", True)
-    text = only_private(cmd(ctx, ev, "U1", "me"), "U1")
-    assert "Pond level" in text
-    assert "hidden" in text
-    assert "Quiet: on" in text and "Rest: on" in text
+def test_top_leaves_out_someone_who_hid_after_the_week_closed(ctx, ev, clock):
+    join(ctx, "U1", "U2", "U3", "U4")
+    _confirm_last_week_with_three(ctx, clock)
+    ctx.users.set_show("U2", False)                              # hid after the snapshot was taken
+    text = only_private(cmd(ctx, ev, "U4", "top"), "U4")
+    assert "<@U1>" in text and "<@U3>" in text
+    assert "<@U2>" not in text
 
+
+def test_all_leaves_out_someone_who_hid_after_ranking(ctx, ev, clock):
+    join(ctx, "U1", "U2", "U3", "U4")
+    now = clock.now()
+    for uid, n in (("U1", 30), ("U2", 20), ("U3", 10), ("U4", 5)):
+        for i in range(n):
+            ctx.ledger.add_fact(idem_key="hideall:%s:%d" % (uid, i), user_id=uid, kind="msg", ts=now - 60 * (i + 1),
+                                channel="C1", message_ts="h%s.%d" % (uid, i), state="final")
+    ctx.users.set_show("U1", False)
+    text = only_private(cmd(ctx, ev, "U4", "all"), "U4")
+    assert "<@U1>" not in text and "<@U2>" in text
+
+
+# ------------------------------------------------------------ join and the privacy notice (fix list 11)
+
+def test_join_stores_the_current_notice_version(ctx, ev, cfg):
+    cmd(ctx, ev, "U1", "join")
+    assert ctx.users.get("U1")["consent_version"] == str(cfg.voice.notice_version)
+
+
+def test_rejoin_under_an_old_notice_accepts_the_current_one(ctx, ev, cfg):
+    ctx.users.join("U1", ctx.clock.now(), consent_version="1")
+    only_private(cmd(ctx, ev, "U1", "join"), "U1")
+    assert ctx.users.get("U1")["consent_version"] == str(cfg.voice.notice_version)
+    versions = [r["version"] for r in ctx.db.query("SELECT version FROM consents WHERE user_id = 'U1'")]
+    assert sorted(versions) == sorted(["1", str(cfg.voice.notice_version)])

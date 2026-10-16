@@ -121,6 +121,8 @@ CREATE TABLE IF NOT EXISTS voice_person (user_id TEXT NOT NULL, ts REAL NOT NULL
 CREATE INDEX IF NOT EXISTS idx_voice_person ON voice_person(user_id, ts);
 
 CREATE TABLE IF NOT EXISTS consents (user_id TEXT NOT NULL, version TEXT NOT NULL, ts REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS posted_texts (channel TEXT NOT NULL, ts REAL NOT NULL, text TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_posted_texts ON posted_texts(channel, ts);
 """
 
 

@@ -21,6 +21,7 @@ from goose.config import Config
 from goose.core.clock import Clock
 from goose.core.db import Database
 from goose.types import VoiceResult
+from goose.voice.server import sign_request
 
 log = logging.getLogger("goose.voice_client")
 
@@ -31,12 +32,12 @@ MIN_JUNK_SAMPLE = 10
 BREAKER_FAILURE_REASONS = ("timeout", "network", "junk")
 _CODE = re.compile(r"^[a-z_0-9]{1,24}$")
 
-PostFn = Callable[[str, Dict[str, Any], Dict[str, str], float], Tuple[int, Dict[str, Any]]]
+# http_post(url, body_bytes, headers, timeout) -> (status, json). body_bytes is the exact JSON that is signed and sent.
+PostFn = Callable[[str, bytes, Dict[str, str], float], Tuple[int, Dict[str, Any]]]
 
 
-def _default_post(url: str, body: Dict[str, Any], headers: Dict[str, str], timeout: float) -> Tuple[int, Dict[str, Any]]:
-    data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+def _default_post(url: str, body: bytes, headers: Dict[str, str], timeout: float) -> Tuple[int, Dict[str, Any]]:
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             status = int(resp.status)
@@ -68,8 +69,9 @@ def _is_int(value: Any) -> bool:
 class VoiceClient:
     def __init__(self, config: Config, db: Database, clock: Clock, secret: str = "",
                  http_post: Optional[PostFn] = None):
-        """http_post(url, json_body, headers, timeout) -> (status, json) is injectable for tests; the default uses
-        urllib.request. The shared secret goes in the header X-Voice-Secret and is never logged."""
+        """http_post(url, body_bytes, headers, timeout) -> (status, json) is injectable for tests; the default uses
+        urllib.request. Each request is signed with the shared secret (X-Goose-Timestamp and X-Goose-Signature). The
+        secret itself is never sent, logged or put in an error."""
         self._config = config
         self._db = db
         self._clock = clock
@@ -210,13 +212,19 @@ class VoiceClient:
         voice = self._config.voice
         rid = str(request.get("request_id") or "")
         url = voice.url.rstrip("/") + "/v1/voice"
-        headers = {"Content-Type": "application/json", "X-Voice-Secret": self._secret}
+        body = json.dumps(request, separators=(",", ":")).encode("utf-8")
+        timestamp = int(self._clock.now())
+        headers = {
+            "Content-Type": "application/json",
+            "X-Goose-Timestamp": str(timestamp),
+            "X-Goose-Signature": sign_request(self._secret, timestamp, body),
+        }
         started = self._monotonic()
         status: Optional[int] = None
         data: Any = None
         error = ""
         try:
-            status, data = self._http_post(url, request, headers, float(voice.timeout_s))
+            status, data = self._http_post(url, body, headers, float(voice.timeout_s))
         except Exception as exc:  # classified by kind only; the message is never logged
             error = "timeout" if _is_timeout(exc) else "network"
         latency = max(0.0, self._monotonic() - started)

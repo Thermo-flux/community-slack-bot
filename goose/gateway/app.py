@@ -6,14 +6,15 @@ Logging never includes message text, tokens or secrets: only reason codes.
 from __future__ import annotations
 
 import argparse
-import inspect
 import logging
 import os
 import signal
 import sys
 import threading
+import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from goose import __version__
 from goose.core.db import Database
@@ -30,6 +31,11 @@ DEFAULT_CONFIG = "config/goose.yaml"
 BOT_PREFIX = "xoxb-"
 APP_PREFIX = "xapp-"
 SLASH_COMMAND = "/goose"
+STALE_JOB_S = 6.0               # a voice job older than this (since admission) posts the canned line, no call
+RECENT_TEXT_S = 86400           # posted texts remembered per channel for the no-repeat check
+THREAD_CACHE_MAX = 500          # thread lookups remembered (oldest dropped)
+THREAD_EXCERPT_MAX = 6          # earlier thread messages sent with an addressed message
+OFFICIAL_CHANNEL_NAME = "loadout"
 
 
 # ------------------------------------------------------------------------------------------------ heartbeat lock
@@ -73,6 +79,130 @@ def check_tokens(bot_token: str, app_token: str) -> List[str]:
     return problems
 
 
+# ------------------------------------------------------------------------------------------------ official channel
+
+def verify_official_channel(client: Any, channel_id: str, expected_name: str = OFFICIAL_CHANNEL_NAME) -> bool:
+    """True only when Slack says the channel is public and named expected_name. Empty ids, wildcards and any Slack error
+    give False; only the error code is logged."""
+    if not channel_id or str(channel_id).strip() in ("", "*"):
+        return False
+    try:
+        info = client.conversations_info(channel=channel_id)["channel"]
+        return info.get("name") == expected_name and info.get("is_private") is False
+    except Exception as exc:
+        log.error("official channel check failed: %s", slack_io._error_code(exc))
+        return False
+
+
+# ------------------------------------------------------------------------------------------------ voice admission
+
+class VoiceAdmission:
+    """Counts voice jobs that are admitted and not yet finished (running or queued). A job is refused at the limit."""
+
+    def __init__(self, limit: int):
+        self.limit = max(1, int(limit))
+        self._pending = 0
+        self._lock = threading.Lock()
+
+    @property
+    def pending(self) -> int:
+        with self._lock:
+            return self._pending
+
+    def try_admit(self) -> bool:
+        with self._lock:
+            if self._pending >= self.limit:
+                return False
+            self._pending += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            if self._pending > 0:
+                self._pending -= 1
+
+
+def _admission_limit(ctx: Any) -> int:
+    voice = ctx.config.voice
+    return max(1, int(voice.concurrency)) + max(0, int(voice.queue_size))
+
+
+# ------------------------------------------------------------------------------------------------ thread lookups
+
+def _messages(resp: Any) -> List[Dict[str, Any]]:
+    """The message dicts of a Slack response, or [] when the response has none."""
+    try:
+        raw = resp["messages"]
+    except (KeyError, TypeError, IndexError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [m for m in raw if isinstance(m, dict)]
+
+
+class ThreadLookup:
+    """Fills thread_parent_user and thread_excerpt for thread replies, and resolves reactions on thread replies.
+    Any Slack error leaves the fields empty and is logged by error code only. Results are cached (oldest dropped)."""
+
+    def __init__(self, client: Any, max_entries: int = THREAD_CACHE_MAX):
+        self._client = client
+        self._max = max(1, int(max_entries))
+        self._cache: "OrderedDict[Tuple[str, str, str], str]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def _get(self, key: Tuple[str, str, str]) -> Optional[str]:
+        with self._lock:
+            return self._cache.get(key)
+
+    def _put(self, key: Tuple[str, str, str], value: str) -> None:
+        with self._lock:
+            self._cache[key] = value
+            while len(self._cache) > self._max:
+                self._cache.popitem(last=False)
+
+    def enrich(self, event: Event) -> None:
+        try:
+            if event.kind == "message" and event.thread_ts:
+                self._message(event)
+            elif event.kind == "reaction_added" and event.message_ts:
+                self._reaction(event)
+        except Exception as exc:
+            log.warning("thread lookup failed: %s", slack_io._error_code(exc))
+
+    def _message(self, event: Event) -> None:
+        messages = _messages(self._client.conversations_replies(channel=event.channel, ts=event.thread_ts, limit=7))
+        if not messages:
+            return
+        parent_user = str(messages[0].get("user") or "")
+        texts = [str(m.get("text") or "") for m in messages if str(m.get("ts") or "") != event.message_ts]
+        texts = [t for t in texts if t]
+        self._put(("parent", event.channel, event.thread_ts), parent_user)
+        event.thread_parent_user = parent_user
+        event.thread_excerpt = texts[-THREAD_EXCERPT_MAX:]
+
+    def _reaction(self, event: Event) -> None:
+        key = ("thread", event.channel, event.message_ts)
+        thread_ts = self._get(key)
+        if thread_ts is None:
+            history = _messages(self._client.conversations_history(
+                channel=event.channel, latest=event.message_ts, inclusive=True, limit=1))
+            thread_ts = ""
+            if history and str(history[0].get("ts") or "") == event.message_ts:
+                candidate = str(history[0].get("thread_ts") or "")
+                if candidate and candidate != event.message_ts:
+                    thread_ts = candidate
+            self._put(key, thread_ts)
+        if not thread_ts:
+            return
+        parent = self._get(("parent", event.channel, thread_ts))
+        if parent is None:
+            replies = _messages(self._client.conversations_replies(channel=event.channel, ts=thread_ts, limit=1))
+            parent = str(replies[0].get("user") or "") if replies else ""
+            self._put(("parent", event.channel, thread_ts), parent)
+        event.thread_ts = thread_ts
+        event.thread_parent_user = parent
+
+
 # ------------------------------------------------------------------------------------------------ wiring
 
 def _inline(fn: Callable[..., Any], *args: Any) -> None:
@@ -101,57 +231,132 @@ def _names_for(ctx: Any, job: VoiceJob) -> Dict[str, str]:
     return names
 
 
-def _call_voice(voice: Any, request: Dict[str, Any], user_id: str) -> VoiceResult:
-    """Call voice.call with user_id, but only when the callable accepts it. Test doubles may implement call(request)
-    only; the real VoiceClient takes an optional user_id."""
+def _is_paused(ctx: Any) -> bool:
+    """The kill switch: settings 'paused' == '1'. Fails closed when the database cannot be read."""
+    db = getattr(ctx, "db", None)
+    if db is None:
+        return False
     try:
-        params = inspect.signature(voice.call).parameters
-    except (TypeError, ValueError):
-        params = {}
-    accepts_user = "user_id" in params or any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
-    if accepts_user:
-        return voice.call(request, user_id=user_id)
-    return voice.call(request)
+        return db.get_setting("paused", "0") == "1"
+    except Exception as exc:
+        log.error("pause state unreadable: %s", type(exc).__name__)
+        return True
 
 
-def run_voice_job(ctx: Any, client: Any, job: VoiceJob) -> None:
-    """Call the voice, post-filter, then post (or the canned fallback). Never raises."""
-    voice = ctx.voice_client
+def _recent_texts(ctx: Any, channel: str) -> List[str]:
+    db = getattr(ctx, "db", None)
+    if db is None:
+        return []
     try:
-        if voice is None:
-            vr = VoiceResult(ok=False, reason="disabled")
-        else:
-            vr = _call_voice(voice, job.request, job.user)
-        names = _names_for(ctx, job)
-        post_filter = PostFilter(ctx.config, ctx.lines)
-        message = (job.request.get("input") or {}).get("message") or {}
-        user_text = str(message.get("text") or "")
-        if vr.ok and voice is not None:
-            checked = post_filter.check(vr.response or {}, job.request, user_text=user_text, names=names)
-            if not checked.ok:
-                voice.mark_junk(str(job.request.get("request_id") or ""))
-        actions = finalize(job, vr, post_filter, ctx.lines, names=names)
-        slack_io.execute(client, actions, job.channel)
+        rows = db.query("SELECT text FROM posted_texts WHERE channel = ? AND ts > ? ORDER BY ts",
+                        (channel, float(ctx.clock.now()) - RECENT_TEXT_S))
+    except Exception as exc:
+        log.warning("recent texts unavailable: %s", type(exc).__name__)
+        return []
+    return [str(row["text"]) for row in rows]
+
+
+def _remember_post(ctx: Any, channel: str, text: str) -> None:
+    db = getattr(ctx, "db", None)
+    if db is None or not text:
+        return
+    try:
+        db.execute("INSERT INTO posted_texts (channel, ts, text) VALUES (?, ?, ?)",
+                   (channel, float(ctx.clock.now()), text))
+    except Exception as exc:
+        log.warning("posted text not remembered: %s", type(exc).__name__)
+
+
+def run_voice_job(ctx: Any, client: Any, job: VoiceJob, now_fn: Optional[Callable[[], float]] = None,
+                  admission: Optional[VoiceAdmission] = None) -> None:
+    """Call the voice, post-filter, then post (or the canned fallback). Never raises. Posts nothing while paused.
+    A job admitted more than STALE_JOB_S ago skips the voice and posts the fallback. `now_fn` is the monotonic clock
+    (injected in tests). `admission` is released when the job ends, also after an exception."""
+    try:
+        _run_job(ctx, client, job, now_fn or time.monotonic)
     except Exception as exc:
         log.error("voice job failed: %s", type(exc).__name__)
+    finally:
+        if admission is not None:
+            admission.release()
+
+
+def _run_job(ctx: Any, client: Any, job: VoiceJob, clock_fn: Callable[[], float]) -> None:
+    if _is_paused(ctx):
+        return
+    voice = ctx.voice_client
+    stale = bool(job.created_ts) and clock_fn() - job.created_ts > STALE_JOB_S
+    if voice is None:
+        vr = VoiceResult(ok=False, reason="disabled")
+    elif stale:
+        vr = VoiceResult(ok=False, reason="stale")
+    else:
+        vr = voice.call(job.request, user_id=job.user)
+    names = _names_for(ctx, job)
+    post_filter = PostFilter(ctx.config, ctx.lines)
+    message = (job.request.get("input") or {}).get("message") or {}
+    user_text = str(message.get("text") or "")
+    recent = _recent_texts(ctx, job.channel)
+    filtered_ok = False
+    if vr.ok and voice is not None:
+        checked = post_filter.check(vr.response or {}, job.request, user_text=user_text, names=names,
+                                    recent_texts=recent)
+        filtered_ok = checked.ok
+        if not checked.ok:
+            voice.mark_junk(str(job.request.get("request_id") or ""))
+    actions = finalize(job, vr, post_filter, ctx.lines, names=names, recent_texts=recent)
+    errors = slack_io.execute(client, actions, job.channel)
+    if filtered_ok and not errors:
+        for action in actions:
+            if action.kind == "post":
+                _remember_post(ctx, action.channel or job.channel, action.text)
+
+
+def _post_canned_now(ctx: Any, client: Any, job: VoiceJob, reason: str) -> None:
+    names = _names_for(ctx, job)
+    actions = finalize(job, VoiceResult(ok=False, reason=reason), PostFilter(ctx.config, ctx.lines), ctx.lines,
+                       names=names)
+    slack_io.execute(client, actions, job.channel)
 
 
 def build_handlers(ctx: Any, router: Any, client: Any, *, submit: Optional[Callable[..., Any]] = None,
-                   voice_submit: Optional[Callable[..., Any]] = None) -> Dict[str, Callable[..., None]]:
+                   voice_submit: Optional[Callable[..., Any]] = None,
+                   now_fn: Optional[Callable[[], float]] = None,
+                   voice_limit: Optional[int] = None) -> Dict[str, Callable[..., None]]:
     """Plain callables for each Slack listener. Each one normalizes its payload, then hands the work to `submit`
     (a worker pool in production; a direct call in tests). Slack is acknowledged before submit runs. Returns a dict with
-    keys: message, app_mention, reaction_added, reaction_removed, member_joined_channel, command (takes body, ack)."""
+    keys: message, app_mention, reaction_added, reaction_removed, member_joined_channel, command (takes body, ack).
+    Thread lookups fill the event before routing. Each voice job is admitted (counted) before it is submitted; when
+    voice_limit (default concurrency + queue_size) jobs are pending, the job gets its canned line at once. `now_fn` is
+    the monotonic clock used for admission times and stale checks."""
     submit_fn = submit or _inline
     voice_fn = voice_submit or _inline
+    clock_fn = now_fn or time.monotonic
     bot_id = str(ctx.bot_user_id or "")
+    admission = VoiceAdmission(voice_limit if voice_limit is not None else _admission_limit(ctx))
+    lookup = ThreadLookup(client)
+
+    def admit(job: VoiceJob) -> None:
+        if _is_paused(ctx):
+            return
+        if not admission.try_admit():
+            log.info("voice queue full, canned line posted")
+            _post_canned_now(ctx, client, job, "queue_full")
+            return
+        job.created_ts = clock_fn()
+        try:
+            voice_fn(run_voice_job, ctx, client, job, clock_fn, admission)
+        except BaseException:
+            admission.release()
+            raise
 
     def process(event: Event) -> None:
         try:
+            lookup.enrich(event)
             result: Result = router.handle(event)
             slack_io.execute(client, result.actions, event.channel)
             for job in result.jobs:
-                voice_fn(run_voice_job, ctx, client, job)
+                admit(job)
         except Exception as exc:
             log.error("event %s failed: %s", event.kind, type(exc).__name__)
 
@@ -199,7 +404,7 @@ def make_deliver(ctx: Any, client: Any) -> Callable[[Result], None]:
 # ------------------------------------------------------------------------------------------------ check and start
 
 def check_config(path: str) -> List[str]:
-    """Problems with the config file and lines.yaml (empty list when all is well). Needs no Slack tokens."""
+    """Validation problems with the config file and lines.yaml (empty list when all is well). Needs no Slack tokens."""
     from goose.config import ConfigError, load_config
     from goose.core.lines import LineBank
 
@@ -214,9 +419,20 @@ def check_config(path: str) -> List[str]:
     return []
 
 
+def setup_problems(path: str) -> List[str]:
+    """Setup gaps (config.missing_setup) for a config that validates. Empty when the file does not load."""
+    from goose.config import ConfigError, load_config, missing_setup
+
+    try:
+        cfg = load_config(path)
+    except ConfigError:
+        return []
+    return missing_setup(cfg)
+
+
 def run_gateway(config_path: str) -> int:
     """The real start path. Returns a process exit code."""
-    from goose.config import ConfigError, load_config
+    from goose.config import ConfigError, load_config, missing_setup
     from goose.core.clock import Clock
     from goose.core.context import build_context
     from goose.core.lines import LineBank
@@ -235,6 +451,11 @@ def run_gateway(config_path: str) -> int:
     except (ConfigError, ValueError, OSError) as exc:
         log.error("config problem: %s", type(exc).__name__)
         return 2
+    gaps = missing_setup(cfg)
+    if gaps:
+        for gap in gaps:
+            log.error("not configured yet: %s", gap)
+        return 2
 
     try:
         from slack_bolt import App
@@ -249,6 +470,13 @@ def run_gateway(config_path: str) -> int:
         log.error("another gateway is running (heartbeat is fresh); refusing to start")
         ctx.db.close()
         return 3
+    # Startup reconcile: promote holds that have passed, heal week ids, and invalidate stale unannounced boards.
+    # Both steps are idempotent, so a restart replays nothing.
+    try:
+        ctx.ledger.reconcile(clock.now())
+        ctx.weekly.reconcile(clock.now())
+    except Exception as exc:  # reconcile must never stop the gateway; the reason code only
+        log.error("startup reconcile failed: %s", type(exc).__name__)
 
     bot_token = os.environ["SLACK_BOT_TOKEN"]
     app_token = os.environ["SLACK_APP_TOKEN"]
@@ -262,6 +490,13 @@ def run_gateway(config_path: str) -> int:
         release_heartbeat(ctx.db)
         ctx.db.close()
         return 2
+    for channel_id in cfg.channels.scored:
+        if not verify_official_channel(app.client, channel_id):
+            log.error("a scored channel is not the official public channel named %s; refusing to start",
+                      OFFICIAL_CHANNEL_NAME)
+            release_heartbeat(ctx.db)
+            ctx.db.close()
+            return 2
 
     router = Router(ctx)
     client = app.client
@@ -342,14 +577,16 @@ def run_gateway(config_path: str) -> int:
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI. Options: --config PATH (default config/goose.yaml), --check-config (validate config and lines.yaml, print OK or the
     problems, exit 0 or 1, no Slack), --version.
-    Normal start: load config (fail closed), read SLACK_BOT_TOKEN and SLACK_APP_TOKEN from the environment (refuse to start if
-    missing or wrong prefix), build_context, take a database heartbeat lock (refuse a second gateway), create VoiceClient
-    (secret from the env var named in config.voice.secret_env), auth.test to learn the bot user id, register handlers:
-    message, app_mention, reaction_added, reaction_removed, member_joined_channel, and the /goose command (ack() first,
-    then process). Each handler: normalize -> Router.handle (in a worker thread so Slack is acknowledged first) ->
-    slack_io.execute(actions) -> for each VoiceJob submit to a ThreadPoolExecutor(config.voice.concurrency) that calls
-    VoiceClient.call, poster.finalize, then execute. Start the Scheduler thread. Handle SIGINT/SIGTERM cleanly.
-    Logging never includes message text, tokens or secrets."""
+    --check-config prints "OK" when all is set up; when only setup gaps remain it prints "OK, not configured yet:" and the
+    gaps, and exits 0. Normal start: load config (fail closed), refuse while setup gaps exist, read SLACK_BOT_TOKEN and
+    SLACK_APP_TOKEN from the environment (refuse to start if missing or wrong prefix), build_context, take a database
+    heartbeat lock (refuse a second gateway), create VoiceClient (secret from the env var named in config.voice.secret_env),
+    auth.test to learn the bot user id, verify every scored channel is the public channel named loadout, register
+    handlers: message, app_mention, reaction_added, reaction_removed, member_joined_channel, and the /goose command
+    (ack() first, then process). Each handler: normalize -> thread lookups -> Router.handle (in a worker thread so Slack is
+    acknowledged first) -> slack_io.execute(actions) -> for each VoiceJob, admit it (at most concurrency + queue_size
+    pending) and submit to a ThreadPoolExecutor(config.voice.concurrency) that calls run_voice_job. Start the Scheduler
+    thread. Handle SIGINT/SIGTERM cleanly. Logging never includes message text, tokens or secrets."""
     parser = argparse.ArgumentParser(prog="goose-lee", description="The goose-lee gateway.")
     parser.add_argument("--config", default=DEFAULT_CONFIG, help="path to the YAML config (default %s)" % DEFAULT_CONFIG)
     parser.add_argument("--check-config", action="store_true",
@@ -366,6 +603,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             for p in problems:
                 print(p)
             return 1
+        gaps = setup_problems(args.config)
+        if gaps:
+            print("OK, not configured yet:")
+            for gap in gaps:
+                print("  - %s" % gap)
+            return 0
         print("OK")
         return 0
 

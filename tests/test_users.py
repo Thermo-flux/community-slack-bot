@@ -221,29 +221,44 @@ def test_is_frozen_reads_frozen_until_only(users, clock):
     assert users.is_frozen("U1", clock.now())
 
 
-# ---------------------------------------------------------------- v6 organizer-star gate
-
-def test_has_organizer_star_reads_non_voided_stars(users, ledger, clock):
-    users.join("U1", clock.now())
-    assert users.has_organizer_star("U1") is False
-    fid = ledger.add_fact(idem_key="s1", user_id="U1", kind="star", ts=clock.now(), actor="UORG1")
-    assert users.has_organizer_star("U1") is True
-    ledger.void_fact(fact_id=fid, actor="UORG1", reason="mistake", now=clock.now())
-    assert users.has_organizer_star("U1") is False
-
-
-def test_has_organizer_star_counts_bigstars_and_pending(users, ledger, clock):
-    users.join("U1", clock.now())
-    ledger.add_fact(idem_key="b1", user_id="U1", kind="bigstar", ts=clock.now(), actor="UORG1")
-    assert users.has_organizer_star("U1") is True
-
-
-def test_has_organizer_star_is_false_for_unknown(users):
-    assert users.has_organizer_star("UNKNOWN") is False
+def test_leave_scrubs_published_results_and_snapshots(db, users, ledger, weekly, clock):
+    """A departed member's id must not survive in stored snapshots, confirmers or results."""
+    import json
+    users.join("UGONE", clock.now())
+    users.set_show("UGONE", True)
+    ledger.add_fact(idem_key="s1", user_id="UGONE", kind="msg", ts=clock.now(), state="final")
+    week = clock.week_id(clock.now())
+    db.execute("INSERT INTO week_status(week_id, state, snapshot_json, confirmers_json) VALUES(?,?,?,?)",
+               (week, "confirmed", json.dumps([{"user_id": "UGONE", "total": 5.0}]), json.dumps(["UGONE"])))
+    db.execute("INSERT INTO results(scope, week_id, rank, user_id, total) VALUES('week', ?, 1, 'UGONE', 5.0)", (week,))
+    assert users.leave("UGONE", clock.now())
+    row = db.one("SELECT snapshot_json, confirmers_json FROM week_status WHERE week_id=?", (week,))
+    assert "UGONE" not in row["snapshot_json"] and "UGONE" not in row["confirmers_json"]
+    assert db.one("SELECT 1 FROM results WHERE user_id='UGONE'") is None
+    assert db.one("SELECT 1 FROM results WHERE rank=1") is not None
 
 
-def test_has_organizer_star_ignores_other_fact_kinds(users, ledger, clock):
-    users.join("U1", clock.now())
-    add_msg(ledger, "U1", clock.now(), "m1")
-    ledger.add_fact(idem_key="t1", user_id="U1", kind="thanks", ts=clock.now(), counterparty="U2")
-    assert users.has_organizer_star("U1") is False
+def test_leave_deletes_the_reports_the_person_wrote(users, db, clock):
+    users.join("UREPORTER", clock.now())
+    users.join("UOTHER", clock.now())
+    now = clock.now()
+    db.execute("INSERT INTO reports (user_id, kind, text, opened_ts, due_ts) VALUES ('UREPORTER', 'report', 'x', ?, ?)",
+               (now, now + DAY))
+    db.execute("INSERT INTO reports (user_id, kind, text, opened_ts, due_ts) VALUES ('UOTHER', 'report', 'y', ?, ?)",
+               (now, now + DAY))
+    assert users.leave("UREPORTER", now + 1) is True
+    assert db.one("SELECT COUNT(*) AS n FROM reports WHERE user_id = 'UREPORTER'")["n"] == 0
+    assert db.one("SELECT COUNT(*) AS n FROM reports WHERE user_id = 'UOTHER'")["n"] == 1
+
+
+def test_leave_blanks_the_person_in_voice_usage_and_keeps_the_counts(users, db, clock):
+    users.join("UVOICE", clock.now())
+    users.join("UKEEP", clock.now())
+    now = clock.now()
+    db.execute("INSERT INTO voice_usage (ts, user_id, kind, action, ok, tokens_in, tokens_out) "
+               "VALUES (?, 'UVOICE', 'addressed', 'speak', 1, 40, 12)", (now,))
+    db.execute("INSERT INTO voice_usage (ts, user_id, kind, action, ok, tokens_in, tokens_out) "
+               "VALUES (?, 'UKEEP', 'addressed', 'speak', 1, 5, 6)", (now,))
+    assert users.leave("UVOICE", now + 1)
+    rows = db.query("SELECT user_id, tokens_in FROM voice_usage ORDER BY tokens_in")
+    assert [(r["user_id"], r["tokens_in"]) for r in rows] == [("UKEEP", 5), ("", 40)]

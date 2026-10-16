@@ -95,14 +95,24 @@ def test_escape_text_escapes_ampersand_first(raw, expected):
 
 
 @pytest.mark.parametrize("text", ["<!here>", "<@U1>", "<#C1>", "<http://x.test>", "@channel hi", "@here",
-                                  "@everyone", "a < b", "x > y", "@sam", "A & B", "#loadout", "#", "a#b"])
+                                  "@everyone", "@sam is here", "@x is the busiest"])
 def test_forbidden_markup_is_detected(text):
     assert has_forbidden_markup(text) is True
 
 
-@pytest.mark.parametrize("text", ["Quak!", "Top three, quak.", "Rank #3 this week", "Mega {{de:mega}}", ""])
+@pytest.mark.parametrize("text", ["Quak!", "Top three, quak.", "Rank #3 this week", "Mega {{de:mega}}", "",
+                                  "Yes & no, depends on the fight", "Two plus two is 4, and 3 > 2", "a < b",
+                                  "#loadout", "a#b", "email me at a @ b"])
 def test_plain_text_and_rank_numbers_are_not_markup(text):
     assert has_forbidden_markup(text) is False
+
+
+def test_plain_ampersand_and_angle_brackets_are_escaped_not_refused(pf):
+    result = pf.check(reply("Yes & no, depends on the fight"), request())
+    assert result.ok is True and result.text == "Yes &amp; no, depends on the fight"
+    result = pf.check(reply("Two plus two is 4, and 3 > 2"), request())
+    assert result.ok is True and result.text == "Two plus two is 4, and 3 &gt; 2"
+    assert reason_of(pf, reply("Is 2 < 3? Quak.")) == "ok"
 
 
 def test_render_canned_expands_german_then_escapes():
@@ -203,8 +213,8 @@ def test_step2_mention_placeholder_without_name_rejects(pf):
 
 # ----- filter step 3: forbidden markup and control characters ----------------------------------------------------------
 
-@pytest.mark.parametrize("text", ["<!here> quak", "@channel quak", "see <http://x.test>", "#loadout quak",
-                                  "Quak & more", "@sam is here"])
+@pytest.mark.parametrize("text", ["<!here> quak", "@channel quak", "see <http://x.test>", "<@U1> hi", "<#C1> quak",
+                                  "@here quak"])
 def test_step3_markup_rejects(pf, text):
     assert reason_of(pf, reply(text)) == "markup"
 
@@ -345,6 +355,15 @@ def test_step7_weak_win_word_rejected_when_user_did_not_use_it(pf):
     assert reason_of(pf, reply("Bruce Lee won, quak."), user_text="who is Bruce Lee?") == "reward"
 
 
+def test_step7_weak_win_word_allowed_when_user_has_any_win_word(pf):
+    assert reason_of(pf, reply("Bruce Lee won, quak."), user_text="win?") == "ok"
+    assert reason_of(pf, reply("The winner is Bruce Lee, quak."), user_text="who is the winner?") == "ok"
+
+
+def test_step7_strong_reward_word_still_rejected_in_chat_with_win_in_user_text(pf):
+    assert reason_of(pf, reply("Stickers for the winner, quak."), user_text="who wins?") == "reward"
+
+
 def test_step7_claims_are_always_rejected(pf):
     assert reason_of(pf, reply("You've earned a lot of respect, quak.")) == "claim"
     assert reason_of(pf, reply("Congrats on winning, quak."), user_text="winning?") == "claim"
@@ -385,9 +404,17 @@ def test_step7_plain_chat_about_ducks_passes(pf):
     assert reason_of(pf, reply("Quak, the duck is here.")) == "ok"
 
 
-@pytest.mark.parametrize("text", ["See example.com for more.", "Go to https://x.test now.", "www.example.org"])
+@pytest.mark.parametrize("text", ["See example.com for more.", "Go to https://x.test now.", "www.example.org",
+                                  "Look at http:x quak.", "watch youtu.be/abc quak", "try bit.ly/xyz quak",
+                                  "t.co/abc quak", "goo.gl/maps quak", "see tinyurl.com quak", "join discord.gg/abc",
+                                  "read mysite.org/blog quak", "docs.example.dev/path quak"])
 def test_step7_urls_reject(pf, text):
     assert reason_of(pf, reply(text)) == "url"
+
+
+@pytest.mark.parametrize("text", ["2.5 is a decimal, quak.", "Mr. Smith is here, quak.", "Quak, 3.14 is pi."])
+def test_step7_plain_decimals_and_titles_pass(pf, text):
+    assert reason_of(pf, reply(text)) == "ok"
 
 
 # ----- filter step 8: rank lint ----------------------------------------------------------------------------------------
@@ -413,6 +440,25 @@ def test_step8_hash_rank_public_rejects(pf):
 
 def test_step8_hash_rank_without_flag_rejects(pf):
     assert reason_of(pf, reply("You are #3 this week.")) == "rank"
+
+
+def test_step8_bare_standing_is_not_a_rank_word(pf):
+    assert reason_of(pf, reply("Standing ovation for the duck, quak.")) == "ok"
+    assert reason_of(pf, reply("Your standings are fine, quak.")) == "ok"
+
+
+def test_step8_top_three_films_in_general_chat_passes(pf):
+    assert reason_of(pf, reply("Top 3 Bruce Lee films, quak"), user_text="who is bruce lee?") == "ok"
+
+
+def test_step8_top_three_next_to_a_community_stat_word_is_a_rank(pf):
+    assert reason_of(pf, reply("Top 3 this week, quak.")) == "rank"
+
+
+def test_step6_top_three_removed_from_stat_words_but_week_still_grounds_numbers(pf):
+    card = dict(CARD, streak_days=1, top_slots=5)          # no 3 anywhere on the card
+    assert reason_of(pf, reply("You are 3rd this week."), request(card=card)) == "number"
+    assert reason_of(pf, reply("You are 1st this week."), request(card=card)) == "ok"
 
 
 # ----- filter step 9: roast lint ---------------------------------------------------------------------------------------
@@ -473,6 +519,33 @@ def test_step11_animal_insult_aimed_at_a_person_rejects(pf):
 
 def test_step11_clean_praise_passes(pf):
     assert reason_of(pf, reply("Hella active, quak. Keep it up.")) == "ok"
+
+
+def test_hell_is_an_ordinary_word(pf):
+    assert reason_of(pf, reply("Hell of a fighter, quak.")) == "ok"
+
+
+@pytest.mark.parametrize("text", ["That is stupid, quak.", "You are a moron, quak.", "Idiots, quak.",
+                                  "Pathetic, quak.", "Quak, that is useless."])
+def test_insult_words_are_always_banned(pf, text):
+    assert reason_of(pf, reply(text), user_text="hi") == "insult"
+
+
+def test_third_party_roast_with_a_user_name_is_rejected(pf):
+    assert reason_of(pf, reply("Sam is dumb, quak."), user_text="tell Sam he is dumb") == "third_party"
+
+
+def test_third_party_praise_with_a_user_name_passes(pf):
+    assert reason_of(pf, reply("Sam is great, quak."), user_text="tell Sam he is dumb") == "ok"
+
+
+def test_name_from_user_with_no_roast_word_passes(pf):
+    assert reason_of(pf, reply("Bruce Lee is the best fighter, quak."), user_text="who is Bruce Lee?") == "ok"
+
+
+def test_roast_word_in_a_different_sentence_from_the_name_passes(pf):
+    assert reason_of(pf, reply("Bruce Lee was a legend. Lame jokes are not my thing, quak."),
+                     user_text="who is Bruce Lee?") == "ok"
 
 
 # ----- filter step 12: German only through placeholders ----------------------------------------------------------------

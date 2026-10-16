@@ -20,7 +20,6 @@ PRIVACY_LINE = (
 
 REPORT_WINDOW_S = 72 * 3600
 _SLACK_LINK = re.compile(r"archives/([A-Z0-9]+)/p(\d{7,})")
-_PLAIN_AT = re.compile(r"(?<!<)@[A-Za-z_]")
 
 # Plain structural replies. Not jokes, no German. Kept here so they are easy to move into lines.yaml as moments.
 PLAIN = {
@@ -43,8 +42,6 @@ PLAIN = {
                        "and organizers reply within 72 hours."),
     "not_on_board": "You are not on the all-time board yet.",
     "not_top10": "You are not in the top 10 this week.",
-    "plain_name": ("I read people from a mention, not from a typed name. Pick the person from the mention list, "
-                   "or use `/goose me` for your own page."),
 }
 
 HELP_TEXT = "\n".join([
@@ -140,9 +137,22 @@ def _help(ctx: AppContext, event: Event, args: str) -> Result:
 
 
 def _join(ctx: AppContext, event: Event, args: str) -> Result:
-    # join returns False when already joined; both cases get the same welcome line.
-    ctx.users.join(event.user, ctx.clock.now(), channel=event.channel)
-    return Result.of(_eph(event, _line(ctx, "join", allow_german=True)))
+    # Joining accepts the current privacy notice. A person who joined under an older notice re-accepts here.
+    now = ctx.clock.now()
+    notice = str(ctx.config.voice.notice_version)
+    if not ctx.users.join(event.user, now, channel=event.channel, consent_version=notice):
+        _accept_notice(ctx, event.user, notice, now)
+    return Result.of(_eph(event, _line(ctx, "join", allow_german=True) + "\n\n" + PRIVACY_LINE))
+
+
+def _accept_notice(ctx: AppContext, uid: str, version: str, now: float) -> None:
+    """Store the accepted notice version (and a consents row) for someone already joined under an older version."""
+    user = ctx.users.get(uid) or {}
+    if str(user.get("consent_version") or "") == version:
+        return
+    with ctx.db.tx():
+        ctx.db.execute("UPDATE users SET consent_version = ? WHERE user_id = ?", (version, uid))
+        ctx.db.execute("INSERT INTO consents (user_id, version, ts) VALUES (?,?,?)", (uid, version, float(now)))
 
 
 def _leave(ctx: AppContext, event: Event, args: str) -> Result:
@@ -232,8 +242,6 @@ def _me(ctx: AppContext, event: Event, args: str) -> Result:
     target = event.user
     header = ""
     ids = extract_user_ids(args)
-    if not ids and _PLAIN_AT.search(args):
-        return Result.of(_eph(event, PLAIN["plain_name"]))
     if ids and ids[0] != event.user:
         if not ctx.config.is_organizer(event.user):
             return Result.of(_eph(event, PLAIN["not_organizer"]))
@@ -252,9 +260,10 @@ def _top(ctx: AppContext, event: Event, args: str) -> Result:
         return Result.of(_eph(event, PLAIN["no_week"]))
     out = ["Top 3 this week (week %s):" % last.get("week_id", "")]
     top = list(last.get("top") or [])[:3]
-    if not top:
+    named = [(i, uid) for i, uid in enumerate(top, 1) if _shown_now(ctx, uid)]
+    if not named:
         out.append(PLAIN["no_board"])
-    for i, uid in enumerate(top, 1):
+    for i, uid in named:
         out.append("%d. <@%s>" % (i, uid))
     rows = list(last.get("rows") or [])
     idx = index_of(rows, event.user)
@@ -265,14 +274,20 @@ def _top(ctx: AppContext, event: Event, args: str) -> Result:
     return Result.of(_eph(event, "\n".join(out)))
 
 
+def _shown_now(ctx: AppContext, uid: Optional[str]) -> bool:
+    """Only people whose CURRENT show flag is on are named on a board (a snapshot can be older than a hide)."""
+    row = ctx.users.get(uid or "")
+    return bool(row and row.get("show"))
+
+
 def _all(ctx: AppContext, event: Event, args: str) -> Result:
-    top = ctx.weekly.alltime_ranking(limit=3)
+    full = ctx.weekly.alltime_ranking(limit=500)
+    top = [row for row in full if _shown_now(ctx, row_user_id(row))][:3]
     out = ["All-time top 3:"]
     if not top:
         out.append(PLAIN["no_board"])
     for i, row in enumerate(top, 1):
         out.append("%d. <@%s>" % (i, row_user_id(row)))
-    full = ctx.weekly.alltime_ranking(limit=500)
     idx = index_of(full, event.user)
     out.append("Your place: #%d." % (idx + 1) if idx is not None else PLAIN["not_on_board"])
     return Result.of(_eph(event, "\n".join(out)))

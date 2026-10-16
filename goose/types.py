@@ -44,6 +44,7 @@ class Event:
     thread_parent_user: str = ""    # author of the thread's parent message, if known
     previous_text: str = ""         # message_changed: the old text
     deleted_ts: str = ""            # message_deleted: ts of the deleted message
+    thread_excerpt: List[str] = field(default_factory=list)   # gateway-filled: up to 6 earlier thread texts, oldest first
 
 
 @dataclass
@@ -75,6 +76,7 @@ class VoiceJob:
     allow_german: bool = True
     allow_roast: bool = False
     reply_cap: int = 300
+    created_ts: float = 0.0         # monotonic time the job was admitted; the gateway drops stale jobs
 
 
 @dataclass

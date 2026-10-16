@@ -257,3 +257,15 @@ def test_execute_skips_ephemeral_without_user_and_unknown_kind_is_an_error():
     assert errors == [] and client.calls == []
     errors = slack_io.execute(client, [Action(kind="nonsense", channel="C1", text="x")], "")
     assert errors == ["ValueError"]
+
+
+def test_a_raising_post_is_sent_exactly_once_and_never_retried(caplog):
+    """A failed post is reported and not repeated: no retry loop in execute, even when the post raises."""
+    client = FakeClient(fail={"chat_postMessage": FakeSlackError("internal_error")})
+    actions = [Action(kind="post", channel="C1", text="hello once")]
+    with caplog.at_level("WARNING"):
+        errors = slack_io.execute(client, actions, "")
+    assert errors == ["internal_error"]
+    assert [c[0] for c in client.calls].count("chat_postMessage") == 1
+    assert len(client.calls) == 1
+    assert "internal_error" in caplog.text

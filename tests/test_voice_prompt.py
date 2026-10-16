@@ -5,6 +5,7 @@ import json
 import os
 import re
 
+from goose.voice import prompt
 from goose.voice.prompt import (APPROVED_DE_IDS, APPROVED_REACTIONS, SYSTEM_PROMPT, build_messages, max_tokens_for,
                                 redact)
 
@@ -130,6 +131,38 @@ def test_redact_removes_links_emails_and_mention_tokens():
     assert redact("mail someone@example.org") == "mail [redacted]"
     assert redact("hi <@U1234|x>") == "hi [redacted]"
     assert redact("plain words stay") == "plain words stay"
+
+
+FAKE_SLACK = "xoxb-1234567890-abcdefghijk"
+FAKE_OPENAI = "sk-abcdefghijklmnop1234"
+
+
+def test_secrets_in_user_text_and_thread_are_redacted_before_the_model_sees_them():
+    req = _request(input={"message": {"text": "my token is %s please" % FAKE_SLACK},
+                          "thread": ["key %s here" % FAKE_OPENAI]})
+    messages = build_messages(req)
+    user = _user_text(messages)
+    assert FAKE_SLACK not in user and FAKE_OPENAI not in user
+    assert user.count("[redacted]") >= 2
+    assert "my token is [redacted] please" in user
+
+
+def test_long_base64_run_is_redacted_but_normal_words_are_not():
+    run = "A" * 20 + "B" * 25
+    assert redact("blob " + run + " end") == "blob [redacted] end"
+    assert redact("a perfectly normal sentence, quak") == "a perfectly normal sentence, quak"
+
+
+def test_prompt_secret_patterns_match_the_gateway_list():
+    from goose.core import wordlists
+    mirrored = [p.pattern for p in prompt._SECRET_PATTERNS]
+    assert mirrored == [p.pattern for p in wordlists.SECRET_PATTERNS]
+
+
+def test_approved_de_ids_have_no_duplicates_and_are_snake_case():
+    assert len(APPROVED_DE_IDS) == len(set(APPROVED_DE_IDS))
+    for de_id in APPROVED_DE_IDS:
+        assert re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", de_id), de_id
 
 
 def test_placeholders_and_reactions_are_listed():

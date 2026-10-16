@@ -216,6 +216,16 @@ moments:
     - {id: PRF2, text: "That's it for the week. See you at the next Pond Report."}
     - {id: PRF3, text: "That's the week. {de:feierabend}! The duck is off to the bread.", de: [feierabend]}
 
+  consent_needed:
+    - {id: consent_1, text: "The duck needs you to accept the privacy notice again before it can answer you. Use `/goose join` to see it."}
+    - {id: consent_2, text: "The privacy notice changed, so the duck is quiet for you until you accept it. `/goose join` shows it."}
+    - {id: consent_3, text: "Quick admin: the duck needs a fresh yes to the privacy notice. `/goose join` has the details."}
+
+  stop_apology:
+    - {id: stop_1, text: "Entenschuldigung! Fair enough. The duck will stop teasing you."}
+    - {id: stop_2, text: "Sorry about that. The duck has switched off the teasing for you. `/goose quiet off` brings it back."}
+    - {id: stop_3, text: "Understood, no more jokes from the duck for you. Sorry for overdoing it."}
+
 german:
   ente_gut:
     text: "Ente gut, alles gut"
@@ -347,3 +357,38 @@ german:
     meaning: "bye"
     wordplay: ""
     explain: "Tschüss means bye."
+  bitte_sehr:
+    text: "Bitte sehr"
+    meaning: "here you go"
+    wordplay: ""
+    explain: "Bitte sehr means 'here you go', said politely when handing something over."
+  das_ist_ente:
+    text: "Das ist 'ne Ente!"
+    meaning: "that's a hoax"
+    wordplay: "a colloquial idiom, 'Ente' also means hoax"
+    explain: "Das ist 'ne Ente! is everyday German for 'that's a hoax', and Ente is also the word for a false news story."
+  enterich_enter:
+    text: "Der Enterich drückt Enter"
+    meaning: "the drake presses Enter"
+    wordplay: "Enterich (drake) sounds like the Enter key"
+    explain: "Der Enterich drückt Enter is a pun: Enterich means drake, and it also sounds like the Enter key on a keyboard."
+  heute_geschnattert:
+    text: "Heute wird geschnattert!"
+    meaning: "there is gabbling today"
+    wordplay: "schnattern means to gabble, as ducks do"
+    explain: "Heute wird geschnattert means 'there is gabbling today'. Schnattern is the noise ducks make, and people chatting a lot get the same word."
+  schoenes_wochenende:
+    text: "Schönes Wochenende!"
+    meaning: "have a nice weekend"
+    wordplay: ""
+    explain: "Schönes Wochenende means 'have a nice weekend'."
+  willkommen_entenhausen:
+    text: "Willkommen in Entenhausen!"
+    meaning: "welcome to Duckburg"
+    wordplay: "Entenhausen is the German name of Duckburg"
+    explain: "Willkommen in Entenhausen means 'welcome to Duckburg', the town where Donald Duck lives in German comics."
+  wunderbar:
+    text: "Wunderbar"
+    meaning: "wonderful"
+    wordplay: ""
+    explain: "Wunderbar means wonderful."

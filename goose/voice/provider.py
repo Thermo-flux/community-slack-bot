@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -48,17 +49,36 @@ def _is_timeout(exc: BaseException) -> bool:
     return isinstance(reason, (socket.timeout, TimeoutError))
 
 
+LOCAL_HOSTS = ("localhost", "127.0.0.1")
+
+
+def _secure_url(url: str) -> bool:
+    """https always passes. http passes only for a local host (tests and local models)."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return False
+    if parts.scheme == "https":
+        return bool(host)
+    return parts.scheme == "http" and host in LOCAL_HOSTS
+
+
 class Provider:
     def __init__(self, base_url: str, api_key: str, model: str, allowlist: List[str],
                  http_post: Optional[PostFn] = None, json_mode: bool = False):
-        """Raises ProviderError('model_not_allowed') when model is not in a non-empty allowlist, and
-        ProviderError('missing_key') when api_key is empty."""
+        """Raises ProviderError('model_not_allowed') when model is not in a non-empty allowlist, ProviderError('missing_key')
+        when api_key is empty, and ProviderError('insecure_url') when base_url is not https (plain http is accepted only
+        for localhost and 127.0.0.1)."""
         if not api_key:
             raise ProviderError("missing_key")
         allowed = [m.strip() for m in (allowlist or []) if m and m.strip()]
         if not allowed or model not in allowed:
             raise ProviderError("model_not_allowed")
-        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        if not _secure_url(base):
+            raise ProviderError("insecure_url")
+        self.base_url = base
         self._api_key = api_key
         self.model = model
         self.allowlist = allowed

@@ -23,11 +23,6 @@ levels:
   thresholds: [0, 10, 25, 50, 100, 155, 235, 330, 445, 580, 735, 890]
   growth_above_top: 1.2
   titles: [Hatchling, Duckling, Paddler, Dabbler, Mallard, Diver, Pond Scout, Flock Leader, Wing Commander, Golden Beak, Pond Elder, Head Duck]
-  # v6 organizer-star gate: reaching a level above gate_level needs at least one non-voided organizer star.
-  # Without one, crumbs alone stop at gate_level (levels 1..gate_level are unchanged); after a star, levels are uncapped.
-  # A void can remove the last star and fall the level back to at most gate_level. Bad values fail closed on start.
-  gate_enabled: true             # false turns the gate off entirely (all crumbs count immediately)
-  gate_level: 5                  # highest level reachable with no organizer star (PL.5)
   band_steady: 15
   band_active: 50
   band_very_active: 100
@@ -37,7 +32,7 @@ vibes:
   mascot: duck
   humor_level: 2                 # 1 = Orry's level, 2 = the duck, 3 = off until after the shadow weeks
   german_rate: 0.25              # about one reply in four may carry an approved German phrase
-  german_gloss: always           # v6: every use of an approved German phrase is glossed inline (always)
+  german_gloss: on_request       # on_request | first_time | always
   roast_rate: 0.1                # light roasts, rare, templates only
   newcomer_days: 14
   reactions_per_hour: 6

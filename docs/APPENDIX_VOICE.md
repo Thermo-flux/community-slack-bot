@@ -102,12 +102,12 @@ Detection phrases for a thread reply (lowercase, ß as ss, ü as ue): English "w
 
 | # | Input sequence | Expected |
 |---|---|---|
-| 1 | One person addresses the duck with "goose" 3 times in 5 minutes | Heat 2.0 (calm). The quiet gag starts. Calls 4 and 5 add nothing and get no reply. Pings still work |
-| 2 | Two people each reach the 3.0 cap | Heat 6.0, angry. No "you" or names in lines |
-| 3 | Three people reach the cap, then a fourth calls once | Heat 10. One timeout line. Goose calls are silent for 10 minutes. Crumbs unchanged |
+| 1 | One person addresses the duck with "goose" 3 times in 5 minutes | Heat about 2.7 to 3.0 (annoyed at most). The quiet gag starts. Calls 4 and 5 add nothing and get no reply. Pings still work |
+| 2 | Two people each make three quick calls | Heat about 5.1 after decay, angry. No "you" or names in lines |
+| 3 | Five people each make three quick calls | Heat above 8. Four people peak just under the line, at about 7.9. One timeout line. Goose calls are silent for 10 minutes. Crumbs unchanged |
 | 4 | An angry reply rolls a honk, and another roll comes 10 minutes later | First: HONK, then the correction. Second: no honk (20 minute limit) |
-| 5 | Heat 9.0 at 12:00 and no calls | 12:10 heat 4.5 (annoyed). 12:20 heat 2.25 (calm) |
-| 6 | Timeout at 12:00, goose calls at 12:05, 12:08 and 12:12 | The first two are silent and add no heat. 12:12 gets a cooling line. Calm by about 12:18 |
+| 5 | Heat 7.0 at 12:00 and no calls | 12:10 heat 3.5 (annoyed). 12:20 heat 1.75 (calm) |
+| 6 | Timeout at 12:00, goose calls at 12:05, 12:08 and 12:12 | The first two are silent and add no heat. 12:12 gets a cooling line (it also adds heat). The meter goes back to calm when the 30 minute cooling window ends |
 | 7 | Unaddressed: "a goose stole my bread" | No heat, reply or reaction |
 | 8 | "@goose-lee @alex you're a goose" | No heat and no goose line. A ping reaction only, within limits |
 | 9 | "@goose-lee I feel alone" | No reaction, joke or German. The plain safety reply, and organizers are alerted |

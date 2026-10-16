@@ -21,6 +21,15 @@ FINAL_KEY = "final_posted"
 MAINTENANCE_KEY = "maintenance_at"
 MAINTENANCE_EVERY_S = 3600
 PROCESSED_TTL_S = 2 * 86400
+# (table, timestamp column, keep for seconds) pruned on each hourly maintenance pass.
+PRUNE_RULES = (
+    ("seen_hash", "ts", 3600),
+    ("voice_person", "ts", 3600),
+    ("posted_texts", "ts", 86400),
+    ("reaction_log", "ts", 14 * 86400),
+    ("remark_log", "ts", 14 * 86400),
+    ("voice_usage", "ts", 14 * 86400),
+)
 
 
 class Scheduler:
@@ -115,6 +124,8 @@ class Scheduler:
         self.ctx.db.set_setting(MAINTENANCE_KEY, "%.3f" % now)
         self.ctx.explain.purge(now)
         self.ctx.db.execute("DELETE FROM processed WHERE ts < ?", (now - PROCESSED_TTL_S,))
+        for table, column, keep_s in PRUNE_RULES:
+            self.ctx.db.execute("DELETE FROM %s WHERE %s < ?" % (table, column), (now - keep_s,))
 
     # ---------------------------------------------------------------------------------------------- public
 
@@ -126,7 +137,9 @@ class Scheduler:
            reminder in the organizer channel; mark_reminded. Never announces on its own.
         4. First Monday of a month: the all-time top 10 to the organizer channel (once, settings key 'alltime_posted:<YYYY-MM>').
         5. At the end date (Weekly.end_ts) once: the provisional final top 3 to the organizer channel (settings 'final_posted').
-        6. ExplainService.purge and processed-table pruning (older than 2 days) once an hour.
+        6. ExplainService.purge and processed-table pruning (older than 2 days) once an hour, plus PRUNE_RULES: seen_hash
+           and voice_person older than 1 hour, posted_texts older than 24 hours, reaction_log, remark_log and voice_usage
+           older than 14 days.
         Does nothing at all while settings 'paused' == '1' except finalize_due."""
         with self._lock:
             return self._tick(now)

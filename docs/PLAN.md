@@ -215,17 +215,17 @@ The more people call the duck a goose, the angrier it gets. The meter is determi
 
 **What counts:** the duck is addressed (a ping, its name, or a reply in its thread), the word "goose" stands alone, the message names no other person, and it is not "Mother Goose", "goosebumps" or "gooseberry". The duck's own lines never count, and neither do other bots.
 
-**Per person:** the first goose call in 10 minutes adds 1, repeats add 0.5, and the cap is 3.0 per 30 minutes. Three goose calls by one person within 5 minutes starts a quiet 30 minute gag: those calls add nothing and get no reply, and nobody is told. Pings and commands keep working.
+**Per person:** the first goose call in 10 minutes adds 1.5, repeats add 0.75, and the cap is 3.0 per 30 minutes. Three goose calls by one person within 5 minutes starts a quiet 30 minute gag: those calls add nothing and get no reply, and nobody is told. Pings and commands keep working.
 
 | Stage | Heat | The duck does on a goose call | Limit |
 |---|---|---|---|
-| Calm | under 3 | `:duck:`, plus a calm line 1 time in 4 | None |
-| Annoyed | 3 to under 6 | `:duck:` and an annoyed line | 1 anger line per 2 minutes per channel |
-| Angry | 6 to under 10 | `:duck:` and an angry line. A 1 in 6 chance of a slip: "HONK! ...Quak. Entenschuldigung!" | Honk at most once per 20 minutes |
-| Timeout | 10 or more | One timeout line, then silent on goose calls for 10 minutes. No new heat | Once per 30 minutes, at most once a day in the channel |
-| Cooling | after the timeout | One cooling line per 5 minutes at most. Ends when heat is under 3, or 30 minutes after the timeout started, when heat resets to 0 | None |
+| Calm | under 2.5 | `:duck:`, plus a calm line 1 time in 4 | None |
+| Annoyed | 2.5 to under 5 | `:duck:` and an annoyed line | 1 anger line per 2 minutes per channel |
+| Angry | 5 to under 8 | `:duck:` and an angry line. A 1 in 6 chance of a slip: "HONK! ...Quak. Entenschuldigung!" | Honk at most once per 20 minutes |
+| Timeout | 8 or more | One timeout line, then silent on goose calls for 10 minutes. No new heat | Once per 30 minutes, at most once a day in the channel |
+| Cooling | after the timeout | One cooling line per 5 minutes at most. Ends when heat is under 2.5, or 30 minutes after the timeout started, when heat resets to 0 | None |
 
-It takes **four people** to reach the timeout. Three people at the cap make 9, which is angry at most, and one person alone tops out at 3.0.
+Heat decays with a 10 minute half-life, so it only builds when people call close together in time. Simulated at about 40 seconds between calls: one person alone gets the duck annoyed at most, two people reach angry, three stay angry, and it takes **five people** to reach the timeout. Four people, each making three calls, peak just under the timeout line (about 7.9 heat), because the third call that starts a person's gag adds no heat.
 
 **The fake timeout.** You asked for "say this one more time and you're on timeout", which does nothing. I made the duck put **itself** in timeout: "One more goose and this duck puts itself in timeout. Nobody else is in trouble." A threat aimed at a person could scare a kid, because "timeout" is a real punishment at school and at home. If you want the original version, I can write it with a clear "nothing actually happens", but it would still point at people. See decision 16.
 
@@ -236,7 +236,7 @@ It takes **four people** to reach the timeout. Three people at the cap make 9, w
 - **No insults:** no profanity and no animal as a label for a person. Reactions are `:duck:` only, never an angry emoji.
 - **No score:** heat never changes crumbs, levels, boards or flags.
 - **No pile-ons:** a goose call that names another person is ignored.
-- **Farming it is pointless:** four people spamming gets one timeout line per 30 minutes, then silence. Crumbs do not move, reactions stay inside the budget, and bots are ignored.
+- **Farming it is pointless:** five people spamming gets one timeout line per 30 minutes, then silence. Crumbs do not move, reactions stay inside the budget, and bots are ignored.
 
 The 36 anger lines, 8 acknowledgements, 14 ranking remarks and 8 explanations are in `APPENDIX_VOICE.md`.
 

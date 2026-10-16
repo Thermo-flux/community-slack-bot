@@ -12,18 +12,6 @@ from goose.core import wordlists
 
 _NON_WORD_RE = re.compile(r"[^\w]+")
 
-# Contexts that must stay plain: no joke, no German, no gloss (PLAN section 2 "Plain replies", section 11).
-PLAIN_CONTEXTS = frozenset({
-    "error", "privacy", "receipt", "report_receipt", "appeal_receipt", "report", "appeal",
-    "safety", "distress",
-})
-
-
-def is_plain_context(kind: str) -> bool:
-    """True for output contexts that must carry no joke and no German: errors, privacy, report and appeal
-    receipts, and the distress/safety path. Case-insensitive; unknown kinds are not plain."""
-    return (kind or "").strip().lower() in PLAIN_CONTEXTS
-
 
 def _norm(text: str) -> str:
     """Lowercase, every run of non-word characters (punctuation, hyphens, apostrophes) becomes one space."""

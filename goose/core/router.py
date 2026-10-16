@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from goose.core import commands_member
 from goose.core.card import build_card
@@ -18,13 +18,12 @@ from goose.core.rules import (
     qualify_message, simhash,
 )
 from goose.core.safety import is_distress, is_program_question, is_sad, safety_reply
+from goose.core.wordlists import SECRET_PATTERNS
 from goose.types import ORGANIZER_COMMANDS, Action, Event, Result, VoiceJob
 
 _HOUR = 3600
 _CLASSES = {"message": "new", "message_changed": "changed", "message_deleted": "deleted"}
 _STAGE_MOMENT = {"calm": "calm", "annoyed": "annoyed", "angry": "angry", "timeout": "timeout", "cooling": "cooling"}
-_REACTIONS = ("reaction_added", "reaction_removed")
-_SHORTCUT_COMMANDS = ("me", "top")
 
 _REDACT_MENTION = re.compile(r"<@[UW][A-Za-z0-9]+(?:\|[^>]*)?>")
 _REDACT_LINK = re.compile(r"<(?:https?|mailto):[^>]*>")
@@ -50,6 +49,8 @@ def _redact(text: str, limit: int) -> str:
     t = _REDACT_MENTION.sub("someone", text)
     t = _REDACT_LINK.sub("[link]", t)
     t = _BARE_URL.sub("[link]", t)
+    for pattern in SECRET_PATTERNS:
+        t = pattern.sub("[redacted]", t)
     return t.strip()[:limit]
 
 
@@ -62,8 +63,7 @@ class Router:
         1. Ignore events from bots (event.is_bot) and from the bot's own user id. Dedupe: skip if `processed` has
            event_id, or (channel, class, message_ts) where class is new|changed|deleted; record it.
         2. kind 'command' -> member or organizer handler (types.MEMBER_COMMANDS / ORGANIZER_COMMANDS).
-        3. Only act in config.channels.scored: messages, mentions and member commands. Organizer commands run in the
-           organizer channel.
+        3. Only act in config.channels.scored (commands work anywhere the bot is).
         4. kind 'message':
            - program-term gate, distress gate, sad flag (core.safety);
            - if the sender joined: flood limit (scoring.flood_seconds), qualify_message, similarity check against the
@@ -118,13 +118,20 @@ class Router:
 
     def level_up_notes(self, user_ids) -> Result:
         """For people whose facts just became final: if their level rose above announced_level, an ephemeral
-        level-up note in Users last_channel (moment 'level_up' with {n}, {title}) and update announced_level."""
+        level-up note in Users last_channel (moment 'level_up' with {n}, {title}) and update announced_level.
+        Runs in one transaction, so the read of announced_level and its write cannot interleave with another event."""
+        with self.ctx.db.tx():
+            return self._level_up_notes(user_ids)
+
+    def _level_up_notes(self, user_ids) -> Result:
         ctx = self.ctx
         cfg = ctx.config
         res = Result()
+        seen = set()
         for uid in user_ids or []:
-            if not uid or not ctx.users.is_joined(uid):
+            if not uid or uid in seen or not ctx.users.is_joined(uid):
                 continue
+            seen.add(uid)
             user = ctx.users.get(uid) or {}
             level = ctx.levels.level_for(ctx.ledger.lifetime(uid))
             announced = int(user.get("announced_level") or 1)
@@ -134,7 +141,8 @@ class Router:
             if not channel:
                 continue
             title = ctx.levels.title(level)
-            moment = "level_12" if level == 12 else "level_up"
+            # The Head Duck line whenever the jump reaches level 12 (the reached level is 12, or the span includes it).
+            moment = "level_12" if announced < 12 <= level else "level_up"
             line = ctx.lines.pick(moment, ctx.rng, slots={"n": level, "title": title}, allow_german=True,
                                   german_rate=cfg.vibes.german_rate)
             res.actions.append(Action(kind="ephemeral", channel=channel, user=uid,
@@ -147,22 +155,6 @@ class Router:
     def _claim(self, event: Event) -> bool:
         """Record the event keys in `processed`. False when any key was already there (a duplicate delivery)."""
         ctx = self.ctx
-        keys = self._dedupe_keys(event)
-        if not keys:
-            return True
-        fresh = True
-        now = ctx.clock.now()
-        for key in keys:
-            cur = ctx.db.execute("INSERT OR IGNORE INTO processed (key, ts) VALUES (?, ?)", (key, now))
-            if cur.rowcount != 1:
-                fresh = False
-        return fresh
-
-    def _dedupe_keys(self, event: Event) -> List[str]:
-        """Every key that makes this event unique. A later delivery carrying any of them is ignored.
-
-        Messages use the event id and (channel, class, message ts). When Slack gives no event id (or the kind is not a
-        message), a key is derived from what the event carries so an exact redelivery is still ignored once."""
         keys: List[str] = []
         if event.event_id:
             keys.append("evt:" + event.event_id)
@@ -171,16 +163,13 @@ class Router:
             ts = event.deleted_ts if (cls == "deleted" and event.deleted_ts) else event.message_ts
             if ts:
                 keys.append("msg:%s:%s:%s" % (event.channel, cls, ts))
-            return keys
-        if not event.event_id:
-            if event.kind in _REACTIONS and event.message_ts:
-                keys.append("react:%s:%s:%s:%s:%s" % (event.channel, event.kind, event.message_ts, event.user,
-                                                      event.reaction))
-            elif event.kind == "command" and (event.command or event.args):
-                keys.append("cmd:%s:%s:%s:%s" % (event.channel, event.user, event.command, event.args))
-            elif event.kind == "member_joined":
-                keys.append("join:%s:%s" % (event.channel, event.user))
-        return keys
+        fresh = True
+        now = ctx.clock.now()
+        for key in keys:
+            cur = ctx.db.execute("INSERT OR IGNORE INTO processed (key, ts) VALUES (?, ?)", (key, now))
+            if cur.rowcount != 1:
+                fresh = False
+        return fresh
 
     def _paused(self) -> bool:
         return self.ctx.db.get_setting("paused", "0") == "1"
@@ -191,8 +180,6 @@ class Router:
             from goose.core import commands_organizer
             return commands_organizer.handle(self.ctx, event)
         if self._paused():
-            return Result()
-        if not self.ctx.config.is_scored_channel(event.channel):
             return Result()
         return commands_member.handle(self.ctx, event)
 
@@ -228,24 +215,6 @@ class Router:
         ids.discard(self.ctx.bot_user_id)
         return bool(ids)
 
-    def _mention_shortcut(self, ev: Event) -> Optional[Tuple[str, str]]:
-        """A ping that starts with `me` or `top` (`@goose-lee me`) -> (command, args), else None.
-
-        Only the two shortcuts in PLAN section 8. The bot mention is read as an id; any label is ignored."""
-        text = (ev.text or "").lstrip()
-        mention = re.compile(r"<@%s(?:\|[^>]*)?>" % re.escape(self.ctx.bot_user_id))
-        match = mention.match(text)
-        if match is None:
-            return None
-        rest = text[match.end():].strip()
-        if not rest:
-            return None
-        parts = rest.split(None, 1)
-        command = parts[0].lower()
-        if command not in _SHORTCUT_COMMANDS:
-            return None
-        return command, (parts[1].strip() if len(parts) > 1 else "")
-
     # ------------------------------------------------------------ messages
 
     def _message(self, ev: Event, now: float) -> Result:
@@ -259,37 +228,40 @@ class Router:
             ctx.users.set_last_channel(ev.user, ev.channel)
             self._score_message(ev, ts, now)
         addr = ctx.vibes.classify_addressing(ev, ctx.bot_user_id)
-        if addr == "orry":
-            return Result()
-        flags = self._flags(ev.user, joined)
         text = ev.text or ""
         in_thread = bool(ev.thread_ts) and ev.thread_parent_user == ctx.bot_user_id
         ping = addr == "ping"
         name = addr == "name"
         addressed = ping or in_thread
+        # Distress comes first, before any other gate (including the Orry silence). Addressed messages (a ping, the
+        # name, a reply in the thread) get the plain safety reply; an unaddressed message gets an organizer alert only.
+        if is_distress(text, cfg):
+            if addr in ("ping", "name", "orry") or in_thread:
+                return self._distress(ev)
+            return self._distress_alert_only(ev)
+        if addr == "orry":
+            return Result()
+        flags = self._flags(ev.user, joined)
         if not addressed and not name:
             return self._ambient(ev, now, flags)
 
+        # Sad words (grief, loneliness, trivia about death) are not distress: no reaction, no roast, no German,
+        # no goose call, but an addressed sad message still goes to the voice.
         sad = is_sad(text, cfg)
-        if is_distress(text, cfg):
-            return self._distress(ev)
-        if sad:
-            return Result.of(self._eph(ev, safety_reply(cfg))) if addressed else Result()
-
         if name and not addressed:
-            if self._is_goose_call(ev, text, flags):
+            if not sad and self._is_goose_call(ev, text, flags):
                 return self._goose(ev, now)
             res = Result()
-            emoji = ctx.vibes.name_reaction(text, ev.user, now, quiet=flags.quiet, sad=False)
+            emoji = ctx.vibes.name_reaction(text, ev.user, now, quiet=flags.quiet, sad=sad)
             if emoji:
                 res.actions.append(self._reaction(ev, emoji))
             return res
 
-        if self._is_goose_call(ev, text, flags):
+        if not sad and self._is_goose_call(ev, text, flags):
             return self._goose(ev, now)
 
         res = Result()
-        if not flags.quiet:
+        if not flags.quiet and not sad:
             res.actions.append(self._reaction(ev, "duck"))
         if is_program_question(text):
             res.actions.append(self._post(ev, self._line("program_redirect")))
@@ -303,14 +275,7 @@ class Router:
             if explained:
                 res.actions.append(self._post(ev, self._expand(explained)))
             return res
-        if ping:
-            shortcut = self._mention_shortcut(ev)
-            if shortcut is not None:
-                command_event = Event(kind="command", ts=ev.ts, channel=ev.channel, user=ev.user,
-                                      command=shortcut[0], args=shortcut[1])
-                res.extend(commands_member.handle(ctx, command_event))
-                return res
-        self._chat(ev, now, res, ping=ping, in_thread=in_thread, flags=flags, text=text)
+        self._chat(ev, now, res, ping=ping, in_thread=in_thread, flags=flags, text=text, sad=sad)
         return res
 
     def _is_goose_call(self, ev: Event, text: str, flags: _Flags) -> bool:
@@ -338,30 +303,79 @@ class Router:
         return bool(ok)
 
     def _chat(self, ev: Event, now: float, res: Result, *, ping: bool, in_thread: bool, flags: _Flags,
-              text: str) -> None:
+              text: str, sad: bool = False) -> None:
         """Addressed general chat. Voice on and within the message limit -> a VoiceJob. Otherwise a canned line,
-        gated so repeats stay quiet (ack_allowed)."""
+        gated so repeats stay quiet (ack_allowed). A sad message gets no German and no roast."""
         ctx = self.ctx
         if not self._voice_on(now):
             if ctx.vibes.ack_allowed(ev.user, now):
-                res.actions.append(self._post(ev, self._line("ack" if ping else "chat_fallback", allow_german=True)))
+                res.actions.append(self._post(ev, self._line("ack" if ping else "chat_fallback",
+                                                              allow_german=not sad)))
+            return
+        if not self._consented(ev.user):
+            if ctx.vibes.ack_allowed(ev.user, now):
+                res.actions.append(self._post(ev, self._consent_text()))
             return
         allowed, why = ctx.voice_client.allow_person(ev.user, now)
         if not allowed:
-            if why == "limit" and ctx.vibes.ack_allowed(ev.user, now):
+            if why == "limit" and self._limit_line_allowed(ev.user, now):
                 res.actions.append(self._post(ev, self._line("limit_reached")))
             return
-        res.jobs.append(self._voice_job(ev, now, text, in_thread, flags))
+        res.jobs.append(self._voice_job(ev, now, text, in_thread, flags, sad=sad))
         ctx.voice_client.record_person(ev.user, now)
 
-    def _voice_job(self, ev: Event, now: float, text: str, in_thread: bool, flags: _Flags) -> VoiceJob:
+    def _limit_line_allowed(self, user_id: str, now: float) -> bool:
+        """Over the message limit the duck posts one 'limit_reached' line and then stays quiet for that person until
+        the hour rolls over (docs/PLAN.md 10.8). Records the line in remark_log when it returns True."""
+        ctx = self.ctx
+        row = ctx.db.one("SELECT COUNT(*) AS n FROM remark_log WHERE user_id = ? AND ts > ? AND kind = 'limit'",
+                         (user_id, float(now) - _HOUR))
+        if row is not None and int(row["n"]) > 0:
+            return False
+        ctx.db.execute("INSERT INTO remark_log (user_id, ts, kind) VALUES (?, ?, 'limit')", (user_id, float(now)))
+        return True
+
+    def _consented(self, user_id: str) -> bool:
+        """The person's stored privacy-notice version must match config.voice.notice_version before any message
+        from them goes to the voice."""
+        user = self.ctx.users.get(user_id)
+        if not user:
+            return False
+        return str(user.get("consent_version") or "") == str(self.ctx.config.voice.notice_version)
+
+    def _consent_text(self) -> str:
+        ctx = self.ctx
+        if ctx.lines.has_moment("consent_needed") and ctx.lines.lines("consent_needed"):
+            return self._line("consent_needed")
+        return "The duck needs you to re-accept the privacy notice first. Use /goose join to see it."
+
+    def _thread_context(self, ev: Event) -> List[str]:
+        """Up to thread_max_messages earlier thread texts (the most recent ones), oldest first, each redacted and cut
+        to thread_item_chars, within thread_total_chars in all."""
+        vc = self.ctx.config.voice
+        items = [t for t in list(ev.thread_excerpt or []) if t][-vc.thread_max_messages:]
+        out: List[str] = []
+        total = 0
+        for raw in items:
+            room = vc.thread_total_chars - total
+            if room <= 0:
+                break
+            piece = _redact(raw, min(vc.thread_item_chars, room))
+            if not piece:
+                continue
+            out.append(piece)
+            total += len(piece)
+        return out
+
+    def _voice_job(self, ev: Event, now: float, text: str, in_thread: bool, flags: _Flags,
+                   sad: bool = False) -> VoiceJob:
         ctx = self.ctx
         cfg = ctx.config
         elaborate = in_thread and is_elaborate_request(text)
         reply_cap = cfg.voice.elaborate_max_chars if elaborate else cfg.voice.reply_max_chars
-        allow_german = ctx.rng.random() < cfg.vibes.german_rate
+        allow_german = (not sad) and ctx.rng.random() < cfg.vibes.german_rate
         newcomer = ctx.users.is_newcomer(ev.user, now)
-        allow_roast = bool(_ROAST_ME.search(text)) and not flags.quiet and not newcomer
+        allow_roast = bool(_ROAST_ME.search(text)) and not flags.quiet and not newcomer and not sad
         request: Dict[str, Any] = {
             "v": 1,
             "request_id": uuid.uuid4().hex,
@@ -377,7 +391,7 @@ class Router:
             "card": build_card(ctx, ev.user, False, now),
             "input": {
                 "message": {"handle": "you", "text": _redact(text, cfg.voice.input_max_chars)},
-                "thread": [],
+                "thread": self._thread_context(ev),
             },
         }
         return VoiceJob(
@@ -396,14 +410,25 @@ class Router:
         )
 
     def _distress(self, ev: Event) -> Result:
+        """An addressed distress message: the plain safety reply (no joke, no German, no voice) and an alert."""
         ctx = self.ctx
         return Result(actions=[
             Action(kind="ephemeral", channel=ev.channel, user=ev.user, text=safety_reply(ctx.config),
                    thread_ts=self._thread(ev)),
-            Action(kind="organizer_post", channel=ctx.organizer_channel,
-                   text=("Possible distress in a message addressed to the duck. User `%s`, channel `%s`. "
-                         "Please check in. The message text is not stored or shown here.") % (ev.user, ev.channel)),
+            self._distress_alert(ev, "replied with the safety text"),
         ])
+
+    def _distress_alert_only(self, ev: Event) -> Result:
+        """An unaddressed distress message in scored chat: the organizers are told, the member is not answered."""
+        return Result.of(self._distress_alert(ev, "did not answer, the message was not addressed to the duck"))
+
+    def _distress_alert(self, ev: Event, what: str) -> Action:
+        """Channel, message ts and user id only. Never the message text."""
+        ctx = self.ctx
+        return Action(kind="organizer_post", channel=ctx.organizer_channel,
+                      text=("Possible distress. Channel `%s`, message ts `%s`, user `%s`. The duck %s. Please check "
+                            "in. The message text is not stored or shown here.") % (
+                          ev.channel, ev.message_ts, ev.user, what))
 
     def _ambient(self, ev: Event, now: float, flags: _Flags) -> Result:
         """Unaddressed chat: word reactions, a rare roast, a rare admiring remark. Never a voice call."""
@@ -461,7 +486,7 @@ class Router:
         cfg = ctx.config
         uid = ev.user
         user = ctx.users.get(uid) or {}
-        if user.get("rest"):
+        if user.get("rest") or ctx.users.is_frozen(uid, now):
             return
         text = ev.text or ""
         if not qualify_message(text, cfg.scoring.min_words, cfg.scoring.min_chars):
@@ -515,27 +540,50 @@ class Router:
             return res
         if not (ctx.users.is_joined(ev.user) and ctx.users.is_joined(author)):
             return res
+        if ctx.users.is_frozen(ev.user, now):
+            return res
         ts = ev.ts or now
         if ev.reaction == "duck":
-            ctx.ledger.add_fact(idem_key="thanks:%s:%s:%s" % (ev.channel, ev.message_ts, ev.user),
-                                user_id=author, kind="thanks", ts=ts, counterparty=ev.user, actor=ev.user,
-                                channel=ev.channel, message_ts=ev.message_ts, state="pending")
+            self._credit("thanks:%s:%s:%s" % (ev.channel, ev.message_ts, ev.user),
+                         user_id=author, kind="thanks", ts=ts, counterparty=ev.user, actor=ev.user,
+                         channel=ev.channel, message_ts=ev.message_ts, state="pending")
         elif (ev.reaction == "white_check_mark" and ev.thread_ts and ev.thread_ts != ev.message_ts
               and ev.thread_parent_user and ev.user == ev.thread_parent_user):
-            ctx.ledger.add_fact(idem_key="helpful:%s:%s:%s" % (ev.channel, ev.message_ts, ev.user),
-                                user_id=author, kind="helpful", ts=ts, counterparty=ev.user, actor=ev.user,
-                                channel=ev.channel, message_ts=ev.message_ts, state="pending")
+            self._credit("helpful:%s:%s:%s" % (ev.channel, ev.message_ts, ev.user),
+                         user_id=author, kind="helpful", ts=ts, counterparty=ev.user, actor=ev.user,
+                         channel=ev.channel, message_ts=ev.message_ts, state="pending")
         return res
+
+    def _credit(self, base_key: str, **fields: Any) -> None:
+        """Add the fact under base_key. When that key exists and is live, nothing is added (a duplicate). When it
+        exists only as a voided row (the reaction was removed), the fact goes under base_key '#2', then '#3', and so on,
+        so a removed and re-added reaction counts again."""
+        ctx = self.ctx
+        n = 1
+        while True:
+            key = base_key if n == 1 else "%s#%d" % (base_key, n)
+            row = ctx.db.one("SELECT state FROM facts WHERE idem_key = ?", (key,))
+            if row is None:
+                ctx.ledger.add_fact(idem_key=key, **fields)
+                return
+            if row["state"] != "voided":
+                return
+            n += 1
 
     def _reaction_removed(self, ev: Event, now: float) -> Result:
         ctx = self.ctx
         if ev.reaction == "duck":
-            key = "thanks:%s:%s:%s" % (ev.channel, ev.message_ts, ev.user)
+            kind = "thanks"
         elif ev.reaction == "white_check_mark":
-            key = "helpful:%s:%s:%s" % (ev.channel, ev.message_ts, ev.user)
+            kind = "helpful"
         else:
             return Result()
-        ctx.ledger.void_fact(idem_key=key, actor=ev.user, reason="reaction removed", now=now)
+        # Void every live fact this reactor made on this message (the original and any re-credited '#n' copies).
+        rows = ctx.db.query(
+            "SELECT id FROM facts WHERE kind = ? AND channel = ? AND message_ts = ? AND counterparty = ? "
+            "AND state != 'voided' ORDER BY id", (kind, ev.channel, ev.message_ts, ev.user))
+        for row in rows:
+            ctx.ledger.void_fact(fact_id=int(row["id"]), actor=ev.user, reason="reaction removed", now=now)
         return Result()
 
     def _member_joined(self, ev: Event) -> Result:

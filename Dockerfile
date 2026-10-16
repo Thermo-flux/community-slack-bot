@@ -1,5 +1,4 @@
-# Gateway image: the Slack bot process and its core. It holds no LLM key; the gateway reaches the
-# separate voice container over HTTP, on the private network in docker-compose.yml.
+# Gateway image: the Slack bot process and its core. No LLM key, no voice code.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

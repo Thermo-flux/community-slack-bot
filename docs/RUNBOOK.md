@@ -28,24 +28,6 @@ cp deploy/goose.service /etc/systemd/system/goose.service
 systemctl daemon-reload && systemctl enable --now goose
 ```
 
-`pip install ".[slack]"` also installs `tzdata`. That makes named timezones in `config/goose.yaml` work
-everywhere, including Windows and slim images, where the standard library has no system tz database.
-
-## The voice service (only after its gates)
-
-The voice is a separate container that holds only the LLM key and a shared secret. It stays **off** until every
-gate in the README is met (safeguarding sign-off, a provider whose terms allow minors, the new privacy notice
-with re-consent, and the owner's approval). Until then the gateway runs on canned lines and needs no voice.
-
-```bash
-docker compose --profile voice up -d voice
-docker compose logs -f voice
-```
-
-It publishes no ports: only the gateway reaches it over the private `voice_net` network. `VOICE_SHARED_SECRET`
-must be the same value in `.env` and `voice.env`, and the gateway compares it in constant time. `/goose voice
-status` shows the breaker state; `/goose voice off` stops calls without touching scoring.
-
 ## Environment variables
 
 | Name | Where | Meaning |

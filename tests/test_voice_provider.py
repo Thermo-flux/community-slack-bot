@@ -133,6 +133,27 @@ def test_repr_never_shows_the_key():
     assert KEY not in repr(_provider(Recorder(result=(200, _ok_body()))))
 
 
+@pytest.mark.parametrize("url", ["http://llm.example/v1", "ftp://llm.example/v1", "llm.example/v1",
+                                 "http://10.0.0.5:8080/v1", "http://localhost.evil.example/v1"])
+def test_insecure_base_url_is_refused_at_construction(url):
+    with pytest.raises(ProviderError) as info:
+        Provider(url, KEY, "model-a", ["model-a"])
+    assert info.value.args[0] == "insecure_url"
+    assert KEY not in str(info.value)
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8080/v1", "http://127.0.0.1:9/v1", "https://llm.example/v1"])
+def test_https_and_local_http_are_accepted(url):
+    assert Provider(url, KEY, "model-a", ["model-a"]).base_url == url
+
+
+def test_from_env_refuses_a_plain_http_remote_url():
+    with pytest.raises(ProviderError) as info:
+        Provider.from_env({"LLM_BASE_URL": "http://llm.example/v1", "LLM_API_KEY": KEY, "LLM_MODEL": "model-a",
+                           "LLM_MODEL_ALLOWLIST": "model-a"})
+    assert info.value.args[0] == "insecure_url"
+
+
 class _Stub(BaseHTTPRequestHandler):
     def log_message(self, *args):
         return

@@ -9,7 +9,6 @@ Weeks use Clock.week_id(ts) (the Monday date, local time, half-open).
 from __future__ import annotations
 
 import hashlib
-import uuid as _uuid
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from goose.config import Config
@@ -21,35 +20,11 @@ from goose.types import FACT_KINDS, Breakdown
 STAR_KINDS = ("star", "bigstar")
 COUNTED_STATES = ("final",)
 PENDING_STATES = ("final", "pending")          # every state that is not voided
-RECONCILE_WINDOW_S = 48 * 3600.0               # the startup reconcile covers the last 48 hours
 
 
 def tombstone(user_id: str) -> str:
     """A stable stand-in for a deleted person: 'deleted-' + first 6 hex of sha256(user_id)."""
     return "deleted-" + hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:6]
-
-
-# ---------------------------------------------------------------- idempotency keys
-# The exact key shapes the ledger honors. A repeated key is ignored (Slack redelivery).
-
-def msg_key(channel: str, message_ts: str) -> str:
-    """'msg:<channel>:<ts>' for one qualified message."""
-    return "msg:%s:%s" % (channel, message_ts)
-
-
-def thanks_key(channel: str, message_ts: str, reactor: str) -> str:
-    """'thanks:<channel>:<ts>:<reactor>' for one :duck: from `reactor`."""
-    return "thanks:%s:%s:%s" % (channel, message_ts, reactor)
-
-
-def helpful_key(channel: str, message_ts: str, asker: str) -> str:
-    """'helpful:<channel>:<ts>:<asker>' for one check mark from `asker`."""
-    return "helpful:%s:%s:%s" % (channel, message_ts, asker)
-
-
-def star_key(token: Optional[str] = None) -> str:
-    """'star:<uuid>' for one organizer award. Pass `token` to replay an existing award and have it ignored."""
-    return "star:%s" % (token if token else _uuid.uuid4().hex)
 
 
 def _marks(values: Sequence[Any]) -> str:
@@ -75,6 +50,8 @@ def _sum_breakdowns(items: Iterable[Breakdown]) -> Breakdown:
         total.star_count += b.star_count
     return total
 
+
+RECONCILE_WINDOW_S = 48 * 3600.0   # the startup reconcile covers the last 48 hours
 
 class Ledger:
     def __init__(self, db: Database, config: Config, clock: Clock):

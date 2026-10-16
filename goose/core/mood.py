@@ -24,15 +24,6 @@ from goose.core.db import Database
 
 _HISTORY_S = 3600          # call rows older than this are dropped (longer than any window used here)
 
-# PLAN_V6 section 3 fixes these five meter values (first add 1, repeats 0.5, thresholds 3/6/10).
-# config.MoodConfig must not drift from them, so the meter pins the contract here; the rest of its
-# tuning (windows, caps, gaps, chances) still comes from config.
-_ADD_FIRST = 1.0
-_ADD_REPEAT = 0.5
-_ANNOYED_AT = 3.0
-_ANGRY_AT = 6.0
-_TIMEOUT_AT = 10.0
-
 
 @dataclass
 class MoodResult:
@@ -72,11 +63,11 @@ class Mood:
 
     def stage(self, now: float) -> str:
         h = self.heat(now)
-        if h >= _TIMEOUT_AT:
+        if h >= self.cfg.timeout_at:
             return "timeout"
-        if h >= _ANGRY_AT:
+        if h >= self.cfg.angry_at:
             return "angry"
-        if h >= _ANNOYED_AT:
+        if h >= self.cfg.annoyed_at:
             return "annoyed"
         return "calm"
 
@@ -106,19 +97,23 @@ class Mood:
             if now - cooling_from >= cfg.cooling_max_s:
                 self._store_heat(0.0, now)
                 self._set("cooling_from", None)
-            elif self.heat(now) < _ANNOYED_AT:
+            elif self.heat(now) < cfg.annoyed_at:
                 self._set("cooling_from", None)
                 cooling_from = None
+
+        # The call that completes gag_calls within gag_window_s starts the quiet gag and adds nothing (no heat, no reply).
+        if self._calls_since(user, now - cfg.gag_window_s) >= cfg.gag_calls - 1:
+            self._set("gag:" + user, now + cfg.gag_duration_s)
+            self._log_call(user, now, 0.0)
+            return MoodResult(stage="silent", heat=self.heat(now), reply=False, react=False, gag=True)
 
         add = self._person_add(user, now)
         heat = self.heat(now) + add
         self._store_heat(heat, now)
         self._log_call(user, now, add)
-        if self._calls_since(user, now - cfg.gag_window_s) >= cfg.gag_calls:
-            self._set("gag:" + user, now + cfg.gag_duration_s)
 
         counted = add > 0
-        if heat >= _TIMEOUT_AT:
+        if heat >= cfg.timeout_at:
             if self._timeout_allowed(now):
                 self._set("timeout_silent_until", now + cfg.timeout_silent_s)
                 self._set("last_timeout", now)
@@ -128,16 +123,16 @@ class Mood:
                 return MoodResult(stage="timeout", heat=heat, reply=True, react=True, counted=counted)
             return self._anger("angry", heat, counted, now)
 
-        if cooling_from is not None and heat >= _ANNOYED_AT:
+        if cooling_from is not None and heat >= cfg.annoyed_at:
             last = self._opt_f("cooling_last_line")
             reply = last is None or now - last >= cfg.cooling_gap_s
             if reply:
                 self._set("cooling_last_line", now)
             return MoodResult(stage="cooling", heat=heat, reply=reply, react=True, counted=counted)
 
-        if heat >= _ANGRY_AT:
+        if heat >= cfg.angry_at:
             return self._anger("angry", heat, counted, now)
-        if heat >= _ANNOYED_AT:
+        if heat >= cfg.annoyed_at:
             return self._anger("annoyed", heat, counted, now)
         reply = self.rng.random() < cfg.calm_line_chance
         return MoodResult(stage="calm", heat=heat, reply=reply, react=True, counted=counted)
@@ -160,7 +155,7 @@ class Mood:
     def _person_add(self, user: str, now: float) -> float:
         cfg = self.cfg
         last_add = self._last_positive_add(user)
-        base = _ADD_FIRST if (last_add is None or now - last_add >= cfg.person_gap_s) else _ADD_REPEAT
+        base = cfg.first_add if (last_add is None or now - last_add >= cfg.person_gap_s) else cfg.repeat_add
         window_sum = self._window_sum(user, now - cfg.window_s)
         room = max(0.0, cfg.person_cap - window_sum)
         return float(min(base, room))

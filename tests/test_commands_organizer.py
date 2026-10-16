@@ -246,7 +246,7 @@ def test_pause_and_resume_flip_the_setting(octx):
 
 
 def test_voice_commands_work_with_the_voice_absent(octx):
-    assert "not wired" in private_text(run(octx, ORG, "voice", "on"))
+    assert "not wired" in private_text(run(octx, OWNER, "voice", "on"))
     assert "not wired" in private_text(run(octx, ORG, "voice", "status"))
 
 
@@ -264,13 +264,15 @@ class FakeVoice:
         return {"enabled": self.enabled_flag, "breaker": "closed", "calls_today": 0}
 
 
-def test_voice_on_off_and_status_with_a_voice_client(octx):
+def test_voice_on_is_owner_only_while_off_and_status_stay_open(octx):
     octx.voice_client = FakeVoice()
-    run(octx, ORG, "voice", "on")
+    assert OWNER_ONLY in private_text(run(octx, ORG, "voice", "on"))
+    assert octx.voice_client.enabled_flag is False            # a refused 'on' changes nothing
+    run(octx, OWNER, "voice", "on")
     assert octx.voice_client.enabled_flag is True
     text = private_text(run(octx, ORG, "voice", "status"))
     assert "breaker: closed" in text
-    run(octx, ORG, "voice", "off")
+    run(octx, ORG, "voice", "off")                            # any organizer may turn it off
     assert octx.voice_client.enabled_flag is False
 
 
@@ -383,8 +385,10 @@ def test_skip_week_needs_a_reason(octx):
     add_msgs(octx, "U1", 3)
     wid = _close_current(octx)
     assert "reason is required" in private_text(run(octx, ORG, "skip-week", wid))
-    run(octx, ORG, "skip-week", wid + " the pond was frozen that week")
-    assert octx.weekly.status(wid)["state"] == "skipped"
+    # the current week is still running after the snapshot close above, so use last week for the real skip
+    last = octx.clock.previous_week_id(wid)
+    run(octx, ORG, "skip-week", last + " the pond was frozen that week")
+    assert octx.weekly.status(last)["state"] == "skipped"
 
 
 def test_confirm_final_by_the_owner_gets_a_reply(octx):
@@ -407,3 +411,42 @@ def test_results_week_and_all_time_render_breakdowns(octx):
 
 def test_winners_with_nothing_confirmed(octx):
     assert "No confirmed weekly winners" in private_text(run(octx, ORG, "winners"))
+
+
+# ------------------------------------------------------------ star notice, busiest duck, skip of the open week (7 to 9)
+
+def test_star_sends_the_recipient_a_private_notice_in_the_scored_channel(octx):
+    join(octx, "U2")
+    res = run(octx, ORG, "star", "<@U2|sam> help thanks for the fix")
+    notes = [a for a in res.actions if a.kind == "ephemeral" and a.user == "U2"]
+    assert len(notes) == 1
+    assert notes[0].channel == "C1" and notes[0].text.strip()
+
+
+def test_bigstar_sends_the_recipient_a_private_notice(octx):
+    join(octx, "U2")
+    run(octx, ORG, "bigstar", "<@U2|sam> help big reason")
+    res = run(octx, ORG2, "bigstar", "<@U2|sam> help big reason")
+    notes = [a for a in res.actions if a.kind == "ephemeral" and a.user == "U2"]
+    assert len(notes) == 1 and notes[0].text.strip()
+
+
+def test_busiest_duck_must_be_currently_eligible(octx):
+    from goose.core.commands_organizer import _busiest
+    join(octx, "U1", "U2")
+    add_msgs(octx, "U1", 6)
+    add_msgs(octx, "U2", 3)
+    wid = _close_current(octx)
+    assert _busiest(octx, wid) == "U1"
+    run(octx, ORG, "disqualify", "<@U1|sam> %s quality reason" % wid)
+    assert _busiest(octx, wid) == "U2"
+    text = pond_report(octx, wid)[0].text
+    assert "<@U1>" not in text
+
+
+def test_skip_week_refuses_the_week_that_has_not_ended(octx):
+    join(octx, "U1")
+    add_msgs(octx, "U1", 3)
+    current = octx.clock.week_id(octx.clock.now())
+    assert "cannot be skipped" in private_text(run(octx, ORG, "skip-week", current + " holiday"))
+    assert octx.weekly.status(current) is None
