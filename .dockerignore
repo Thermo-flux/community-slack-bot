@@ -1,0 +1,30 @@
+# secrets and runtime data never enter an image
+.env
+.env.*
+!.env.example
+voice.env
+voice.env.*
+!voice.env.example
+data/
+backups/
+*.db
+*.db-wal
+*.db-shm
+
+# development material
+.git/
+.github/
+.venv/
+venv/
+tests/
+docs/
+deploy/
+tools/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# documentation: only the README is useful inside an image
+*.md
+!README.md

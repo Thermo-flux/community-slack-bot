@@ -1,6 +1,21 @@
+# runtime data: database, audit log, backups (never commit)
+data/
+backups/
+*.db
+*.db-wal
+*.db-shm
+
+# secrets
 .env
+voice.env
+
+# python and tooling
 __pycache__/
 *.pyc
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
 .pytest_cache/
-data/
-
+.ruff_cache/

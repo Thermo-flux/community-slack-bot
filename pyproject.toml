@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "goose-lee"
+version = "0.1.0"
+description = "A community duck bot for Slack: scoring, levels and weekly results, with an optional separate voice service."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "PyYAML>=6.0,<7",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+# The Slack gateway. The voice service needs no third-party packages at all.
+slack = [
+    "slack_bolt>=1,<2",
+]
+dev = [
+    "pytest>=7",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["goose*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]

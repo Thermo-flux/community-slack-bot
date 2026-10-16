@@ -1,68 +1,72 @@
-# 🤖 Community Champion Slack Bot
+# goose-lee
 
-A lightweight, production-grade Slack bot designed to track community activity, award contribution points (XP), calculate ranks & levels with progress bars, celebrate accomplishments, and chat intelligently with users via AI.
+goose-lee is a community duck bot for a Slack workspace. It scores chat activity and thanks in one official
+channel, turns the scores into pond levels, and posts weekly and all-time top 3 results that organizers confirm.
+The duck answers with short, canned lines. An optional voice service can answer addressed messages with an LLM,
+but it stays off until its safety gates are met.
 
-Runs effortlessly on a **small 2GB 2 vCPU server** or **free cloud service** (<70MB RAM footprint).
-
----
-
-## 📁 Organized Project Structure
+## Architecture
 
 ```text
-community_slack_bot/
-├── config/
-│   ├── config.json            # Deployer settings: XP rates, emojis, level tiers, templates
-│   ├── soul.md                # Bot persona, tone, character rules, AI system prompt
-│   └── slack_manifest.json    # 1-click Slack App setup manifest
-├── src/
-│   ├── bot.py                 # Main bot launcher (Socket Mode)
-│   ├── config.py              # Configuration and .env loader
-│   ├── database.py            # SQLite thread-safe database manager
-│   ├── leveling.py            # Level calculations, XP evaluation, progress bars
-│   ├── ai_service.py          # Multi-provider AI reasoning engine (Gemini, OpenAI, Anthropic, Mock)
-│   └── handlers.py            # Slack message tracking, @mentions, and slash commands
-├── deployment/
-│   ├── Dockerfile             # Production container definition
-│   ├── docker-compose.yml     # 1-command Docker deployment with persistent data volume
-│   └── slackbot.service       # Linux systemd background service file
-├── tests/
-│   ├── test_database.py       # Database unit & concurrency tests
-│   ├── test_leveling.py       # XP math, rank cards, and progress bar tests
-│   ├── test_ai_service.py     # AI provider & offline fallback tests
-│   ├── test_handlers.py       # Bot loop prevention & command routing tests
-│   └── test_stress.py         # High-concurrency stress tests (25 threads, 500 messages)
-├── data/                      # Persistent SQLite storage directory
-├── run_bot.py                 # Convenient root-level launcher script
-├── run_tests.py               # Convenient root-level test runner
-├── .env.example               # Environment credential template with instructions
-├── requirements.txt           # Pinned lightweight dependencies
-├── pytest.ini                 # Test runner configuration
-├── Dockerfile                 # Root container definition for Cloud platforms
-├── docker-compose.yml         # Root compose file for 1-command launch
-└── HANDOVER_GUIDE.md          # Complete step-by-step deployer & operator handover manual
+Slack (one Socket Mode connection)
+   |
+GATEWAY   goose/gateway   owns the Slack tokens, the database and the scheduler
+   |-- CORE   goose/core       scoring, levels, commands, canned lines (never waits for the voice)
+   |
+   +-- HTTP, JSON, 5 s timeout --> VOICE   goose/voice   separate container
+                                            LLM key and a shared secret only. No Slack, no database.
 ```
 
----
+The gateway is the only process with Slack tokens. The voice is standard library only and can reach only the LLM
+provider. See `docs/PLAN.md` section 10 for the full design.
 
-## 🚀 Quick Start (3 Steps)
+## Quick start
 
-1. **Install Dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. **Setup Credentials:**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your SLACK_BOT_TOKEN and SLACK_APP_TOKEN
-   ```
-3. **Launch the Bot:**
-   ```bash
-   python run_bot.py
-   ```
-
-To run the full 29-test verification suite:
 ```bash
-python run_tests.py
+python3.12 -m venv .venv
+. .venv/bin/activate                  # Windows: .venv\Scripts\activate
+python -m pip install ".[slack,dev]"
+cp .env.example .env                  # then fill in the Slack tokens and the shared secret
+python -m goose.gateway.app --check-config --config config/goose.yaml
+python -m goose.gateway.app --config config/goose.yaml
 ```
 
-For complete deployment and customization instructions, see [`HANDOVER_GUIDE.md`](HANDOVER_GUIDE.md).
+Or with Docker: `docker compose up -d`. The voice needs `voice.env` and `--profile voice`, see the runbook.
+
+## Commands (brief)
+
+Member commands use `/goose`, plus mentions of the duck. Full list: `docs/PLAN.md` sections 7 and 8.
+
+| Who | Examples |
+|---|---|
+| Members | `/goose join`, `leave`, `show`, `hide`, `rest`, `quiet on`, `me`, `top`, `all`, `explain`, `report` |
+| Organizers | `/goose results week`, `winners`, `me @person`, `star`, `bigstar`, `revoke`, `confirm-week`, `disqualify`, `skip-week` |
+| Owner only | `/goose confirm-final`, `/goose set-end <date>` |
+| Kill switches | `/goose pause`, `/goose resume`, `/goose voice off`, `/goose voice status` |
+
+## Voice gates
+
+The voice (the LLM answers) stays **off** until all of these are done:
+
+- safeguarding sign-off and the distress word list,
+- a provider whose terms allow under-18 end users, with retention confirmed,
+- a new privacy notice and re-consent from members,
+- the owner's approval.
+
+There is **no spend cap** in the bot, by design. Set a spending limit in the LLM provider's console before you
+switch the voice on. The bot limits each person to 12 addressed messages per hour and keeps replies short.
+
+## Safety notes
+
+- Secrets live only in `.env` and `voice.env`. Both are git-ignored and never copied into an image.
+- Logs hold reason codes and ids, never message text, tokens or keys.
+- The voice never sees names or Slack ids. Places and numbers about a person appear only in private replies.
+- Rewards are not announced while `rewards.announced` is `false`.
+- Distress messages get a plain reply and an alert to the organizers. No joke, no roast.
+
+## Documentation
+
+- `docs/PLAN.md`: behavior, scoring, safety, phases and the audit re-triage
+- `docs/RUNBOOK.md`: deploy, backups, restore, Monday checklist, incidents
+- `docs/CONTRIBUTING.md`: setup, tests, style, how to change a scoring rule
+- `BUILD_SPEC.md`: how the code is organized and built
