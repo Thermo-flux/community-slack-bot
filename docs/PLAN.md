@@ -647,7 +647,7 @@ There are **no spend caps**. The daily and monthly token limits, the call budget
 
 | Control | Default |
 |---|---|
-| **Message limit** | 12 addressed messages per person per hour (`voice.messages_per_person_per_hour`), and at least 5 seconds between a person's messages. Over the limit the duck posts one canned line ("the duck needs a breather") and stays quiet for that person until the hour rolls over. Rank answers, commands and explanations are not counted |
+| **Message limit** | 200 addressed messages per person per hour (`voice.messages_per_person_per_hour`), and at least 5 seconds between a person's messages. Over the limit the duck posts one canned line ("the duck needs a breather") and stays quiet for that person until the hour rolls over. Rank answers, commands and explanations are not counted |
 | **Reply length** | 300 characters for a normal reply, 700 only when someone asks for more in a thread. The call also asks the model for at most 100 tokens (200 when elaborating) |
 | Per call | Input 1,500 tokens at most (message 500 characters, thread excerpt 6 messages and 1,200 characters, card) |
 | Event remarks | 4 an hour and 12 a day in the channel, 1 per person per 24 hours. These stop the duck from getting noisy and are not a cost control |
@@ -756,7 +756,7 @@ tests/             unit, handler (fake Slack), concurrency, simulation, lint, vo
 
 - One YAML file with comments. Validated on start. Any error stops the bot, including a BOM or a missing file. `--check-config` runs in CI.
 - Secrets only in `.env` (gateway) and a separate `.env` for the voice. Persona text only in `lines.yaml`. Channels come from the YAML file only.
-- Key settings: `scored_channels: [#loadout]`, `organizer_channel` (suggested: `#loadout-development`, to be confirmed), `organizers`, `owner`, `confirmations_required: 1`, `message_curve: log`, `humor_level: 2`, `german_rate: 0.25`, `german_gloss: on_request`, `roast_rate: 0.1`, `mascot: duck`, `timezone`, `launch_date`, `end_date`, `rewards.announced: false`, `voice.enabled: false`, `voice.model` (on an allowlist), `voice.messages_per_person_per_hour: 12`, `voice.reply_max_chars: 300`, `voice.elaborate_max_chars: 700`, `voice.alert_tokens_per_day` (off), and the other limits in 10.8.
+- Key settings: `scored_channels: [#loadout]`, `organizer_channel` (suggested: `#loadout-development`, to be confirmed), `organizers`, `owner`, `confirmations_required: 1`, `message_curve: log`, `humor_level: 2`, `german_rate: 0.25`, `german_gloss: on_request`, `roast_rate: 0.1`, `mascot: duck`, `timezone`, `launch_date`, `end_date`, `rewards.announced: false`, `voice.enabled: false`, `voice.model` (on an allowlist), `voice.messages_per_person_per_hour: 200`, `voice.reply_max_chars: 300`, `voice.elaborate_max_chars: 700`, `voice.alert_tokens_per_day` (off), and the other limits in 10.8.
 
 ## 11. Safety
 
@@ -891,7 +891,7 @@ With a run of at most 3 months, phases 0 to 2 and the shadow weeks must finish b
 11. **Where the code lives.** The old repo belongs to Thermo-flux. Work in a fork or agree a plan with them.
 12. **Tell Netic** that the duck shares `#loadout` with Orry, uses `/goose` and `:duck:`.
 13. **LLM provider, model and spending limit.** Which provider, whether its terms allow under-18 end users, and its retention. The bot has no spend cap, so you set a limit in the provider's console. The provider must be chosen on terms and data handling, not only price.
-    - **Message limit:** I read "a message limit" as a limit on how often one person can talk to the duck (12 an hour) plus a cap on reply length. Say if you meant something else.
+    - **Message limit:** I read "a message limit" as a limit on how often one person can talk to the duck (200 an hour) plus a cap on reply length. Say if you meant something else.
 14. **Voice sign-off.** Safeguarding sign-off, the new privacy notice and re-consent. The voice stays off until these are done.
 15. **Roasts by the voice.** This plan allows it only when someone asks ("roast me") and for the duck itself. Roasts of other people come from fixed templates. Say if you want it stricter or looser.
 16. **The fake timeout.** One fixed, generic line at the top of the goose meter, at most once a day, with "nothing actually happens" in it and no target. Say if you would rather drop it, because a teenager could read "timeout" as real.

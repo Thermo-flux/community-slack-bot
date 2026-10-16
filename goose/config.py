@@ -110,7 +110,7 @@ class VoiceConfig:
     url: str = "http://voice:8081"
     secret_env: str = "VOICE_SHARED_SECRET"
     model: str = ""                        # must be on the voice's allowlist
-    messages_per_person_per_hour: int = 12   # the message limit (replaces spend caps)
+    messages_per_person_per_hour: int = 200  # the message limit (replaces spend caps)
     notice_version: str = "2"              # members must have accepted this privacy notice (via /goose join) before their messages go to the voice
     person_gap_s: int = 5
     reply_max_chars: int = 300

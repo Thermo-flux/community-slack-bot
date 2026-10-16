@@ -86,9 +86,10 @@ class Mono:
 
 # ----- message limit -------------------------------------------------------------------------------------------
 
-def test_twelve_messages_an_hour_then_the_thirteenth_is_limited(config, db, clock):
+def test_limit_messages_an_hour_then_the_next_one_is_limited(config, db, clock):
     c = _client(config, db, clock, Fake(_ok("x")))
-    for _ in range(12):
+    limit = config.voice.messages_per_person_per_hour
+    for _ in range(limit):
         assert c.allow_person("U1", clock.now()) == (True, "")
         c.record_person("U1", clock.now())
         clock.advance(5)
@@ -97,7 +98,7 @@ def test_twelve_messages_an_hour_then_the_thirteenth_is_limited(config, db, cloc
 
 def test_the_limit_is_per_person(config, db, clock):
     c = _client(config, db, clock, Fake(_ok("x")))
-    for _ in range(12):
+    for _ in range(config.voice.messages_per_person_per_hour):
         c.record_person("U1", clock.now())
         clock.advance(5)
     assert c.allow_person("U2", clock.now()) == (True, "")
@@ -106,7 +107,7 @@ def test_the_limit_is_per_person(config, db, clock):
 def test_the_window_rolls_after_an_hour(config, db, clock):
     c = _client(config, db, clock, Fake(_ok("x")))
     start = clock.now()
-    for _ in range(12):
+    for _ in range(config.voice.messages_per_person_per_hour):
         c.record_person("U1", clock.now())
         clock.advance(5)
     assert c.allow_person("U1", clock.now()) == (False, "limit")
@@ -132,7 +133,7 @@ def test_allow_person_does_not_record(config, db, clock):
 
 def test_limit_hits_are_counted_for_status(config, db, clock):
     c = _client(config, db, clock, Fake(_ok("x")))
-    for _ in range(12):
+    for _ in range(config.voice.messages_per_person_per_hour):
         c.record_person("U1", clock.now())
         clock.advance(5)
     c.allow_person("U1", clock.now())

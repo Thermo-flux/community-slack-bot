@@ -448,41 +448,50 @@ def test_addressed_message_gets_one_canned_reply_when_voice_is_off_or_failing(tm
 
 # ============================================================================================== scenario 4
 
-def test_message_limit_is_twelve_an_hour_then_one_canned_line(tmp_path):
+def test_message_limit_is_per_hour_then_one_canned_line(tmp_path):
+    """Limit comes from config (200 an hour by default). Pings are 5 seconds apart so the whole burst fits in one
+    rolling hour; the first over-limit ping gets one canned line, and nothing more until the hour rolls."""
     w = World(tmp_path, voice=True)
     w.join("UBUSY")
+    limit = w.cfg.voice.messages_per_person_per_hour
     limit_texts = w.canned("limit_reached")
     jobs = 0
-    for i in range(13):
+    for i in range(limit + 1):
         if i:
-            w.clock.advance(60)
+            w.clock.advance(5)
         res = w.route_message("UBUSY", "<@UBOT> ping %d while the pond is busy" % i)
         jobs += len(res.jobs)
         limit_lines = [a.text for a in res.actions if a.kind == "post" and a.text in limit_texts]
-        if i < 12:
+        if i < limit:
             assert limit_lines == [], "ping %d" % i
         else:
             assert len(limit_lines) == 1, "ping %d" % i
-    assert jobs == 12
+    assert jobs == limit
 
-    # Nothing more until the hour rolls. The pings below are all inside the first hour.
-    thirteenth = w.clock.now()
-    for offset in (60, 300, 540, 1800, 2500):
-        w.clock.set(thirteenth + offset)
+    # Still inside the first hour: no job and no second limit line.
+    over = w.clock.now()
+    for offset in (60, 300, 1200, 2400):
+        w.clock.set(over + offset)
         res = w.route_message("UBUSY", "<@UBOT> still here, still busy at minute %d" % (offset // 60))
         assert res.jobs == [], "offset %d" % offset
         assert [a for a in res.actions if a.kind == "post" and a.text in limit_texts] == [], "offset %d" % offset
+
+    # Once the first ping is more than an hour old, the window has room again.
+    w.clock.set(w.clock.now() + 3600)
+    res = w.route_message("UBUSY", "<@UBOT> the hour has rolled over")
+    assert len(res.jobs) == 1
 
 
 def test_message_limit_frees_up_when_the_hour_rolls_and_is_per_person(tmp_path):
     w = World(tmp_path, voice=True)
     w.join("UBUSY", "UCALM")
     start = w.clock.now()
-    for i in range(12):
-        w.clock.set(start + 60 * i)
+    limit = w.cfg.voice.messages_per_person_per_hour
+    for i in range(limit):
+        w.clock.set(start + 5 * i)
         assert len(w.route_message("UBUSY", "<@UBOT> ping %d about the pond" % i).jobs) == 1
-    w.clock.set(start + 720)
-    assert w.route_message("UBUSY", "<@UBOT> ping 12 about the pond").jobs == []
+    w.clock.set(start + 5 * limit)
+    assert w.route_message("UBUSY", "<@UBOT> ping %d about the pond" % limit).jobs == []
     # The other person is unaffected at the same moment.
     assert len(w.route_message("UCALM", "<@UBOT> is the pond open today").jobs) == 1
     # The first ping ages out of the hour at start + 3600, so the next ping gets a job again.
@@ -837,7 +846,7 @@ def test_message_and_app_mention_twins_make_one_fact_and_at_most_one_reply(tmp_p
 
 def test_config_loads_and_every_german_id_the_voice_may_use_is_in_the_line_bank():
     cfg = load_config(CONFIG_PATH)
-    assert cfg.voice.messages_per_person_per_hour == 12
+    assert cfg.voice.messages_per_person_per_hour == 200
     bank = LineBank.from_file(LINES_PATH)
     missing = sorted(set(APPROVED_DE_IDS) - set(bank.german_ids()))
     assert missing == [], "approved German ids with no line bank entry: %s" % missing
