@@ -1,0 +1,15 @@
+services:
+  slack-bot:
+    build: .
+    container_name: community_slack_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
