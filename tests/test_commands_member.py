@@ -166,6 +166,13 @@ def test_me_for_someone_not_joined_is_refused(ctx, ev):
     assert "join" in text.lower()
 
 
+def test_me_with_a_typed_at_name_asks_for_a_mention(ctx, ev):
+    join(ctx, "U1", "U2")
+    text = only_private(cmd(ctx, ev, "U1", "me", "@sam"), "U1")
+    assert "mention" in text.lower()
+    assert "Lifetime" not in text
+
+
 # ------------------------------------------------------------ top and all
 
 def test_top_without_a_confirmed_week_says_so(ctx, ev):
@@ -262,3 +269,23 @@ def test_report_text_with_program_words_is_still_filed(ctx, ev):
     res = cmd(ctx, ev, "U1", "report", "the ore numbers look wrong")
     assert [a.kind for a in res.actions] == ["ephemeral", "organizer_post"]
     assert ctx.db.one("SELECT COUNT(*) AS n FROM reports")["n"] == 1
+
+
+def test_report_body_is_never_echoed_into_outgoing_text(ctx, ev):
+    body = "<!channel> look at <https://x.slack.com/archives/C1/p1|this>"
+    res = cmd(ctx, ev, "U1", "report", body)
+    assert [a.kind for a in res.actions] == ["ephemeral", "organizer_post"]
+    for action in res.actions:
+        assert body not in action.text
+        assert "<!channel>" not in action.text
+
+
+def test_me_works_for_a_hidden_quiet_resting_member(ctx, ev):
+    join(ctx, "U1", show=False)
+    ctx.users.set_quiet("U1", True)
+    ctx.users.set_rest("U1", True)
+    text = only_private(cmd(ctx, ev, "U1", "me"), "U1")
+    assert "Pond level" in text
+    assert "hidden" in text
+    assert "Quiet: on" in text and "Rest: on" in text
+

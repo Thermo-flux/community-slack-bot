@@ -374,3 +374,72 @@ def test_level_up_note_is_private_and_announced_once(ctx, ev):
     assert res.actions[0].user == "U1"
     again = Router(ctx).level_up_notes(["U1"])
     assert again.actions == []
+
+
+# ------------------------------------------------------------ dedupe and single-reply guarantees
+
+def test_same_event_id_delivered_twice_is_handled_once(ctx, ev):
+    join(ctx, "U1")
+    route(ctx, ev(text=LONG, user="U1", message_ts="1760000700.000100", event_id="Evdup1"))
+    twin = ev(text="a different ordinary chat message", user="U1",
+              message_ts="1760000700.000200", event_id="Evdup1")
+    again = route(ctx, twin)
+    assert again.actions == [] and again.jobs == []
+    assert len(facts(ctx, "U1", "msg")) == 1
+
+
+def test_reaction_redelivery_without_event_id_is_claimed_once(ctx, ev):
+    join(ctx, "U1", "U2")
+    msg_ts = "1760000710.000001"
+    route(ctx, ev(text="this is a helpful long message", user="U2", message_ts=msg_ts))
+    route(ctx, ev("reaction_added", user="U1", reaction="duck", item_user="U2", message_ts=msg_ts, event_id=""))
+    again = route(ctx, ev("reaction_added", user="U1", reaction="duck", item_user="U2", message_ts=msg_ts,
+                          event_id=""))
+    assert again == Result()
+    assert len(facts(ctx, "U2", "thanks")) == 1
+    assert ctx.db.one("SELECT COUNT(*) AS n FROM processed WHERE key LIKE 'react:%'")["n"] == 1
+
+
+def test_member_command_outside_a_scored_channel_is_ignored(ctx, ev):
+    join(ctx, "U1")
+    res = route(ctx, ev("command", user="U1", command="me", args="", channel="COTHER"))
+    assert res == Result()
+
+
+def test_ping_gets_one_duck_reaction_and_one_canned_reply(ctx, ev):
+    join(ctx, "U1")
+    res = route(ctx, ev(text="<@UBOT> hello there", user="U1", bot_mentioned=True, mentions=[BOT]))
+    reacts = [a for a in res.actions if a.kind == "reaction"]
+    posts = [a for a in res.actions if a.kind == "post"]
+    assert len(reacts) == 1 and reacts[0].emoji == "duck"
+    assert len(posts) == 1
+    assert res.jobs == []
+
+
+def test_name_without_ping_gets_a_reaction_and_no_reply(make_ctx, ev, cfg):
+    cfg.vibes.name_reaction_chance = 1.0
+    session = make_ctx(config=cfg)
+    join(session, "U1")
+    res = route(session, ev(text="hey goose-lee, how is the pond", user="U1"))
+    assert kinds(res) == ["reaction"]
+    assert res.actions[0].emoji == "duck"
+    assert res.jobs == []
+
+
+def test_mention_shortcut_me_replies_privately_with_the_page(ctx, ev):
+    join(ctx, "U1")
+    res = route(ctx, ev(text="<@UBOT> me", user="U1", bot_mentioned=True, mentions=[BOT]))
+    eph = [a for a in res.actions if a.kind == "ephemeral"]
+    assert len(eph) == 1 and eph[0].user == "U1"
+    assert "Pond level 1" in eph[0].text
+    assert res.jobs == []
+
+
+def test_mention_shortcut_top_replies_privately(ctx, ev):
+    join(ctx, "U1")
+    res = route(ctx, ev(text="<@UBOT> top", user="U1", bot_mentioned=True, mentions=[BOT]))
+    eph = [a for a in res.actions if a.kind == "ephemeral"]
+    assert len(eph) == 1 and eph[0].user == "U1"
+    assert "confirmed" in eph[0].text.lower()
+    assert res.jobs == []
+

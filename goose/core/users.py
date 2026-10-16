@@ -59,6 +59,15 @@ class Users:
     def is_owner(self, user_id: str) -> bool:
         return self.config.is_owner(user_id)
 
+    def has_organizer_star(self, user_id: str) -> bool:
+        """True when the person holds at least one non-voided organizer star (the v6 level gate, PLAN_V6 section 5).
+        Pending stars count, exactly like Ledger.star_count; a voided star does not, so revoking the last star
+        closes the gate again and Levels.effective_level falls back to at most gate_level."""
+        row = self.db.one(
+            "SELECT COUNT(*) AS n FROM facts WHERE user_id = ? AND kind IN ('star', 'bigstar') "
+            "AND state != 'voided'", (user_id,))
+        return int(row["n"]) > 0
+
     def is_frozen(self, user_id: str, now: float) -> bool:
         row = self.db.one("SELECT frozen_until FROM users WHERE user_id = ?", (user_id,))
         return row is not None and float(row["frozen_until"]) > float(now)

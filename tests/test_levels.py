@@ -97,3 +97,79 @@ def test_simulator_level_table_is_reproduced(levels):
     helper = score_week(120, 6, 10, 6, star_points=0.5 * 25).total
     assert [levels.level_for(heavy * w) for w in (4, 6.5, 9, 13)] == [9, 11, 13, 15]
     assert [levels.level_for(helper * w) for w in (4, 6.5, 9, 13)] == [7, 9, 10, 12]
+
+
+# ---------------------------------------------------------------- v6 organizer-star gate
+
+def test_gate_caps_a_level_above_five_without_a_star(levels):
+    # PLAN_V6 section 5: chat, thanks and helpful crumbs alone stop at PL.5.
+    assert levels.effective_level(155, has_star=False) == 5
+    assert levels.effective_level(890, has_star=False) == 5
+    assert levels.effective_level(2000, has_star=False) == 5
+
+
+def test_gate_leaves_levels_one_to_five_unchanged(levels):
+    for crumbs, expected in ((0, 1), (10, 2), (25, 3), (50, 4), (100, 5)):
+        assert levels.effective_level(crumbs, has_star=False) == expected
+        assert levels.effective_level(crumbs, has_star=True) == expected
+
+
+def test_gate_opens_uncapped_levels_with_a_star(levels):
+    assert levels.effective_level(155, has_star=True) == 6
+    assert levels.effective_level(890, has_star=True) == 12
+    assert levels.effective_level(2000, has_star=True) > 12
+
+
+def test_raw_level_for_is_still_uncapped(levels):
+    # The gate is a separate layer; level_for stays the crumbs-only level (the simulator and snapshots use it).
+    assert levels.level_for(2000) == levels.effective_level(2000, has_star=True)
+    assert levels.level_for(2000) > levels.effective_level(2000, has_star=False)
+
+
+def test_gate_level_comes_from_config():
+    cfg = default_config()
+    cfg.levels.gate_level = 3
+    lv = Levels(cfg)
+    assert lv.gate_level == 3
+    assert lv.effective_level(25, has_star=False) == 3
+    assert lv.effective_level(100, has_star=False) == 3
+    assert lv.effective_level(500, has_star=True) == lv.level_for(500)
+
+
+def test_gate_can_be_disabled_in_config():
+    cfg = default_config()
+    cfg.levels.gate_enabled = False
+    lv = Levels(cfg)
+    assert lv.effective_level(890, has_star=False) == 12
+
+
+def test_needs_star_reports_the_gate():
+    cfg = default_config()
+    lv = Levels(cfg)
+    assert lv.needs_star(6, has_star=False) is True
+    assert lv.needs_star(6, has_star=True) is False
+    assert lv.needs_star(5, has_star=False) is False
+
+
+def test_a_bad_gate_level_fails_closed():
+    for bad in (0, -1, "5", 2.5, True):
+        cfg = default_config()
+        cfg.levels.gate_level = bad
+        with pytest.raises(ValueError):
+            Levels(cfg)
+
+
+def test_a_bad_gate_enabled_fails_closed():
+    cfg = default_config()
+    cfg.levels.gate_enabled = "yes"
+    with pytest.raises(ValueError):
+        Levels(cfg)
+
+
+def test_gated_progress_caps_the_level():
+    cfg = default_config()
+    lv = Levels(cfg)
+    assert lv.progress(890, has_star=False)["level"] == 5
+    assert lv.progress(890, has_star=True)["level"] == 12
+    # the default stays the ungated level, so existing callers are unchanged
+    assert lv.progress(890)["level"] == 12

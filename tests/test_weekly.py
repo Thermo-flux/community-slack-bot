@@ -524,3 +524,75 @@ def test_end_ts_sources(weekly, cfg, db, clock):
 def test_set_end_rejects_bad_dates(weekly):
     with pytest.raises(ValueError):
         weekly.set_end("next tuesday", "UOWNER")
+
+
+# ---------------------------------------------------------------- reconcile after late corrections
+
+def _void_one(ledger, user, week=WEEK):
+    rows = [f for f in ledger.all_facts(week_id=week, kinds=("msg",)) if f["user_id"] == user]
+    assert rows
+    ledger.void_fact(fact_id=rows[0]["id"], actor="UORG1", reason="late correction", now=SNAP + 3600)
+
+
+def test_reconcile_rebuilds_a_provisional_snapshot_after_a_late_void(weekly, users, feed, clock, ledger):
+    join_shown(users, clock, "U1", "U2", "U3")
+    feed.msgs("U1", 30)
+    feed.msgs("U2", 20)
+    feed.msgs("U3", 10)
+    weekly.close_week(WEEK, SNAP)
+    before = {r["user_id"]: r["total"] for r in weekly.snapshot(WEEK)}
+    _void_one(ledger, "U1")
+    out = weekly.reconcile(SNAP + 3600)
+    assert out["weeks"] == [WEEK]
+    assert out["checked"] == 1
+    after = weekly.snapshot(WEEK)
+    assert after[0]["user_id"] == "U1"
+    assert after[0]["total"] < before["U1"]
+    assert weekly.status(WEEK)["state"] == "provisional"
+
+
+def test_reconcile_is_idempotent(weekly, users, feed, clock, ledger):
+    join_shown(users, clock, "U1", "U2")
+    feed.msgs("U1", 10)
+    feed.msgs("U2", 5)
+    weekly.close_week(WEEK, SNAP)
+    _void_one(ledger, "U1")
+    assert weekly.reconcile(SNAP + 3600)["weeks"] == [WEEK]
+    assert weekly.reconcile(SNAP + 3600)["weeks"] == []
+
+
+def test_reconcile_invalidates_an_unannounced_partial_confirmation(weekly, users, feed, clock, ledger, cfg):
+    cfg.people.confirmations_required = 2
+    join_shown(users, clock, "U1", "U2", "U3")
+    feed.msgs("U1", 30)
+    feed.msgs("U2", 20)
+    feed.msgs("U3", 10)
+    weekly.close_week(WEEK, SNAP)
+    assert weekly.confirm_week(WEEK, "UORG1", SNAP) == ("need_more", {"week_id": WEEK, "have": 1, "need": 2})
+    assert weekly.status(WEEK)["confirmers"] == ["UORG1"]
+    _void_one(ledger, "U1")
+    assert weekly.reconcile(SNAP + 3600)["weeks"] == [WEEK]
+    assert weekly.status(WEEK)["confirmers"] == []
+    assert weekly.status(WEEK)["state"] == "provisional"
+
+
+def test_reconcile_never_rewrites_a_confirmed_week(weekly, users, feed, clock, ledger):
+    join_shown(users, clock, "U1", "U2", "U3")
+    feed.msgs("U1", 30)
+    feed.msgs("U2", 20)
+    feed.msgs("U3", 10)
+    weekly.close_week(WEEK, SNAP)
+    weekly.confirm_week(WEEK, "UORG1", SNAP)
+    top_before = weekly.last_confirmed()["top"]
+    version_before = weekly.status(WEEK)["version"]
+    _void_one(ledger, "U1")
+    out = weekly.reconcile(SNAP + 3600)
+    assert out["weeks"] == []
+    status = weekly.status(WEEK)
+    assert status["state"] == "confirmed"
+    assert status["version"] == version_before
+    assert weekly.last_confirmed()["top"] == top_before
+
+
+def test_reconcile_with_no_provisional_weeks_does_nothing(weekly):
+    assert weekly.reconcile(SNAP) == {"weeks": [], "checked": 0}

@@ -219,3 +219,31 @@ def test_is_frozen_reads_frozen_until_only(users, clock):
     users.join("U1", clock.now())
     users.freeze("U1", clock.now() + DAY, "x", "UORG1", clock.now())
     assert users.is_frozen("U1", clock.now())
+
+
+# ---------------------------------------------------------------- v6 organizer-star gate
+
+def test_has_organizer_star_reads_non_voided_stars(users, ledger, clock):
+    users.join("U1", clock.now())
+    assert users.has_organizer_star("U1") is False
+    fid = ledger.add_fact(idem_key="s1", user_id="U1", kind="star", ts=clock.now(), actor="UORG1")
+    assert users.has_organizer_star("U1") is True
+    ledger.void_fact(fact_id=fid, actor="UORG1", reason="mistake", now=clock.now())
+    assert users.has_organizer_star("U1") is False
+
+
+def test_has_organizer_star_counts_bigstars_and_pending(users, ledger, clock):
+    users.join("U1", clock.now())
+    ledger.add_fact(idem_key="b1", user_id="U1", kind="bigstar", ts=clock.now(), actor="UORG1")
+    assert users.has_organizer_star("U1") is True
+
+
+def test_has_organizer_star_is_false_for_unknown(users):
+    assert users.has_organizer_star("UNKNOWN") is False
+
+
+def test_has_organizer_star_ignores_other_fact_kinds(users, ledger, clock):
+    users.join("U1", clock.now())
+    add_msg(ledger, "U1", clock.now(), "m1")
+    ledger.add_fact(idem_key="t1", user_id="U1", kind="thanks", ts=clock.now(), counterparty="U2")
+    assert users.has_organizer_star("U1") is False

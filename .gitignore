@@ -19,3 +19,10 @@ dist/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+
+# editor and OS clutter
+.DS_Store
+Thumbs.db
+*.swp

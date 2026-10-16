@@ -6,6 +6,7 @@ Logging never includes message text, tokens or secrets: only reason codes.
 from __future__ import annotations
 
 import argparse
+import inspect
 import logging
 import os
 import signal
@@ -100,6 +101,20 @@ def _names_for(ctx: Any, job: VoiceJob) -> Dict[str, str]:
     return names
 
 
+def _call_voice(voice: Any, request: Dict[str, Any], user_id: str) -> VoiceResult:
+    """Call voice.call with user_id, but only when the callable accepts it. Test doubles may implement call(request)
+    only; the real VoiceClient takes an optional user_id."""
+    try:
+        params = inspect.signature(voice.call).parameters
+    except (TypeError, ValueError):
+        params = {}
+    accepts_user = "user_id" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    if accepts_user:
+        return voice.call(request, user_id=user_id)
+    return voice.call(request)
+
+
 def run_voice_job(ctx: Any, client: Any, job: VoiceJob) -> None:
     """Call the voice, post-filter, then post (or the canned fallback). Never raises."""
     voice = ctx.voice_client
@@ -107,7 +122,7 @@ def run_voice_job(ctx: Any, client: Any, job: VoiceJob) -> None:
         if voice is None:
             vr = VoiceResult(ok=False, reason="disabled")
         else:
-            vr = voice.call(job.request, user_id=job.user)
+            vr = _call_voice(voice, job.request, job.user)
         names = _names_for(ctx, job)
         post_filter = PostFilter(ctx.config, ctx.lines)
         message = (job.request.get("input") or {}).get("message") or {}

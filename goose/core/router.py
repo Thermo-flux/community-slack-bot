@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from goose.core import commands_member
 from goose.core.card import build_card
@@ -23,6 +23,8 @@ from goose.types import ORGANIZER_COMMANDS, Action, Event, Result, VoiceJob
 _HOUR = 3600
 _CLASSES = {"message": "new", "message_changed": "changed", "message_deleted": "deleted"}
 _STAGE_MOMENT = {"calm": "calm", "annoyed": "annoyed", "angry": "angry", "timeout": "timeout", "cooling": "cooling"}
+_REACTIONS = ("reaction_added", "reaction_removed")
+_SHORTCUT_COMMANDS = ("me", "top")
 
 _REDACT_MENTION = re.compile(r"<@[UW][A-Za-z0-9]+(?:\|[^>]*)?>")
 _REDACT_LINK = re.compile(r"<(?:https?|mailto):[^>]*>")
@@ -60,7 +62,8 @@ class Router:
         1. Ignore events from bots (event.is_bot) and from the bot's own user id. Dedupe: skip if `processed` has
            event_id, or (channel, class, message_ts) where class is new|changed|deleted; record it.
         2. kind 'command' -> member or organizer handler (types.MEMBER_COMMANDS / ORGANIZER_COMMANDS).
-        3. Only act in config.channels.scored (commands work anywhere the bot is).
+        3. Only act in config.channels.scored: messages, mentions and member commands. Organizer commands run in the
+           organizer channel.
         4. kind 'message':
            - program-term gate, distress gate, sad flag (core.safety);
            - if the sender joined: flood limit (scoring.flood_seconds), qualify_message, similarity check against the
@@ -144,6 +147,22 @@ class Router:
     def _claim(self, event: Event) -> bool:
         """Record the event keys in `processed`. False when any key was already there (a duplicate delivery)."""
         ctx = self.ctx
+        keys = self._dedupe_keys(event)
+        if not keys:
+            return True
+        fresh = True
+        now = ctx.clock.now()
+        for key in keys:
+            cur = ctx.db.execute("INSERT OR IGNORE INTO processed (key, ts) VALUES (?, ?)", (key, now))
+            if cur.rowcount != 1:
+                fresh = False
+        return fresh
+
+    def _dedupe_keys(self, event: Event) -> List[str]:
+        """Every key that makes this event unique. A later delivery carrying any of them is ignored.
+
+        Messages use the event id and (channel, class, message ts). When Slack gives no event id (or the kind is not a
+        message), a key is derived from what the event carries so an exact redelivery is still ignored once."""
         keys: List[str] = []
         if event.event_id:
             keys.append("evt:" + event.event_id)
@@ -152,13 +171,16 @@ class Router:
             ts = event.deleted_ts if (cls == "deleted" and event.deleted_ts) else event.message_ts
             if ts:
                 keys.append("msg:%s:%s:%s" % (event.channel, cls, ts))
-        fresh = True
-        now = ctx.clock.now()
-        for key in keys:
-            cur = ctx.db.execute("INSERT OR IGNORE INTO processed (key, ts) VALUES (?, ?)", (key, now))
-            if cur.rowcount != 1:
-                fresh = False
-        return fresh
+            return keys
+        if not event.event_id:
+            if event.kind in _REACTIONS and event.message_ts:
+                keys.append("react:%s:%s:%s:%s:%s" % (event.channel, event.kind, event.message_ts, event.user,
+                                                      event.reaction))
+            elif event.kind == "command" and (event.command or event.args):
+                keys.append("cmd:%s:%s:%s:%s" % (event.channel, event.user, event.command, event.args))
+            elif event.kind == "member_joined":
+                keys.append("join:%s:%s" % (event.channel, event.user))
+        return keys
 
     def _paused(self) -> bool:
         return self.ctx.db.get_setting("paused", "0") == "1"
@@ -169,6 +191,8 @@ class Router:
             from goose.core import commands_organizer
             return commands_organizer.handle(self.ctx, event)
         if self._paused():
+            return Result()
+        if not self.ctx.config.is_scored_channel(event.channel):
             return Result()
         return commands_member.handle(self.ctx, event)
 
@@ -203,6 +227,24 @@ class Router:
         ids = set(extract_user_ids(text)) | set(ev.mentions or [])
         ids.discard(self.ctx.bot_user_id)
         return bool(ids)
+
+    def _mention_shortcut(self, ev: Event) -> Optional[Tuple[str, str]]:
+        """A ping that starts with `me` or `top` (`@goose-lee me`) -> (command, args), else None.
+
+        Only the two shortcuts in PLAN section 8. The bot mention is read as an id; any label is ignored."""
+        text = (ev.text or "").lstrip()
+        mention = re.compile(r"<@%s(?:\|[^>]*)?>" % re.escape(self.ctx.bot_user_id))
+        match = mention.match(text)
+        if match is None:
+            return None
+        rest = text[match.end():].strip()
+        if not rest:
+            return None
+        parts = rest.split(None, 1)
+        command = parts[0].lower()
+        if command not in _SHORTCUT_COMMANDS:
+            return None
+        return command, (parts[1].strip() if len(parts) > 1 else "")
 
     # ------------------------------------------------------------ messages
 
@@ -261,6 +303,13 @@ class Router:
             if explained:
                 res.actions.append(self._post(ev, self._expand(explained)))
             return res
+        if ping:
+            shortcut = self._mention_shortcut(ev)
+            if shortcut is not None:
+                command_event = Event(kind="command", ts=ev.ts, channel=ev.channel, user=ev.user,
+                                      command=shortcut[0], args=shortcut[1])
+                res.extend(commands_member.handle(ctx, command_event))
+                return res
         self._chat(ev, now, res, ping=ping, in_thread=in_thread, flags=flags, text=text)
         return res
 

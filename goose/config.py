@@ -34,6 +34,10 @@ class LevelsConfig:
     titles: List[str] = field(default_factory=lambda: [
         "Hatchling", "Duckling", "Paddler", "Dabbler", "Mallard", "Diver",
         "Pond Scout", "Flock Leader", "Wing Commander", "Golden Beak", "Pond Elder", "Head Duck"])
+    # v6 organizer-star gate: a level above gate_level needs at least one non-voided organizer star.
+    # Without one, crumbs alone stop at gate_level; after a star, levels are uncapped.
+    gate_enabled: bool = True
+    gate_level: int = 5
     # activity bands from last confirmed week crumbs: below steady = quiet, then steady, active, very_active
     band_steady: float = 15
     band_active: float = 50
@@ -254,6 +258,8 @@ def _validate(cfg: Config, problems: List[str]) -> None:
         problems.append("levels.titles: needs exactly one title per threshold (%d)" % len(t))
     if cfg.levels.growth_above_top <= 1.0:
         problems.append("levels.growth_above_top: must be above 1.0")
+    if cfg.levels.gate_level < 1:
+        problems.append("levels.gate_level: must be at least 1")
     if cfg.scoring.message_curve not in ("log", "linear"):
         problems.append("scoring.message_curve: must be log or linear")
     if cfg.vibes.german_gloss not in ("on_request", "first_time", "always"):

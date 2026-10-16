@@ -6,7 +6,7 @@ import re
 
 import pytest
 
-from goose.core.ledger import tombstone
+from goose.core.ledger import helpful_key, msg_key, star_key, thanks_key, tombstone
 
 UTC = dt.timezone.utc
 
@@ -315,3 +315,77 @@ def test_tombstone_is_stable_and_distinct():
     assert tombstone("U1") == tombstone("U1")
     assert tombstone("U1") != tombstone("U2")
     assert re.fullmatch(r"deleted-[0-9a-f]{6}", tombstone("U1"))
+
+
+# ---------------------------------------------------------------- idempotency key shapes and replays
+
+def test_idempotency_key_shapes():
+    assert msg_key("C1", "1.2") == "msg:C1:1.2"
+    assert thanks_key("C1", "1.2", "U2") == "thanks:C1:1.2:U2"
+    assert helpful_key("C1", "1.2", "U3") == "helpful:C1:1.2:U3"
+    assert re.fullmatch(r"star:[0-9a-f]{32}", star_key())
+    assert star_key("deadbeef") == "star:deadbeef"
+
+
+def test_idempotent_replay_is_ignored_for_every_source(ledger, db):
+    ts = MON + 5
+    msg = msg_key("C1", "10.5")
+    assert ledger.add_fact(idem_key=msg, user_id="U1", kind="msg", ts=ts, channel="C1",
+                           message_ts="10.5") is not None
+    assert ledger.add_fact(idem_key=msg, user_id="U1", kind="msg", ts=ts, channel="C1",
+                           message_ts="10.5") is None
+
+    thanks = thanks_key("C1", "10.5", "U2")
+    assert ledger.add_fact(idem_key=thanks, user_id="U1", kind="thanks", ts=ts, counterparty="U2") is not None
+    assert ledger.add_fact(idem_key=thanks, user_id="U1", kind="thanks", ts=ts, counterparty="U2") is None
+
+    helpful = helpful_key("C1", "10.5", "U3")
+    assert ledger.add_fact(idem_key=helpful, user_id="U1", kind="helpful", ts=ts, counterparty="U3") is not None
+    assert ledger.add_fact(idem_key=helpful, user_id="U1", kind="helpful", ts=ts, counterparty="U3") is None
+
+    star = star_key("abc123")
+    assert ledger.add_fact(idem_key=star, user_id="U1", kind="star", ts=ts, actor="UORG1",
+                           reason="x") is not None
+    assert ledger.add_fact(idem_key=star, user_id="U1", kind="star", ts=ts, actor="UORG1", reason="x") is None
+    assert db.one("SELECT COUNT(*) AS n FROM facts")["n"] == 4
+
+
+def test_replayed_award_is_ignored_after_it_was_voided(ledger):
+    key = star_key("cafe01")
+    assert ledger.add_fact(idem_key=key, user_id="U1", kind="star", ts=MON + 1, actor="UORG1",
+                           reason="x") is not None
+    assert ledger.void_fact(idem_key=key, actor="UORG1", reason="oops")
+    assert ledger.add_fact(idem_key=key, user_id="U1", kind="star", ts=MON + 2, actor="UORG1",
+                           reason="x") is None
+
+
+# ---------------------------------------------------------------- recompute and reconcile
+
+def test_recompute_heals_week_id_drift_and_is_idempotent(ledger, facts, db):
+    fid = facts.msg(user="U1", ts=MON + 100)
+    db.execute("UPDATE facts SET week_id = '1999-01-04' WHERE id = ?", (fid,))
+    assert ledger.recompute() == 1
+    assert ledger.get_fact(fid)["week_id"] == WEEK
+    assert ledger.recompute() == 0
+
+
+def test_reconcile_finalizes_due_and_is_idempotent(ledger, facts, cfg):
+    facts.msg(user="U1", ts=MON + 1000, state="pending")
+    when = MON + 1000 + cfg.scoring.hold_seconds
+    first = ledger.reconcile(when)
+    assert first["finalized"] == ["U1"]
+    assert first["recomputed"] == 0
+    assert first["window_start"] == when - 48 * 3600
+    assert ledger.week_breakdown("U1", WEEK).n_msgs == 1
+    second = ledger.reconcile(when)
+    assert second["finalized"] == []
+    assert second["recomputed"] == 0
+
+
+def test_reconcile_heals_week_id_drift_and_reports_no_finalize(ledger, facts, db):
+    fid = facts.msg(user="U1", ts=MON + 100)
+    db.execute("UPDATE facts SET week_id = 'wrong' WHERE id = ?", (fid,))
+    out = ledger.reconcile(MON + 100)
+    assert out["finalized"] == []
+    assert out["recomputed"] == 1
+    assert ledger.get_fact(fid)["week_id"] == WEEK

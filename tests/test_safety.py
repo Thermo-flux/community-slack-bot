@@ -48,6 +48,14 @@ def test_is_program_question_cases():
     assert not safety.is_program_question("what a lovely day")
 
 
+def test_is_plain_context_covers_the_no_joke_no_german_contexts():
+    for kind in ("error", "privacy", "receipt", "report_receipt", "appeal_receipt", "report", "appeal",
+                 "safety", "distress", "ERROR", " Distress "):
+        assert safety.is_plain_context(kind)
+    for kind in ("post", "chat", "ephemeral", "organizer_post", "", None):
+        assert not safety.is_plain_context(kind)
+
+
 def test_safety_reply_is_plain_and_points_to_contact(cfg):
     text = safety.safety_reply(cfg)
     assert cfg.safety.contact_text in text

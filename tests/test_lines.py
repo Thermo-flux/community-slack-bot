@@ -20,6 +20,24 @@ REQUIRED_MOMENTS = [
     "busiest_duck", "pond_report_header", "pond_report_footer", "pond_report_result",
     "chat_fallback", "unknown_phrase", "quack", "pun",
 ]
+# BUILD_SPEC / PLAN_V6 require more than the default three lines for these:
+# ack is the eight appendix acknowledgements, the anger stages carry six each,
+# and the ranking/roast moments carry the counts in PLAN_V6 section 2.
+MOMENT_MINIMUMS = {
+    "ack": 8,
+    "anger_calm": 6,
+    "anger_annoyed": 6,
+    "anger_angry": 6,
+    "anger_honk": 6,
+    "anger_timeout": 6,
+    "anger_cooling": 6,
+    "rank_remark_active": 5,
+    "rank_top10": 4,
+    "rank_below": 2,
+    "rank_duck": 3,
+    "roast": 5,
+}
+MIN_LINES = 3
 REQUIRED_GERMAN = [
     "ente_gut", "entenschuldigung", "quaktuell", "entenentspannt", "quak_mal", "zeitungsente", "gans_falsch",
     "gans_toll", "moin", "mega", "hoppla", "watschel", "quak", "genau", "mensch", "entenzueckend",
@@ -51,6 +69,18 @@ def test_real_file_loads_and_has_every_required_moment(bank):
 def test_every_moment_has_at_least_three_lines(bank):
     for moment in bank.moments():
         assert len(bank.lines(moment)) >= 3, moment
+
+
+def test_every_required_moment_meets_its_stated_minimum_count(bank):
+    for moment in REQUIRED_MOMENTS:
+        assert bank.has_moment(moment), moment
+        expected = MOMENT_MINIMUMS.get(moment, MIN_LINES)
+        assert len(bank.lines(moment)) >= expected, (moment, len(bank.lines(moment)), expected)
+
+
+def test_rank_top10_lines_each_carry_the_rank_slot(bank):
+    for line in bank.lines("rank_top10"):
+        assert "{rank}" in line.text, line.id
 
 
 def test_required_german_ids_exist(bank):

@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "PyYAML>=6.0,<7",
+    # Required, not optional: on Windows the standard library has no system tz database, so
+    # ZoneInfo("Europe/Berlin") raises ZoneInfoNotFoundError unless tzdata is installed.
+    # The schedule timezone in config/goose.yaml depends on this, so it ships for every platform.
     "tzdata>=2024.1",
 ]
 

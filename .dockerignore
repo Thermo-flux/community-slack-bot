@@ -24,6 +24,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+.DS_Store
+Thumbs.db
 
 # documentation: only the README is useful inside an image
 *.md

@@ -9,6 +9,7 @@ Weeks use Clock.week_id(ts) (the Monday date, local time, half-open).
 from __future__ import annotations
 
 import hashlib
+import uuid as _uuid
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from goose.config import Config
@@ -20,11 +21,35 @@ from goose.types import FACT_KINDS, Breakdown
 STAR_KINDS = ("star", "bigstar")
 COUNTED_STATES = ("final",)
 PENDING_STATES = ("final", "pending")          # every state that is not voided
+RECONCILE_WINDOW_S = 48 * 3600.0               # the startup reconcile covers the last 48 hours
 
 
 def tombstone(user_id: str) -> str:
     """A stable stand-in for a deleted person: 'deleted-' + first 6 hex of sha256(user_id)."""
     return "deleted-" + hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:6]
+
+
+# ---------------------------------------------------------------- idempotency keys
+# The exact key shapes the ledger honors. A repeated key is ignored (Slack redelivery).
+
+def msg_key(channel: str, message_ts: str) -> str:
+    """'msg:<channel>:<ts>' for one qualified message."""
+    return "msg:%s:%s" % (channel, message_ts)
+
+
+def thanks_key(channel: str, message_ts: str, reactor: str) -> str:
+    """'thanks:<channel>:<ts>:<reactor>' for one :duck: from `reactor`."""
+    return "thanks:%s:%s:%s" % (channel, message_ts, reactor)
+
+
+def helpful_key(channel: str, message_ts: str, asker: str) -> str:
+    """'helpful:<channel>:<ts>:<asker>' for one check mark from `asker`."""
+    return "helpful:%s:%s:%s" % (channel, message_ts, asker)
+
+
+def star_key(token: Optional[str] = None) -> str:
+    """'star:<uuid>' for one organizer award. Pass `token` to replay an existing award and have it ignored."""
+    return "star:%s" % (token if token else _uuid.uuid4().hex)
 
 
 def _marks(values: Sequence[Any]) -> str:
@@ -193,6 +218,31 @@ class Ledger:
                 self.db.execute("UPDATE facts SET state = 'final' WHERE state = 'pending' AND week_id = ?",
                                 (week_id,))
         return [r["user_id"] for r in rows]
+
+    def recompute(self) -> int:
+        """Re-derive the stored `week_id` of every fact from its `ts` (PLAN_V6 10.13: recompute).
+        `week_id` is derived data, not a fact: healing it repairs rows written under an older timezone or week
+        boundary. Immutable columns are untouched. One transaction, idempotent: a second call changes nothing.
+        Returns the number of rows whose `week_id` changed."""
+        rows = self._select("SELECT id, ts, week_id FROM facts ORDER BY id")
+        changed = 0
+        with self.db.tx():
+            for row in rows:
+                expected = self.clock.week_id(float(row["ts"]))
+                if expected != row["week_id"]:
+                    self.db.execute("UPDATE facts SET week_id = ? WHERE id = ?", (expected, row["id"]))
+                    changed += 1
+        return changed
+
+    def reconcile(self, now: Optional[float] = None, window_s: float = RECONCILE_WINDOW_S) -> Dict[str, Any]:
+        """Startup reconcile (PLAN_V6 9, 10.12): re-derive ordinary ledger state from the immutable facts for the
+        recent window. Transactional and idempotent: it promotes pending facts whose hold has passed and heals any
+        `week_id` drift. Returns {"finalized": [user ids], "recomputed": <rows healed>, "window_start": <ts>}.
+        A repeat with the same `now` finalizes nothing and heals nothing."""
+        when = self._now(now)
+        finalized = self.finalize_due(when)
+        healed = self.recompute()
+        return {"finalized": sorted(finalized), "recomputed": healed, "window_start": when - float(window_s)}
 
     def anonymize_user(self, user_id: str) -> int:
         """leave(): delete the person's own facts and replace their id in other people's facts (counterparty/actor)

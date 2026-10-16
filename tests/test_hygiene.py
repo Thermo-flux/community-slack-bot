@@ -6,13 +6,21 @@ import os
 import pathlib
 import re
 
+import pytest
+import yaml
+
+from goose.core.wordlists import REWARD_STRONG
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 EM_DASH = chr(0x2014)
 EN_DASH = chr(0x2013)
-SKIP_DIRS = {".git", "data", "backups", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv", "build", "dist"}
+SKIP_DIRS = {".git", "data", "backups", "__pycache__", ".pytest_cache", ".ruff_cache",
+             ".mypy_cache", ".venv", "venv", "build", "dist"}
 VOICE_FORBIDDEN = ("goose.core", "goose.gateway", "sqlite3", "slack", "slack_bolt")
 TIME_ALLOWED = {"goose/core/clock.py", "goose/gateway/voice_client.py"}
 GLOBAL_RANDOM = re.compile(r"\brandom\.(random|choice|randint|shuffle)\(")
+REWARD_RE = re.compile(r"(?<!\w)(?:%s)(?!\w)" % "|".join(re.escape(w) for w in REWARD_STRONG),
+                       re.IGNORECASE)
 
 
 def rel(path):
@@ -49,6 +57,51 @@ def test_no_em_or_en_dashes_in_any_text_file():
             if EM_DASH in line or EN_DASH in line:
                 offenders.append("%s:%d" % (rel(path), lineno))
     assert not offenders, "em or en dashes found: " + ", ".join(offenders)
+
+
+def _walk_string_values(node):
+    """Yield every string value in a parsed data file, skipping the keys of slots whose name starts with
+    'reward_' (the only places reward wording is allowed once the flag is on)."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(key, str) and key.startswith("reward_"):
+                continue
+            for item in _walk_string_values(value):
+                yield item
+    elif isinstance(node, list):
+        for value in node:
+            for item in _walk_string_values(value):
+                yield item
+    elif isinstance(node, str):
+        yield node
+
+
+def test_no_reward_words_while_rewards_are_unannounced():
+    """While rewards.announced is false, no string in any data file in the tree may carry a reward word.
+
+    The line bank lint (goose/core/lines.py) enforces this for lines.yaml at load time; this walks every YAML and
+    JSON file in the tree (the shipped config, the line bank, the Slack manifest) so a stray reward word in any of
+    them is caught here too."""
+    shipped = yaml.safe_load((ROOT / "config" / "goose.yaml").read_text(encoding="utf-8-sig")) or {}
+    announced = bool((shipped.get("rewards") or {}).get("announced", False))
+    if announced:
+        pytest.skip("rewards are announced, so reward wording is allowed")
+    offenders = []
+    for path in iter_files():
+        if path.suffix.lower() not in (".yaml", ".yml", ".json"):
+            continue
+        text = read_text(path)
+        if text is None:
+            continue
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError:
+            continue
+        for value in _walk_string_values(data):
+            match = REWARD_RE.search(value)
+            if match:
+                offenders.append("%s: %r" % (rel(path), match.group(0)))
+    assert not offenders, "reward wording while rewards are unannounced: " + "; ".join(offenders)
 
 
 def _imported_names(path, tree):

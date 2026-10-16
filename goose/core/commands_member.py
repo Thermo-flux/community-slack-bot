@@ -20,6 +20,7 @@ PRIVACY_LINE = (
 
 REPORT_WINDOW_S = 72 * 3600
 _SLACK_LINK = re.compile(r"archives/([A-Z0-9]+)/p(\d{7,})")
+_PLAIN_AT = re.compile(r"(?<!<)@[A-Za-z_]")
 
 # Plain structural replies. Not jokes, no German. Kept here so they are easy to move into lines.yaml as moments.
 PLAIN = {
@@ -42,6 +43,8 @@ PLAIN = {
                        "and organizers reply within 72 hours."),
     "not_on_board": "You are not on the all-time board yet.",
     "not_top10": "You are not in the top 10 this week.",
+    "plain_name": ("I read people from a mention, not from a typed name. Pick the person from the mention list, "
+                   "or use `/goose me` for your own page."),
 }
 
 HELP_TEXT = "\n".join([
@@ -229,6 +232,8 @@ def _me(ctx: AppContext, event: Event, args: str) -> Result:
     target = event.user
     header = ""
     ids = extract_user_ids(args)
+    if not ids and _PLAIN_AT.search(args):
+        return Result.of(_eph(event, PLAIN["plain_name"]))
     if ids and ids[0] != event.user:
         if not ctx.config.is_organizer(event.user):
             return Result.of(_eph(event, PLAIN["not_organizer"]))

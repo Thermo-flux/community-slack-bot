@@ -49,6 +49,21 @@ def test_wrong_type_fails_and_the_path_is_named(tmp_path):
         load_config(path)
 
 
+def test_top_level_typo_fails_and_names_the_key():
+    with pytest.raises(ConfigError, match="channles"):
+        config_from_dict({"channles": {"scored": ["C1"]}})
+
+
+def test_nested_bad_bool_fails_closed():
+    with pytest.raises(ConfigError, match="voice.enabled"):
+        config_from_dict({"voice": {"enabled": "yes"}})
+
+
+def test_nested_typo_in_a_known_section_fails_closed():
+    with pytest.raises(ConfigError, match="voice.messages_per_hour"):
+        config_from_dict({"voice": {"messages_per_hour": 5}})
+
+
 def test_utf8_bom_file_loads(tmp_path):
     with open(REAL, "r", encoding="utf-8") as fh:
         text = fh.read()

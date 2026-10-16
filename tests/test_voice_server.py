@@ -313,6 +313,26 @@ def test_missing_content_length_is_400(running):
     assert status == 400
 
 
+def test_voice_smoke_starts_against_a_fake_provider():
+    provider = FakeProvider(reply=_text(GOOD_OUTPUT))
+    server = make_server("127.0.0.1", 0, provider, SECRET)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    try:
+        with urllib.request.urlopen(base + "/health", timeout=5) as resp:
+            health = json.loads(resp.read().decode("utf-8"))
+        assert health == {"ok": True, "model": "fake-model"}
+        status, body = _post(base, _request())
+        assert status == 200
+        assert body["action"] == "speak"
+        assert body["request_id"] == "abc-123"
+        assert body["text"] == GOOD_OUTPUT["text"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_make_server_requires_nothing_else_than_provider_and_secret():
     server = make_server("127.0.0.1", 0, FakeProvider(reply="{}"), "s")
     try:

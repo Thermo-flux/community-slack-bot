@@ -20,12 +20,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
 
+      # Install the package itself, so the build backend, the dependency list (PyYAML and the
+      # tzdata that ZoneInfo needs on Windows and slim images) and both extras are exercised.
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "PyYAML==6.0.*" "tzdata>=2024.1,<2027" pytest ruff
+          python -m pip install ".[slack,dev]"
 
+      # The whole Definition of done, in order.
       - name: Lint
         run: python -m ruff check .
 
@@ -36,7 +40,7 @@ jobs:
         run: python tools/level_sim.py
 
       - name: Check config
-        run: python -m goose.gateway.app --check-config --config config/goose.yaml
+        run: python -m goose.gateway.app --check-config
 
       - name: No em or en dashes
         shell: bash
