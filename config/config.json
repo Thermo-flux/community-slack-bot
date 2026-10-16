@@ -40,7 +40,7 @@
 
   "emoji_settings": {
     "_comment_frequency": "Controls how many emojis the bot uses. Options: 'none', 'low', 'moderate', 'high'",
-    "frequency": "moderate",
+    "frequency": "low",
 
     "_comment_allowed": "Approved emojis the bot is allowed to use in its responses and reactions.",
     "allowed_emojis": ["🎉", "⭐", "🚀", "💡", "🔥", "✨", "👏", "🏆", "🌱", "🌿"]

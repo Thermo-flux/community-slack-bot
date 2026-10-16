@@ -7,6 +7,7 @@ with automatic conversation memory, thinking scratchpad cleanup, and live commun
 ==============================================================================
 """
 
+import os
 import re
 import json
 import logging
@@ -233,6 +234,11 @@ def _call_openai_compatible(messages: List[Dict[str, str]], timeout: int = 35) -
         "max_tokens": 2048,
         "temperature": 0.7
     }
+
+    # Pass reasoning_effort="low" for reasoning models like Grok 4.7 to minimize token cost and latency
+    reasoning_effort = os.getenv("AI_REASONING_EFFORT", "low").strip().lower()
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
 
     last_err = None
     for attempt in range(2):
