@@ -51,8 +51,6 @@ def _sum_breakdowns(items: Iterable[Breakdown]) -> Breakdown:
     return total
 
 
-RECONCILE_WINDOW_S = 48 * 3600.0   # the startup reconcile covers the last 48 hours
-
 class Ledger:
     def __init__(self, db: Database, config: Config, clock: Clock):
         self.db = db
@@ -195,31 +193,6 @@ class Ledger:
                 self.db.execute("UPDATE facts SET state = 'final' WHERE state = 'pending' AND week_id = ?",
                                 (week_id,))
         return [r["user_id"] for r in rows]
-
-    def recompute(self) -> int:
-        """Re-derive the stored `week_id` of every fact from its `ts` (PLAN_V6 10.13: recompute).
-        `week_id` is derived data, not a fact: healing it repairs rows written under an older timezone or week
-        boundary. Immutable columns are untouched. One transaction, idempotent: a second call changes nothing.
-        Returns the number of rows whose `week_id` changed."""
-        rows = self._select("SELECT id, ts, week_id FROM facts ORDER BY id")
-        changed = 0
-        with self.db.tx():
-            for row in rows:
-                expected = self.clock.week_id(float(row["ts"]))
-                if expected != row["week_id"]:
-                    self.db.execute("UPDATE facts SET week_id = ? WHERE id = ?", (expected, row["id"]))
-                    changed += 1
-        return changed
-
-    def reconcile(self, now: Optional[float] = None, window_s: float = RECONCILE_WINDOW_S) -> Dict[str, Any]:
-        """Startup reconcile (PLAN_V6 9, 10.12): re-derive ordinary ledger state from the immutable facts for the
-        recent window. Transactional and idempotent: it promotes pending facts whose hold has passed and heals any
-        `week_id` drift. Returns {"finalized": [user ids], "recomputed": <rows healed>, "window_start": <ts>}.
-        A repeat with the same `now` finalizes nothing and heals nothing."""
-        when = self._now(now)
-        finalized = self.finalize_due(when)
-        healed = self.recompute()
-        return {"finalized": sorted(finalized), "recomputed": healed, "window_start": when - float(window_s)}
 
     def anonymize_user(self, user_id: str) -> int:
         """leave(): delete the person's own facts and replace their id in other people's facts (counterparty/actor)

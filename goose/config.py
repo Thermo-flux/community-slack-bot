@@ -57,6 +57,7 @@ class PeopleConfig:
     organizers: List[str] = field(default_factory=list)   # Slack user ids
     owner: str = ""                                       # Slack user id, can confirm the final result
     confirmations_required: int = 1
+    stats_visibility: str = "shown"     # shown: other members can look up anyone who chose /goose show | private: organizers only
 
 
 @dataclass
@@ -271,6 +272,8 @@ def _validate(cfg: Config, problems: List[str]) -> None:
         v = getattr(cfg.vibes, name)
         if not 0.0 <= v <= 1.0:
             problems.append("vibes.%s: must be between 0 and 1" % name)
+    if cfg.people.stats_visibility not in ("shown", "private"):
+        problems.append("people.stats_visibility: must be shown or private")
     if cfg.people.confirmations_required < 1:
         problems.append("people.confirmations_required: must be at least 1")
     if not cfg.channels.scored:

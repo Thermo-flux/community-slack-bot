@@ -194,3 +194,104 @@ def test_default_http_path_against_a_local_stub():
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ----------------------------------------------------------------------------- universal formats and caching
+
+from goose.voice.prompt import build_parts, STATIC_PREFIX  # noqa: E402
+
+PARTS = {"static": STATIC_PREFIX, "dynamic": "REQUEST\nmode: chat", "user": "hi"}
+MSGS = [{"role": "system", "content": STATIC_PREFIX + "\nREQUEST\nmode: chat"}, {"role": "user", "content": "hi"}]
+
+
+class Capture:
+    def __init__(self, body):
+        self.body = body
+        self.url = None
+        self.headers = None
+        self.sent = None
+
+    def __call__(self, url, body, headers, timeout):
+        self.url, self.sent, self.headers = url, body, headers
+        return 200, self.body
+
+
+def _anthropic_body(**usage):
+    base = {"content": [{"type": "text", "text": '{"action":"speak"}'}],
+            "usage": {"input_tokens": 0, "output_tokens": 9}}
+    base["usage"].update(usage)
+    return base
+
+
+def test_anthropic_format_marks_only_the_static_block_for_caching():
+    cap = Capture(_anthropic_body())
+    p = Provider("https://api.anthropic.com/v1", "k", "m", ["m"], http_post=cap, api_format="anthropic")
+    p.complete_usage(MSGS, max_tokens=100, parts=PARTS)
+    system = cap.sent["system"]
+    assert system[0] == {"type": "text", "text": STATIC_PREFIX, "cache_control": {"type": "ephemeral"}}
+    assert system[1] == {"type": "text", "text": "REQUEST\nmode: chat"}      # per-request facts are not cached
+    assert cap.url == "https://api.anthropic.com/v1/messages"
+    assert cap.headers["x-api-key"] == "k" and cap.headers["anthropic-version"]
+    assert "Authorization" not in cap.headers
+    assert cap.sent["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_anthropic_cache_off_sends_no_cache_marker():
+    cap = Capture(_anthropic_body())
+    p = Provider("https://api.anthropic.com/v1", "k", "m", ["m"], http_post=cap, api_format="anthropic", cache=False)
+    p.complete_usage(MSGS, max_tokens=100, parts=PARTS)
+    assert all("cache_control" not in block for block in cap.sent["system"])
+
+
+def test_anthropic_usage_adds_cache_reads_and_writes_into_the_input_total():
+    cap = Capture(_anthropic_body(input_tokens=40, cache_read_input_tokens=900, cache_creation_input_tokens=0))
+    p = Provider("https://api.anthropic.com/v1", "k", "m", ["m"], http_post=cap, api_format="anthropic")
+    u = p.complete_usage(MSGS, max_tokens=100, parts=PARTS)
+    assert (u.tokens_in, u.tokens_out, u.cached_in) == (940, 9, 900)
+
+
+def test_openai_format_sends_the_same_messages_with_no_cache_marker():
+    cap = Capture({"choices": [{"message": {"content": "ok"}}],
+                   "usage": {"prompt_tokens": 950, "completion_tokens": 4,
+                             "prompt_tokens_details": {"cached_tokens": 800}}})
+    p = Provider("https://api.openai.com/v1", "k", "m", ["m"], http_post=cap)
+    u = p.complete_usage(MSGS, max_tokens=100, parts=PARTS)
+    assert cap.url == "https://api.openai.com/v1/chat/completions"
+    assert cap.sent["messages"] == MSGS
+    assert "cache_control" not in str(cap.sent)
+    assert (u.tokens_in, u.tokens_out, u.cached_in) == (950, 4, 800)
+
+
+def test_openai_format_without_cache_details_counts_zero_cached():
+    cap = Capture({"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 5, "completion_tokens": 1}})
+    u = Provider("https://api.example.com/v1", "k", "m", ["m"], http_post=cap).complete_usage(MSGS, max_tokens=10)
+    assert u.cached_in == 0
+
+
+def test_anthropic_response_without_a_text_block_is_bad_json():
+    cap = Capture({"content": [{"type": "tool_use"}], "usage": {}})
+    p = Provider("https://api.anthropic.com/v1", "k", "m", ["m"], http_post=cap, api_format="anthropic")
+    with pytest.raises(ProviderError, match="bad_json"):
+        p.complete_usage(MSGS, max_tokens=10, parts=PARTS)
+
+
+def test_unknown_format_is_refused():
+    with pytest.raises(ProviderError, match="bad_format"):
+        Provider("https://x.example/v1", "k", "m", ["m"], api_format="gemini-native")
+
+
+def test_default_base_url_follows_the_format_and_env_selects_it():
+    p = Provider("", "k", "m", ["m"], api_format="anthropic")
+    assert p.base_url == "https://api.anthropic.com/v1"
+    env = {"LLM_API_FORMAT": "anthropic", "LLM_API_KEY": "k", "LLM_MODEL": "m", "LLM_MODEL_ALLOWLIST": "m",
+           "LLM_CACHE": "off"}
+    q = Provider.from_env(env)
+    assert q.api_format == "anthropic" and q.cache is False and q.base_url == "https://api.anthropic.com/v1"
+    assert Provider.from_env({"LLM_API_KEY": "k", "LLM_MODEL": "m", "LLM_MODEL_ALLOWLIST": "m"}).api_format == "openai"
+
+
+def test_static_prefix_is_the_same_bytes_on_every_request():
+    a = build_parts({"kind": "addressed", "mode": "chat", "card": {"you": {"pond_level": 3}}, "persona": {}})
+    b = build_parts({"kind": "addressed", "mode": "chat", "card": {"you": {"pond_level": 9}}, "persona": {}})
+    assert a["static"] == b["static"] == STATIC_PREFIX
+    assert a["dynamic"] != b["dynamic"]

@@ -37,6 +37,7 @@ systemctl daemon-reload && systemctl enable --now goose
 | `VOICE_SHARED_SECRET` | `.env` and `voice.env` | Same value in both, compared in constant time |
 | `VOICE_PORT` | `voice.env` | Voice listen port (default 8081) |
 | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_MODEL_ALLOWLIST` | `voice.env` | Provider settings. The model must be on the allowlist |
+| `LLM_API_FORMAT`, `LLM_CACHE` | `voice.env` | `openai` (default; OpenAI and most other providers) or `anthropic`. Caching is on by default and only changes billed input cost |
 
 The gateway refuses to start if a token is missing or has the wrong prefix.
 

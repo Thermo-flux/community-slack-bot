@@ -97,6 +97,18 @@ def redact(text: str) -> str:
     return out
 
 
+# The static prefix: the same bytes on every request, so any provider that caches a stable prompt prefix can reuse it.
+# It holds everything that does not change per request: the persona and rules, the approved German ids and reactions,
+# the output schema and the example. Per-request facts (mode, reply cap, persona flags, card) come after it.
+STATIC_PREFIX = (
+    SYSTEM_PROMPT + "\n"
+    + "approved German ids (use only in the double-brace de placeholder form): " + ", ".join(APPROVED_DE_IDS) + "\n"
+    + "approved reactions (or null): " + ", ".join(APPROVED_REACTIONS) + "\n"
+    + "output JSON schema: " + json.dumps(OUTPUT_SCHEMA, separators=(",", ":")) + "\n"
+    + "example output: " + json.dumps(EXAMPLE_OUTPUT, separators=(",", ":"))
+)
+
+
 def _as_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -115,12 +127,13 @@ def _untrusted(label: str, body: str) -> str:
     return "<untrusted_%s>\n%s\n</untrusted_%s>" % (label, redact(body), label)
 
 
-def _system_block(request: Dict[str, Any]) -> str:
+def _dynamic_block(request: Dict[str, Any]) -> str:
+    """The per-request facts that follow the static prefix. Redacted, because the card and mode come from the request."""
     persona = _as_dict(request.get("persona"))
     kind = str(request.get("kind") or "addressed")
     mode = str(request.get("mode") or ("event" if kind == "event" else "chat"))
     card_json = json.dumps(_as_dict(request.get("card")), separators=(",", ":"), sort_keys=True)
-    dynamic = [
+    lines = [
         "REQUEST",
         "kind: %s" % kind,
         "mode: %s" % mode,
@@ -128,13 +141,15 @@ def _system_block(request: Dict[str, Any]) -> str:
         "persona: humor_level=%s german_allowed=%s roast_allowed=%s" % (
             persona.get("humor_level"), bool(persona.get("german_allowed")), bool(persona.get("roast_allowed"))),
         "card (the only facts you may use about the community; it has no names): %s" % card_json,
-        "approved German ids (use only in the double-brace de placeholder form): %s" % ", ".join(APPROVED_DE_IDS),
-        "approved reactions (or null): %s" % ", ".join(APPROVED_REACTIONS),
-        "output JSON schema: %s" % json.dumps(OUTPUT_SCHEMA, separators=(",", ":")),
-        "example output: %s" % json.dumps(EXAMPLE_OUTPUT, separators=(",", ":")),
     ]
-    # The static prompt is not redacted (it contains literal placeholders); only the per-request part is.
-    return SYSTEM_PROMPT + "\n" + redact("\n".join(dynamic))
+    return redact("\n".join(lines))
+
+
+def build_parts(request: Dict[str, Any]) -> Dict[str, str]:
+    """The three pieces of one call: the static prefix (cacheable), the per-request system facts, and the user turn.
+    Providers use this to place cache markers; build_messages joins them for providers without explicit markers."""
+    request = _as_dict(request)
+    return {"static": STATIC_PREFIX, "dynamic": _dynamic_block(request), "user": _user_block(request)}
 
 
 def _user_block(request: Dict[str, Any]) -> str:
@@ -160,13 +175,13 @@ def _user_block(request: Dict[str, Any]) -> str:
 
 
 def build_messages(request: Dict[str, Any]) -> List[Dict[str, str]]:
-    """OpenAI-style messages: a system message (SYSTEM_PROMPT plus a compact per-request block with persona flags, mode,
-    reply cap, the card as JSON and the allowed German ids) and one user message holding the speaker's text and the
-    redacted thread excerpt, clearly labelled as untrusted data. For kind 'event' there is no chat text, only facts."""
-    request = _as_dict(request)
+    """Chat messages in the OpenAI shape: one system message (the static prefix first, then the per-request facts) and one
+    user message with the speaker's text and the redacted thread, labelled as untrusted data. For kind 'event' there is
+    no chat text, only facts. The stable prefix comes first, so prefix caching works on any provider that does it."""
+    parts = build_parts(request)
     return [
-        {"role": "system", "content": _system_block(request)},
-        {"role": "user", "content": _user_block(request)},
+        {"role": "system", "content": parts["static"] + "\n" + parts["dynamic"]},
+        {"role": "user", "content": parts["user"]},
     ]
 
 

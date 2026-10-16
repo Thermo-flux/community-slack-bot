@@ -11,7 +11,7 @@ import urllib.request
 
 import pytest
 
-from goose.voice.provider import ProviderError
+from goose.voice.provider import ProviderError, Usage
 from goose.voice.server import (REPLAY_WINDOW_S, ReplayGuard, handle_request, make_server, sign_request)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,11 +34,11 @@ class FakeProvider:
         self.error = error
         self.seen = []
 
-    def complete(self, messages, max_tokens, timeout=4.0):
+    def complete_usage(self, messages, max_tokens, timeout=4.0, parts=None):
         self.seen.append((messages, max_tokens, timeout))
         if self.error:
             raise ProviderError(self.error)
-        return self.reply, 21, 9
+        return Usage(text=self.reply, tokens_in=21, tokens_out=9, cached_in=0)
 
 
 def _text(obj):
@@ -80,7 +80,7 @@ def test_valid_request_returns_the_response_with_version_and_request_id():
     assert body["text"] == GOOD_OUTPUT["text"]
     assert body["reaction"] == "duck"
     assert body["flags"]["numbers_used"] == []
-    assert body["usage"] == {"tokens_in": 21, "tokens_out": 9}
+    assert body["usage"] == {"tokens_in": 21, "tokens_out": 9, "cached_in": 0}
 
 
 def test_fenced_json_block_is_accepted():

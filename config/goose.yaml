@@ -9,6 +9,7 @@ people:
   organizers: []                 # Slack user ids of organizers (adults). At least 2 recommended
   owner: ""                      # Slack user id that can run confirm-final and set-end
   confirmations_required: 1      # 1 = one organizer confirms a week, 2 = two must
+  stats_visibility: shown        # shown = members can look up anyone who chose /goose show; private = organizers only
 
 scoring:
   message_curve: log             # log = gentle curve (recommended), linear = pure volume

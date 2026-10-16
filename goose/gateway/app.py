@@ -470,13 +470,6 @@ def run_gateway(config_path: str) -> int:
         log.error("another gateway is running (heartbeat is fresh); refusing to start")
         ctx.db.close()
         return 3
-    # Startup reconcile: promote holds that have passed, heal week ids, and invalidate stale unannounced boards.
-    # Both steps are idempotent, so a restart replays nothing.
-    try:
-        ctx.ledger.reconcile(clock.now())
-        ctx.weekly.reconcile(clock.now())
-    except Exception as exc:  # reconcile must never stop the gateway; the reason code only
-        log.error("startup reconcile failed: %s", type(exc).__name__)
 
     bot_token = os.environ["SLACK_BOT_TOKEN"]
     app_token = os.environ["SLACK_APP_TOKEN"]

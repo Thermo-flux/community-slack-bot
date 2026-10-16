@@ -238,56 +238,6 @@ class Weekly:
             self._write_week_results(status["week_id"], new_rows)
             self.db.execute("UPDATE week_status SET version = version + 1 WHERE week_id = ?", (status["week_id"],))
 
-    @staticmethod
-    def _snapshot_differs(stored: Sequence[Dict[str, Any]], fresh: Sequence[Dict[str, Any]]) -> bool:
-        """True when the stored board no longer matches a fresh ranking of the same week."""
-        if len(stored) != len(fresh):
-            return True
-        for old, new in zip(stored, fresh):
-            if old["user_id"] != new["user_id"]:
-                return True
-            if round(float(old["total"]), 6) != round(float(new["total"]), 6):
-                return True
-        return False
-
-    def _corrections_since(self, week_id: str, closed_ts: Optional[float]) -> int:
-        """Final fact rows of this week voided after it was closed (a late edit or delete correction)."""
-        if closed_ts is None:
-            return 0
-        row = self.db.one(
-            "SELECT COUNT(*) AS n FROM facts WHERE week_id = ? AND voided_ts IS NOT NULL AND voided_ts > ?",
-            (week_id, float(closed_ts)))
-        return int(row["n"])
-
-    def reconcile(self, now: float) -> Dict[str, Any]:
-        """Rebuild provisional snapshots from final facts after late corrections (PLAN_V6 4.5, 10.13).
-
-        A late edit or delete appends a correction (a void); this recomputes any not-yet-confirmed board so
-        organizers review the corrected ranking, and clears its unannounced confirmers, which invalidates a
-        partial confirmation (organizers must confirm the corrected snapshot). Confirmed and skipped weeks are
-        never silently rewritten. Idempotent: a snapshot that already matches is left alone. Returns
-        {"weeks": [changed week ids], "checked": <provisional weeks inspected>}."""
-        when = float(now)
-        changed: List[str] = []
-        rows = self.db.query(
-            "SELECT week_id FROM week_status WHERE state = 'provisional' ORDER BY week_id")
-        for row in rows:
-            week_id = row["week_id"]
-            status = self.status(week_id)
-            if status is None:
-                continue
-            fresh = [_row_dict(r) for r in self.ranking(week_id, limit=TOP_N, include_pending=False, now=when)]
-            corrected = self._corrections_since(week_id, status["closed_ts"])
-            stale = self._snapshot_differs(status["snapshot"], fresh)
-            if stale or (corrected and status["confirmers"]):
-                with self.db.tx():
-                    self.db.execute(
-                        "UPDATE week_status SET snapshot_json = ?, confirmers_json = '[]' "
-                        "WHERE week_id = ? AND state = 'provisional'",
-                        (json.dumps(fresh), week_id))
-                changed.append(week_id)
-        return {"weeks": changed, "checked": len(rows)}
-
     def skip_week(self, week_id: str, reason: str, actor: str, now: float) -> bool:
         """No winners for this week. Refused for a confirmed week, for a week that has not ended yet (its end, from
         Clock.week_end_from_id, is still in the future), or without a reason. `actor` is not stored here."""

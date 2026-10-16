@@ -148,11 +148,34 @@ def test_me_shows_level_crumbs_and_pending(ctx, ev):
     assert "Not counted" in text
 
 
-def test_me_for_someone_else_is_refused_for_members(ctx, ev):
-    join(ctx, "U1", "U2")
+def test_me_for_someone_who_chose_show_is_visible_to_members(ctx, ev):
+    join(ctx, "U1", "U2", show=True)
     text = only_private(cmd(ctx, ev, "U1", "me", "<@U2>"), "U1")
-    assert "organizers" in text.lower()
+    assert text.startswith("Stats for <@U2>.")
+    assert "Pond level" in text and "Lifetime crumbs" in text
+
+
+def test_me_for_someone_who_is_hidden_stays_private_for_members(ctx, ev):
+    join(ctx, "U1", "U2", show=False)          # joined but show is off
+    text = only_private(cmd(ctx, ev, "U1", "me", "<@U2>"), "U1")
+    assert "keeps their stats private" in text
     assert "Lifetime" not in text
+
+
+def test_others_view_leaves_out_the_viewers_and_targets_private_details(ctx, ev):
+    join(ctx, "U1", "U2", show=True)
+    text = only_private(cmd(ctx, ev, "U1", "me", "<@U2>"), "U1")
+    assert "Not counted" not in text and "Waiting to count" not in text
+    assert "Board:" not in text and "Quiet:" not in text
+
+
+def test_stats_visibility_private_hides_everyone_from_members(ctx, ev):
+    ctx.config.people.stats_visibility = "private"
+    join(ctx, "U1", "U2", show=True)
+    text = only_private(cmd(ctx, ev, "U1", "me", "<@U2>"), "U1")
+    assert "keeps their stats private" in text
+    text_org = only_private(cmd(ctx, ev, "UORG1", "me", "<@U2>"), "UORG1")
+    assert "Pond level" in text_org            # organizers still see the full page
 
 
 def test_me_for_someone_else_works_for_organizers(ctx, ev):

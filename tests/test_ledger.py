@@ -315,23 +315,3 @@ def test_tombstone_is_stable_and_distinct():
     assert tombstone("U1") == tombstone("U1")
     assert tombstone("U1") != tombstone("U2")
     assert re.fullmatch(r"deleted-[0-9a-f]{6}", tombstone("U1"))
-
-
-# ----- reconcile and recompute (ported from the PR's final commit) -----
-def test_recompute_heals_week_id_drift_and_is_idempotent(ledger, facts, db):
-    fid = facts.msg(user="U1", ts=MON + 100)
-    db.execute("UPDATE facts SET week_id = '1999-01-04' WHERE id = ?", (fid,))
-    assert ledger.recompute() == 1
-    assert ledger.get_fact(fid)["week_id"] == WEEK
-    assert ledger.recompute() == 0
-
-
-
-def test_reconcile_heals_week_id_drift_and_reports_no_finalize(ledger, facts, db):
-    fid = facts.msg(user="U1", ts=MON + 100)
-    db.execute("UPDATE facts SET week_id = 'wrong' WHERE id = ?", (fid,))
-    out = ledger.reconcile(MON + 100)
-    assert out["finalized"] == []
-    assert out["recomputed"] == 1
-    assert ledger.get_fact(fid)["week_id"] == WEEK
-

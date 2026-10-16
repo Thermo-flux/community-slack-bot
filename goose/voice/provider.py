@@ -1,7 +1,20 @@
-"""LLM provider client (OpenAI-compatible chat completions, stdlib only). OWNER: agent D (voice).
+"""LLM provider client. Works with any provider that speaks one of two wire formats. Stdlib only.
 
-Environment: LLM_BASE_URL (default https://api.openai.com/v1), LLM_API_KEY, LLM_MODEL, LLM_MODEL_ALLOWLIST (comma list).
-The key goes in the Authorization header only. Never log the key, prompts or replies.
+  openai     POST {base}/chat/completions. Used by OpenAI and by most other providers and gateways (OpenRouter, Gemini's
+             OpenAI-compatible endpoint, DeepSeek, Mistral, Groq, Together, local servers). Most of them cache a stable
+             prompt prefix on their own, so nothing extra is sent. Cached tokens are read from the usage block when reported.
+  anthropic  POST {base}/messages. Used by Anthropic. The static prompt block gets an explicit cache marker, because
+             Anthropic only caches what is marked.
+
+Environment:
+  LLM_API_FORMAT        openai (default) or anthropic
+  LLM_BASE_URL          optional; defaults to the format's usual base URL
+  LLM_API_KEY           the key, sent in a header only
+  LLM_MODEL             the model id; must appear in LLM_MODEL_ALLOWLIST
+  LLM_MODEL_ALLOWLIST   comma-separated model ids allowed to run
+  LLM_CACHE             on (default) or off. Caching never changes the answer, only the billed input cost.
+
+Never log the key, prompts or replies.
 """
 from __future__ import annotations
 
@@ -10,9 +23,16 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-DEFAULT_BASE_URL = "https://api.openai.com/v1"
+FORMATS = ("openai", "anthropic")
+DEFAULT_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com/v1",
+}
+DEFAULT_BASE_URL = DEFAULT_BASE_URLS["openai"]
+ANTHROPIC_VERSION = "2023-06-01"
 TEMPERATURE = 0.8
 
 PostFn = Callable[[str, Dict[str, Any], Dict[str, str], float], Tuple[int, Dict[str, Any]]]
@@ -20,6 +40,15 @@ PostFn = Callable[[str, Dict[str, Any], Dict[str, str], float], Tuple[int, Dict[
 
 class ProviderError(Exception):
     """Carries a short reason code like 'http_429', 'timeout', 'bad_json', 'model_not_allowed'."""
+
+
+@dataclass(frozen=True)
+class Usage:
+    """One completed call. tokens_in is the total input (cached or not); cached_in is the part served from cache."""
+    text: str
+    tokens_in: int
+    tokens_out: int
+    cached_in: int = 0
 
 
 def _default_post(url: str, body: Dict[str, Any], headers: Dict[str, str], timeout: float) -> Tuple[int, Dict[str, Any]]:
@@ -64,21 +93,30 @@ def _secure_url(url: str) -> bool:
     return parts.scheme == "http" and host in LOCAL_HOSTS
 
 
+def _int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 class Provider:
     def __init__(self, base_url: str, api_key: str, model: str, allowlist: List[str],
-                 http_post: Optional[PostFn] = None, json_mode: bool = False):
-        """Raises ProviderError('model_not_allowed') when model is not in a non-empty allowlist, ProviderError('missing_key')
-        when api_key is empty, and ProviderError('insecure_url') when base_url is not https (plain http is accepted only
-        for localhost and 127.0.0.1)."""
+                 http_post: Optional[PostFn] = None, json_mode: bool = False,
+                 api_format: str = "openai", cache: bool = True):
+        """Raises ProviderError('missing_key') without a key, 'model_not_allowed' when the model is not in a non-empty
+        allowlist, 'bad_format' for an unknown format, and 'insecure_url' when base_url is not https (plain http is
+        accepted only for localhost and 127.0.0.1)."""
         if not api_key:
             raise ProviderError("missing_key")
+        if api_format not in FORMATS:
+            raise ProviderError("bad_format")
         allowed = [m.strip() for m in (allowlist or []) if m and m.strip()]
         if not allowed or model not in allowed:
             raise ProviderError("model_not_allowed")
-        base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        base = (base_url or DEFAULT_BASE_URLS[api_format]).rstrip("/")
         if not _secure_url(base):
             raise ProviderError("insecure_url")
         self.base_url = base
+        self.api_format = api_format
+        self.cache = bool(cache)
         self._api_key = api_key
         self.model = model
         self.allowlist = allowed
@@ -87,20 +125,50 @@ class Provider:
 
     @classmethod
     def from_env(cls, env: Dict[str, str]) -> "Provider":
+        api_format = (env.get("LLM_API_FORMAT") or "openai").strip().lower()
         allowlist = [m.strip() for m in (env.get("LLM_MODEL_ALLOWLIST") or "").split(",") if m.strip()]
+        cache = (env.get("LLM_CACHE") or "on").strip().lower() != "off"
         return cls(
-            base_url=env.get("LLM_BASE_URL") or DEFAULT_BASE_URL,
+            base_url=env.get("LLM_BASE_URL") or "",
             api_key=env.get("LLM_API_KEY") or "",
             model=env.get("LLM_MODEL") or "",
             allowlist=allowlist,
+            api_format=api_format,
+            cache=cache,
         )
 
     def __repr__(self) -> str:  # never show the key
-        return "Provider(model=%r)" % self.model
+        return "Provider(model=%r, format=%r)" % (self.model, self.api_format)
 
-    def complete(self, messages: List[Dict[str, str]], max_tokens: int, timeout: float = 4.0) -> Tuple[str, int, int]:
-        """POST {base}/chat/completions with temperature 0.8, no streaming, no retries. Returns (text, tokens_in,
-        tokens_out). Raises ProviderError on any problem."""
+    # ------------------------------------------------------------------ calls
+
+    def complete(self, messages: List[Dict[str, str]], max_tokens: int, timeout: float = 4.0,
+                 parts: Optional[Dict[str, str]] = None) -> Tuple[str, int, int]:
+        """Returns (text, tokens_in, tokens_out). See complete_usage for the cached count."""
+        usage = self.complete_usage(messages, max_tokens, timeout=timeout, parts=parts)
+        return usage.text, usage.tokens_in, usage.tokens_out
+
+    def complete_usage(self, messages: List[Dict[str, str]], max_tokens: int, timeout: float = 4.0,
+                       parts: Optional[Dict[str, str]] = None) -> Usage:
+        """One POST, no streaming, no retries. `parts` (static, dynamic, user) lets the anthropic format mark the
+        static block for caching; without it the system message is sent as one block. Raises ProviderError."""
+        if self.api_format == "anthropic":
+            url, headers, body = self._anthropic_request(messages, max_tokens, parts)
+            parse = self._parse_anthropic
+        else:
+            url, headers, body = self._openai_request(messages, max_tokens)
+            parse = self._parse_openai
+        try:
+            status, data = self._post(url, body, headers, float(timeout))
+        except ProviderError:
+            raise
+        except Exception as exc:  # reason only, never the message text (it may contain request details)
+            raise ProviderError("timeout" if _is_timeout(exc) else "network")
+        if status != 200:
+            raise ProviderError("http_%d" % int(status))
+        return parse(data)
+
+    def _openai_request(self, messages: List[Dict[str, str]], max_tokens: int) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
         body: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -110,19 +178,36 @@ class Provider:
         }
         if self.json_mode:
             body["response_format"] = {"type": "json_object"}
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + self._api_key}
+        return self.base_url + "/chat/completions", headers, body
+
+    def _anthropic_request(self, messages: List[Dict[str, str]], max_tokens: int,
+                           parts: Optional[Dict[str, str]]) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
+        if parts is not None:
+            blocks: List[Dict[str, Any]] = [{"type": "text", "text": parts["static"]}]
+            if self.cache:
+                blocks[0]["cache_control"] = {"type": "ephemeral"}
+            if parts.get("dynamic"):
+                blocks.append({"type": "text", "text": parts["dynamic"]})
+        else:
+            blocks = [{"type": "text", "text": "\n".join(m["content"] for m in messages if m["role"] == "system")}]
+        turns = [{"role": m["role"], "content": m["content"]} for m in messages if m["role"] in ("user", "assistant")]
+        body: Dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": int(max_tokens),
+            "temperature": TEMPERATURE,
+            "system": blocks,
+            "messages": turns,
+        }
         headers = {
             "Content-Type": "application/json",
-            "Authorization": "Bearer " + self._api_key,
+            "x-api-key": self._api_key,
+            "anthropic-version": ANTHROPIC_VERSION,
         }
-        url = self.base_url + "/chat/completions"
-        try:
-            status, data = self._post(url, body, headers, float(timeout))
-        except ProviderError:
-            raise
-        except Exception as exc:  # reason only, never the message text (it may contain request details)
-            raise ProviderError("timeout" if _is_timeout(exc) else "network")
-        if status != 200:
-            raise ProviderError("http_%d" % int(status))
+        return self.base_url + "/messages", headers, body
+
+    @staticmethod
+    def _parse_openai(data: Dict[str, Any]) -> Usage:
         try:
             text = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
@@ -130,6 +215,21 @@ class Provider:
         if not isinstance(text, str):
             raise ProviderError("bad_json")
         usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-        tokens_in = usage.get("prompt_tokens") if isinstance(usage.get("prompt_tokens"), int) else 0
-        tokens_out = usage.get("completion_tokens") if isinstance(usage.get("completion_tokens"), int) else 0
-        return text, tokens_in, tokens_out
+        details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+        return Usage(text=text, tokens_in=_int(usage.get("prompt_tokens")),
+                     tokens_out=_int(usage.get("completion_tokens")), cached_in=_int(details.get("cached_tokens")))
+
+    @staticmethod
+    def _parse_anthropic(data: Dict[str, Any]) -> Usage:
+        content = data.get("content")
+        if not isinstance(content, list):
+            raise ProviderError("bad_json")
+        text = next((b.get("text") for b in content if isinstance(b, dict) and b.get("type") == "text"), None)
+        if not isinstance(text, str):
+            raise ProviderError("bad_json")
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        cache_read = _int(usage.get("cache_read_input_tokens"))
+        cache_write = _int(usage.get("cache_creation_input_tokens"))
+        # Anthropic reports uncached input separately from cache reads and writes; the total is their sum.
+        total_in = _int(usage.get("input_tokens")) + cache_read + cache_write
+        return Usage(text=text, tokens_in=total_in, tokens_out=_int(usage.get("output_tokens")), cached_in=cache_read)

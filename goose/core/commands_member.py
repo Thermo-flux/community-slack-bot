@@ -13,7 +13,8 @@ from goose.core.safety import is_program_question
 from goose.types import Action, Event, Result
 
 PRIVACY_LINE = (
-    "`/goose me` shows your page. Organizers can look at it too when they review a week or a report. "
+    "`/goose me` shows your page. Other members can look up your stats only if you choose `/goose show`. "
+    "Organizers can look at any page when they review a week or a report. "
     "When you ping the duck or reply in its thread, that message goes to an AI provider so the duck can answer. "
     "Ambient chat is never sent. The duck stores no message text."
 )
@@ -36,6 +37,7 @@ PLAIN = {
     "no_week": "No week is confirmed yet, so there is no board to show.",
     "no_board": "Nobody is on the board yet.",
     "not_organizer": "Only organizers can look at someone else's page.",
+    "stats_private": "That person keeps their stats private. They can choose `/goose show` to share them.",
     "no_link": "Give me a Slack message link, for example `/goose explain <link to a duck message>`.",
     "receipt_report": "Report #%d received. Organizers read every report and reply within 72 hours.",
     "receipt_appeal": ("Appeal #%d received. Appeals are open for 7 days after a decision, "
@@ -237,19 +239,45 @@ def _me_text(ctx: AppContext, uid: str, now: float) -> str:
     return "\n".join(out)
 
 
+def _others_text(ctx: AppContext, uid: str, now: float) -> str:
+    """Another member's stats, as they may see them: level, crumbs and this week's breakdown. Nothing about their
+    messages that did not count, their flags, quiet or rest, or their account."""
+    week = ctx.clock.week_id(now)
+    lifetime = ctx.ledger.lifetime(uid, include_pending=False)
+    prog = ctx.levels.progress(lifetime)
+    bd = ctx.ledger.week_breakdown(uid, week, include_pending=False)
+    out = ["Pond level %d, %s." % (prog["level"], prog["title"]), "Lifetime crumbs: %.1f." % lifetime]
+    if prog.get("next_level"):
+        out.append("Next: level %d, %s, at %.0f crumbs." % (prog["next_level"], prog["next_title"], prog["next_threshold"]))
+    out += [
+        "",
+        "This week (%s): %.1f crumbs." % (week, bd.total),
+        "  Chat: %.1f from %d messages on %d days." % (bd.chat, bd.n_msgs, bd.active_days),
+        "  Thanks: %.1f from %d." % (bd.thanks, bd.n_thanks),
+        "  Helpful: %.1f from %d." % (bd.helpful, bd.n_helpful),
+        "  Stars: %.1f from %d." % (bd.stars, bd.star_count),
+    ]
+    return "\n".join(out)
+
+
 def _me(ctx: AppContext, event: Event, args: str) -> Result:
     now = ctx.clock.now()
     target = event.user
     header = ""
     ids = extract_user_ids(args)
     if ids and ids[0] != event.user:
-        if not ctx.config.is_organizer(event.user):
-            return Result.of(_eph(event, PLAIN["not_organizer"]))
         target = ids[0]
         if not ctx.users.is_joined(target):
             return Result.of(_eph(event, _line(ctx, "unknown_person")))
-        header = "Page for <@%s>.\n" % target
-    elif not ctx.users.is_joined(event.user):
+        if ctx.config.is_organizer(event.user):
+            return Result.of(_eph(event, "Page for <@%s>.\n" % target + _me_text(ctx, target, now)))
+        if not ctx.users.is_joined(event.user):
+            return _not_joined(ctx, event)
+        shared = ctx.config.people.stats_visibility == "shown" and bool((ctx.users.get(target) or {}).get("show"))
+        if not shared:
+            return Result.of(_eph(event, PLAIN["stats_private"]))
+        return Result.of(_eph(event, "Stats for <@%s>.\n" % target + _others_text(ctx, target, now)))
+    if not ctx.users.is_joined(event.user):
         return _not_joined(ctx, event)
     return Result.of(_eph(event, header + _me_text(ctx, target, now)))
 

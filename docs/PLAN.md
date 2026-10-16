@@ -139,8 +139,8 @@ No joke and no German in: errors, privacy, reports and appeals receipts, and any
 
 | Moment | Line |
 |---|---|
-| Joined (G) | "Willkommen in Entenhausen! `/goose me` shows your page. Organizers can look at it too when they review a week. The duck sometimes teases lightly, and `/goose quiet on` stops it." |
-| Joined (plain) | "Welcome to the pond. `/goose me` shows your page. Organizers can look at it too when they review a week. The duck sometimes teases lightly, and `/goose quiet on` stops it." |
+| Joined (G) | "Willkommen in Entenhausen! `/goose me` shows your page. Other members can see your stats only if you choose `/goose show`. The duck sometimes teases lightly, and `/goose quiet on` stops it." |
+| Joined (plain) | "Welcome to the pond. `/goose me` shows your page. Other members can see your stats only if you choose `/goose show`. The duck sometimes teases lightly, and `/goose quiet on` stops it." |
 | Level-up | "Pond level {n}, {title}. The duck wrote it down with a very serious face." |
 | Star | "An organizer gave you a star for {kind}. The duck put on its good hat. `+{n}` crumbs." |
 | Big star (G) | "A big star for {kind}! Quak mal! `+{n}` crumbs." |
@@ -389,7 +389,7 @@ Organizers are the Slack IDs in config. The **owner** is one extra ID that can a
 | `/goose results week [last or number]` | Top 10 for a week, provisional or confirmed, with breakdown. Default is this week so far |
 | `/goose results all [count]` | All-time top N (default 10) with breakdown |
 | `/goose winners` | Confirmed weekly winners so far, and the all-time result once confirmed |
-| `/goose me @person` | Full breakdown for one person: crumbs by source, level, stars received with reasons, flags, notes |
+| `/goose me @person` | Organizers: full breakdown for one person (crumbs by source, level, stars with reasons, flags, notes). Members: level, lifetime crumbs and this week's breakdown, only for a person who chose `/goose show` (`people.stats_visibility: shown`, the default; `private` makes it organizers only) |
 | `/goose stars [week or month or all] [@person]` | Stars with giver, kind, reason and link |
 | `/goose roster` | Everyone who joined: join date, show or hide, rest, quiet, flags |
 | `/goose audit [count]` | The last N organizer actions |
@@ -661,6 +661,7 @@ There are **no spend caps**. The daily and monthly token limits, the call budget
 
 - **Visibility, not a cap.** `/goose voice status` shows calls and tokens today and this month, the breaker state and the message-limit hits. An optional `voice.alert_tokens_per_day` (off by default) posts a heads-up to the organizer channel and never stops anything.
 - **What the missing cap means.** The only bounds on cost are the per-person message limit, the short replies and the kill switch. A busy channel of 50 people could still make up to 600 calls an hour at the limit. The bot cannot stop that by itself, so **set a spending limit in the provider's console**. That is your account and your decision.
+- **Prompt caching (universal).** The system prompt is split into a static prefix (persona, rules, approved German ids and reactions, output schema, example) that is byte-identical on every call, followed by the per-request facts (mode, reply cap, persona flags, card) and the user turn. Two wire formats are supported: `openai` (OpenAI and most other providers, which cache a stable prefix on their own) and `anthropic` (the static block gets an explicit cache marker). `LLM_CACHE=on` is the default; `off` disables markers. Caching changes only the billed input cost, never a reply.
 - Every action and event type has at least 3 canned lines, rotated, none repeated within 24 hours. An addressed reply posts within 6 seconds with or without the voice.
 
 ### 10.9 What stays deterministic (never delegated to the LLM)
@@ -766,7 +767,7 @@ tests/             unit, handler (fake Slack), concurrency, simulation, lint, vo
   - the provider's terms allow under-18 end users, and its retention is the shortest it offers, with no prompt or response logging on the provider side if that option exists,
   - a new privacy notice is published and members **re-consent** (it replaces the old notice, which said messages were never sent anywhere),
   - the owner has set a spending limit in the provider's console (the bot itself has no spend cap).
-- **Privacy line (new text):** "`/goose me` shows your page. Organizers can look at it too when they review a week or a report. When you ping the duck or reply in its thread, that message goes to an AI provider so the duck can answer. Ambient chat is never sent. The duck stores no message text."
+- **Privacy line (new text):** "`/goose me` shows your page. Other members can look up your stats only if you choose `/goose show`. Organizers can look at any page when they review a week or a report. When you ping the duck or reply in its thread, that message goes to an AI provider so the duck can answer. Ambient chat is never sent. The duck stores no message text."
 - **Boards** show only the top 3, and only people who chose `show`. Joined people are hidden by default. No per-day counts are ever public.
 - **Organizers** are listed adults who agree to the community's safeguarding rules. They do not message winners one to one.
 - **Logging:** no message text, card contents, raw voice output or tokens. Request ids, kinds, flags, token counts and reason codes only, kept 14 days.
@@ -842,7 +843,7 @@ Numbers match the audit's finding numbers in `REPORT.md`.
 - **Weekly flow tests:** snapshot at Monday 00:15 from final rows only, week boundary in the configured timezone, the provisional post to the organizer channel, `confirm-week`, `disqualify` re-ranks, `skip-week`, reminder on Tuesday, no announcement without confirmation, catch-up after a restart.
 - **Organizer tests:** non-organizers are refused, a reason is required, every action is audited, `confirm-final` and `set-end` are owner only, `confirmations_required: 2` needs two organizers.
 - **Export tests:** CSV formula characters are escaped.
-- **Privacy tests:** boards show only the top 3 and only people with `show` on. `me @x` works only for organizers. `leave` deletes rows, replaces counterparty ids and writes a tombstone.
+- **Privacy tests:** boards show only the top 3 and only people with `show` on. `me @x` shows a member's stats only when that member chose `show` and `people.stats_visibility` is `shown`; organizers always see the full page. `leave` deletes rows, replaces counterparty ids and writes a tombstone.
 - **Safety tests:** the distress path replies plainly with no joke, German, roast or reaction, and alerts organizers.
 - **Humor and language tests:** every German phrase is in the approved table with a gloss and an explanation. German appears in roughly 1 of 4 eligible replies over a large sample, never in plain replies, never an Orry phrase, never a dropped phrase. Roasts stay under the rate, never repeat for one person within 24 hours, never fire for newcomers, `quiet on` people, sad messages or pile-ons, and a "not funny" reply stops them and sets `quiet`. No banned idiom (lame duck, ugly duckling, dumme Gans, an animal word aimed at a person) appears.
 - **Reaction tests:** whole-word matching ("gm" inside "gmail" does not fire), one reaction per message, budgets hold, "good morning" only before noon in the configured timezone, safety and sad words suppress reactions, `quiet on` suppresses them, there is no trigger for "finally", "it works" or "toast", a star always adds `:star:`.

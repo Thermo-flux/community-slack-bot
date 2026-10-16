@@ -18,7 +18,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from goose.voice.prompt import APPROVED_REACTIONS, ELABORATE_CAP, REPLY_CAP, build_messages, max_tokens_for
+from goose.voice.prompt import APPROVED_REACTIONS, ELABORATE_CAP, REPLY_CAP, build_messages, build_parts, max_tokens_for
 from goose.voice.provider import Provider, ProviderError
 
 PROTOCOL_VERSION = 1
@@ -228,13 +228,15 @@ def handle_request(body: Dict[str, Any], provider: Provider) -> Tuple[int, Dict[
 
     request_id = body["request_id"]
     try:
-        text, tokens_in, tokens_out = provider.complete(
-            build_messages(body), max_tokens_for(body, default=100, elaborate=200), timeout=4.0)
+        result = provider.complete_usage(
+            build_messages(body), max_tokens_for(body, default=100, elaborate=200), timeout=4.0,
+            parts=build_parts(body))
+        text, tokens_in, tokens_out = result.text, result.tokens_in, result.tokens_out
     except ProviderError as exc:
         reason = exc.args[0] if exc.args and _REASON_CODE.match(str(exc.args[0])) else "network"
         return 502, {"error": reason}
 
-    usage = {"tokens_in": int(tokens_in), "tokens_out": int(tokens_out)}
+    usage = {"tokens_in": int(tokens_in), "tokens_out": int(tokens_out), "cached_in": int(result.cached_in)}
     obj = _parse_model_output(text)
     clean = _validate_output(obj, request_id, _cap_for(body)) if obj is not None else None
     if clean is None:
