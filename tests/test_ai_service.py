@@ -87,8 +87,8 @@ def test_build_messages_payload():
     assert payload[3]["content"] == "cool, thanks!"
 
 
-def test_openai_reasoning_fallback_mock():
-    """Verifies that if content is empty but reasoning is present, reasoning is used as fallback."""
+def test_openai_never_leaks_reasoning():
+    """Verifies that internal model reasoning is NEVER leaked to the user even if content is empty."""
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.json.return_value = {
@@ -97,7 +97,7 @@ def test_openai_reasoning_fallback_mock():
                 "message": {
                     "role": "assistant",
                     "content": "",
-                    "reasoning": "Here is the response text from model reasoning! 🚀"
+                    "reasoning": "Internal scratchpad: user wants something."
                 }
             }
         ]
@@ -107,5 +107,7 @@ def test_openai_reasoning_fallback_mock():
          patch("ai_service.AI_PROVIDER", "custom"), \
          patch("requests.post", return_value=mock_response):
         reply = ai_service.generate_response(user_id="U_TEST", user_message="test message")
-        assert "Here is the response text" in reply
+        assert "Internal scratchpad" not in reply
+        assert "I'm right here!" in reply
+
 

@@ -85,3 +85,33 @@ def test_get_cards_response_for_targets():
         unknown_reply = handlers.get_cards_response_for_targets(["ghost_user"], "U_CALLER")
         assert "No activity record found for 'ghost_user'" in unknown_reply
 
+
+def test_fetch_conversation_history():
+    """Verifies history extraction, exclude_ts, and bot turn identification."""
+    mock_client = MagicMock()
+    mock_client.conversations_replies.return_value = {
+        "messages": [
+            {"ts": "100.0", "user": "U_USER", "text": "hey Orry!"},
+            {"ts": "101.0", "user": "U_BOT", "text": "Hey! What's up? 🚀"},
+            {"ts": "102.0", "user": "U_USER", "text": "!level"},
+            {"ts": "103.0", "user": "U_USER", "text": "current question"}
+        ]
+    }
+
+    history = handlers.fetch_conversation_history(
+        client=mock_client,
+        channel_id="C1",
+        thread_ts="100.0",
+        bot_user_id="U_BOT",
+        exclude_ts="103.0",
+        max_messages=5
+    )
+
+    # Must contain 2 turns (skips !level command and excludes current ts 103.0)
+    assert len(history) == 2
+    assert history[0]["role"] == "user"
+    assert history[0]["content"] == "hey Orry!"
+    assert history[1]["role"] == "assistant"
+    assert history[1]["content"] == "Hey! What's up? 🚀"
+
+

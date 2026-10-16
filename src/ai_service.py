@@ -25,13 +25,38 @@ logger = logging.getLogger("SlackBotAI")
 
 
 def clean_ai_output(text: str) -> str:
-    """Strips internal chain-of-thought scratchpads and <think> tags from AI output."""
+    """
+    Cleans AI output thoroughly:
+    1. Strips internal chain-of-thought scratchpads and <think> tags.
+    2. Strips unclosed <think> blocks if cut off during reasoning.
+    3. Strips 'Thinking Process:' or 'Thought:' prefixes and suffixes.
+    4. Converts standard Markdown links [Label](URL) to Slack links <URL|Label>.
+    5. Converts Markdown headers ### to Slack *bold*.
+    6. Converts Markdown bold **text** to Slack *text*.
+    """
     if not text:
         return ""
-    # Strip <think>...</think> blocks common in reasoning models like DeepSeek
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    # Strip common scratchpad prefixes
-    text = re.sub(r"^Thinking Process:.*?\n\n", "", text, flags=re.DOTALL | re.IGNORECASE)
+
+    # 1. Strip completed <think>...</think> blocks
+    if "</think>" in text:
+        text = text.split("</think>")[-1]
+
+    # 2. Strip unclosed <think>... if cut off while thinking
+    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
+
+    # 3. Strip leading and trailing internal scratchpad notes
+    text = re.sub(r"^(?:Thinking Process|Thought|Reasoning|Internal):\s*.*?\n\n", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"\n+(?:Thinking Process|Thought|Reasoning|Internal):.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+
+    # 4. Convert Markdown links [Label](URL) to Slack links <URL|Label>
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r"<\2|\1>", text)
+
+    # 5. Convert Markdown headers (### Header) to Slack bold (*Header*)
+    text = re.sub(r"^[ \t]*#{1,4}[ \t]+(.+)$", r"*\1*", text, flags=re.MULTILINE)
+
+    # 6. Convert Markdown bold **text** to Slack bold *text*
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", text)
+
     return text.strip()
 
 
@@ -44,7 +69,7 @@ def load_soul_prompt() -> str:
             logger.warning(f"Could not read soul.md: {e}. Using fallback persona.")
 
     return (
-        "You are Community Champion Bot, a friendly, encouraging Slack bot that tracks "
+        "You are Orry, a friendly, encouraging Slack bot that tracks "
         "user contributions, rewards positive ideas, and keeps conversations constructive."
     )
 
@@ -60,10 +85,10 @@ def build_system_instructions() -> str:
         f"- Target emoji frequency: {frequency}\n"
         f"- Only use these approved emojis where appropriate: {' '.join(allowed_emojis)}\n"
         f"- Keep responses concise and formatted cleanly with Slack Markdown (*bold*, _italic_, `code`).\n"
-        f"- Be direct and natural. Do not output your internal reasoning or thinking notes."
+        f"- Be direct, casual, and natural. NEVER output your internal reasoning, scratchpad, or <think> tags."
     )
 
-    # Inject live community data so AI can accurately answer queries about any user's stats
+    # Inject live community data and repo links
     community_context = ""
     try:
         from database import get_all_users_summary
@@ -81,11 +106,14 @@ def build_system_instructions() -> str:
             )
 
         community_context = (
-            f"\n\nLIVE COMMUNITY SYSTEM & LEADERBOARD DATA:\n"
-            f"- Anyone in the channel is allowed to view anyone's level, points, rank, or card. This is public, non-sensitive community data.\n"
+            f"\n\nLIVE COMMUNITY & PROJECT CONTEXT:\n"
+            f"- Bot Identity: Orry (@gooselee), resident hacker and cheerleader in Hack Club's `#loadout-development` channel.\n"
+            f"- GitHub Repository: <https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>. Drop this link if anyone asks for the code or repo!\n"
+            f"- Anyone in the channel is allowed to view anyone's level, points, rank, or card. This is public, non-sensitive data.\n"
             f"- Level Progression Tiers:\n{tier_lines}\n"
             f"- Current Tracked Members:\n" + ("\n".join(user_lines) if user_lines else "  • No activity recorded yet.") + "\n"
-            f"- If a user asks for anyone's card, level, XP, or ranking (such as for Netic, Jerry, or others), you have access to the data above. Accurately report their stats and celebrate their progress!"
+            f"- If a user asks for anyone's card, level, XP, or ranking (such as for Netic, Jerry, or others), you have access to the data above. Accurately report their stats and celebrate their progress!\n"
+            f"- Speak naturally, punchy, with casual builder slang ('solid W', 'let's cook', 'my bad', 'Ja, ja') and high builder energy. Never output internal thought tags or robotic corporate disclaimers."
         )
     except Exception as e:
         logger.warning(f"Could not load live community context into AI prompt: {e}")
@@ -170,7 +198,7 @@ def _call_gemini(messages: List[Dict[str, str]], system_prompt: str, timeout: in
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": contents,
-        "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.7}
+        "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.7}
     }
     response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=timeout)
     if response.status_code == 200:
@@ -182,7 +210,7 @@ def _call_gemini(messages: List[Dict[str, str]], system_prompt: str, timeout: in
                 cleaned = clean_ai_output(text)
                 if cleaned:
                     return cleaned
-        return "I'm here with you! Keep up the great discussion! 🚀"
+        return "I'm right here! Feel free to ask a question, share an idea, or check your rank with `/level`! 🚀"
     raise RuntimeError(f"Gemini API status {response.status_code}")
 
 
@@ -201,7 +229,7 @@ def _call_openai_compatible(messages: List[Dict[str, str]], timeout: int = 35) -
     payload = {
         "model": model,
         "messages": messages,
-        "max_tokens": 1200,
+        "max_tokens": 2048,
         "temperature": 0.7
     }
 
@@ -213,16 +241,13 @@ def _call_openai_compatible(messages: List[Dict[str, str]], timeout: int = 35) -
                 choices = response.json().get("choices", [])
                 if choices:
                     msg = choices[0].get("message", {})
+                    # CRUCIAL: Only extract actual user-facing content. Never leak raw internal reasoning!
                     raw_content = msg.get("content") or ""
-                    # Fallback to reasoning fields if content was blank
-                    if not raw_content.strip():
-                        raw_content = msg.get("reasoning") or msg.get("reasoning_content") or ""
-
                     cleaned = clean_ai_output(raw_content)
                     if cleaned:
                         return cleaned
 
-                return "I'm here! Feel free to ask a question, share an idea, or check your rank with `/level`! 🚀"
+                return "I'm right here! Feel free to ask a question, share an idea, or check your rank with `/level`! 🚀"
             raise RuntimeError(f"OpenAI API status {response.status_code}: {response.text}")
         except requests.exceptions.Timeout as e:
             last_err = e
@@ -234,7 +259,7 @@ def _call_openai_compatible(messages: List[Dict[str, str]], timeout: int = 35) -
 
     if last_err:
         raise last_err
-    return "I'm here! Feel free to ask a question, share an idea, or check your rank with `/level`! 🚀"
+    return "I'm right here! Feel free to ask a question, share an idea, or check your rank with `/level`! 🚀"
 
 
 def _call_anthropic(messages: List[Dict[str, str]], system_prompt: str, timeout: int) -> str:
@@ -252,7 +277,7 @@ def _call_anthropic(messages: List[Dict[str, str]], system_prompt: str, timeout:
         "model": model,
         "system": system_prompt,
         "messages": anthropic_messages,
-        "max_tokens": 1000
+        "max_tokens": 2048
     }
     response = requests.post(url, json=payload, headers=headers, timeout=timeout)
     if response.status_code == 200:
@@ -262,5 +287,5 @@ def _call_anthropic(messages: List[Dict[str, str]], system_prompt: str, timeout:
             cleaned = clean_ai_output(text)
             if cleaned:
                 return cleaned
-        return "I'm here with you! Keep up the great discussion! 🚀"
+        return "I'm right here! Keep up the great discussion! 🚀"
     raise RuntimeError(f"Anthropic API status {response.status_code}")

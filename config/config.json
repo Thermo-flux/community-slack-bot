@@ -1,5 +1,5 @@
 {
-  "bot_name": "Community Champion Bot",
+  "bot_name": "Orry",
   
   "_comment_channels": "List the Slack channel IDs the bot should monitor. Example: ['C0123456789']. Use ['*'] to monitor all channels the bot is added to.",
   "watched_channels": ["*"],
@@ -58,7 +58,9 @@
     { "level": 4, "min_xp": 300,  "title": "💡 Idea Champion" },
     { "level": 5, "min_xp": 550,  "title": "🚀 Pillar of Community" },
     { "level": 6, "min_xp": 900,  "title": "🔥 Discussion Leader" },
-    { "level": 7, "min_xp": 1400, "title": "👑 Community Legend" }
+    { "level": 7, "min_xp": 1400, "title": "👑 Community Legend" },
+    { "level": 8, "min_xp": 2200, "title": "⚡ Grandmaster Builder" },
+    { "level": 9, "min_xp": 3500, "title": "🏆 Mythic Contributor" }
   ],
 
   "templates": {
@@ -67,7 +69,7 @@
     "leaderboard_header": "🏆 *Channel Top Contributors Leaderboard* 🏆\nHere are the most active and helpful community members:",
     "leaderboard_row": "*{rank}.* <@{user_id}> — Level {level} (*{title}*) • `{xp} XP`",
     "leaderboard_empty": "No contributions recorded yet. Be the first to start chatting and earn XP! 🚀",
-    "help_message": "*👋 Community Bot Help & Commands*\n• Type `/level` to see your current level, XP, and rank progress.\n• Type `/leaderboard` to view the top contributors.\n• Mention me `<@{bot_id}>` with any question or idea to chat!\n• *How to earn points:* Chat actively, share suggestions, and contribute valuable ideas to the channel. There is a {cooldown}s cooldown between points to prevent spam. 💡",
+    "help_message": "*👋 Hey! I'm Orry, your resident community bot! 🚀*\n• Type `/level` to see your level, XP, and rank progress (or `/level @user` to check anyone's card!).\n• Type `/leaderboard` to view the top contributors.\n• Mention me `<@{bot_id}>` anytime to brainstorm, ask questions, or chat!\n• *GitHub Repo:* <https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>\n• *How to earn points:* Chat actively, share suggestions, and contribute valuable ideas. There is a {cooldown}s cooldown between points. 💡",
     "ai_offline_fallback": "Hey <@{user_id}>! 👋 I received your message! My AI reasoning engine is currently in standby mode, but I am actively monitoring this channel and recording your activity points! 🚀"
   }
 }

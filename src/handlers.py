@@ -130,12 +130,14 @@ def fetch_conversation_history(
     channel_id: str,
     thread_ts: Optional[str] = None,
     bot_user_id: Optional[str] = None,
+    current_user_id: Optional[str] = None,
+    exclude_ts: Optional[str] = None,
     max_messages: int = 10
 ) -> List[Dict[str, str]]:
     """
     Fetches recent conversation turns from Slack to provide multi-turn memory to the AI.
     If in a thread, fetches thread replies.
-    If in a channel, fetches recent channel messages.
+    If in a channel, filters to relevant interactions with the bot or current user.
     """
     history: List[Dict[str, str]] = []
     if not client or not channel_id:
@@ -144,22 +146,35 @@ def fetch_conversation_history(
     try:
         raw_msgs = []
         if thread_ts:
-            res = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=max_messages + 2)
+            res = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=max_messages + 3)
             raw_msgs = res.get("messages", [])
         else:
-            res = client.conversations_history(channel=channel_id, limit=max_messages + 2)
+            res = client.conversations_history(channel=channel_id, limit=max_messages + 5)
             raw_msgs = res.get("messages", [])
             raw_msgs.reverse()  # history returns newest first; reverse for chronological order
 
         for msg in raw_msgs:
+            msg_ts = msg.get("ts")
+            # Exclude the current incoming message being handled
+            if exclude_ts and msg_ts == exclude_ts:
+                continue
+
             sender = msg.get("user")
             text = (msg.get("text") or "").strip()
             if not text:
                 continue
 
-            # Skip command triggers from conversation history
+            # Skip command triggers like /level or !leaderboard from conversation history
             if text.lower().startswith(("/", "!", ".")):
                 continue
+
+            # If not in a thread, only include messages involving the bot or current user
+            if not thread_ts:
+                is_bot = sender == bot_user_id
+                is_bot_mention = bot_user_id and f"<@{bot_user_id}>" in text
+                is_curr_user = current_user_id and sender == current_user_id
+                if not (is_bot or is_bot_mention or is_curr_user):
+                    continue
 
             if sender == bot_user_id:
                 clean_text = ai_service.clean_ai_output(text)
@@ -226,6 +241,15 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
                 say(text=board, channel=channel_id, thread_ts=target_thread_ts)
             except Exception as e:
                 logger.error(f"Failed to send leaderboard via chat command: {e}")
+            return
+
+        # Repo in-chat trigger
+        if clean_lower in ("/repo", "!repo", ".repo", "repo", "github", "gh repo", "!github"):
+            repo_msg = "🚀 *Community Slack Bot GitHub Repository:*\n<https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>\nFeel free to explore the code, open issues, or contribute! ✨"
+            try:
+                say(text=repo_msg, channel=channel_id, thread_ts=target_thread_ts)
+            except Exception as e:
+                logger.error(f"Failed to send repo: {e}")
             return
 
         # Help in-chat trigger
@@ -318,6 +342,12 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             say(text=board, thread_ts=target_thread_ts)
             return
 
+        # Repo command
+        if clean_lower in ("repo", "github", "gh repo", "gimme the gh repo", "give me the gh repo", "give me the repo", "link"):
+            repo_msg = "🚀 *Here is our GitHub repository:*\n<https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>\nCheck out the code, star it, or propose features! ✨"
+            say(text=repo_msg, thread_ts=target_thread_ts)
+            return
+
         # Help command
         if clean_lower in ("help", "commands"):
             templates = CONFIG.get("templates", {})
@@ -335,6 +365,8 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             channel_id=channel_id,
             thread_ts=event.get("thread_ts"),
             bot_user_id=bot_user_id,
+            current_user_id=user_id,
+            exclude_ts=event.get("ts"),
             max_messages=10
         )
 
