@@ -91,7 +91,7 @@ def test_fetch_conversation_history():
     mock_client = MagicMock()
     mock_client.conversations_replies.return_value = {
         "messages": [
-            {"ts": "100.0", "user": "U_USER", "text": "hey Orry!"},
+            {"ts": "100.0", "user": "U_USER", "text": "hey goose-lee!"},
             {"ts": "101.0", "user": "U_BOT", "text": "Hey! What's up? 🚀"},
             {"ts": "102.0", "user": "U_USER", "text": "!level"},
             {"ts": "103.0", "user": "U_USER", "text": "current question"}
@@ -110,7 +110,7 @@ def test_fetch_conversation_history():
     # Must contain 2 turns (skips !level command and excludes current ts 103.0)
     assert len(history) == 2
     assert history[0]["role"] == "user"
-    assert history[0]["content"] == "hey Orry!"
+    assert history[0]["content"] == "hey goose-lee!"
     assert history[1]["role"] == "assistant"
     assert history[1]["content"] == "Hey! What's up? 🚀"
 

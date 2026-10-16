@@ -69,7 +69,7 @@ def load_soul_prompt() -> str:
             logger.warning(f"Could not read soul.md: {e}. Using fallback persona.")
 
     return (
-        "You are Orry, a friendly, encouraging Slack bot that tracks "
+        "You are goose-lee, a friendly, encouraging Slack bot that tracks "
         "user contributions, rewards positive ideas, and keeps conversations constructive."
     )
 
@@ -107,7 +107,7 @@ def build_system_instructions() -> str:
 
         community_context = (
             f"\n\nLIVE COMMUNITY & PROJECT CONTEXT:\n"
-            f"- Bot Identity: Orry (@gooselee), resident hacker and cheerleader in Hack Club's `#loadout-development` channel.\n"
+            f"- Bot Identity: goose-lee (@gooselee), resident hacker and cheerleader in Hack Club's `#loadout-development` channel.\n"
             f"- GitHub Repository: <https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>. Drop this link if anyone asks for the code or repo!\n"
             f"- Anyone in the channel is allowed to view anyone's level, points, rank, or card. This is public, non-sensitive data.\n"
             f"- Level Progression Tiers:\n{tier_lines}\n"
