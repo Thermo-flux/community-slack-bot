@@ -41,16 +41,18 @@ def clean_mention_text(text: str) -> str:
 def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
     """Registers all Slack Bolt event listeners and slash commands."""
 
-    # 1. MESSAGE EVENT
+    # 1. MESSAGE EVENT: Track activity and support in-chat command triggers
     @app.event("message")
-    def handle_message_events(body, logger_bolt, client, say):
+    def handle_message_events(body, client, say):
         event = body.get("event", {})
         channel_id = event.get("channel")
         user_id = event.get("user")
-        text = event.get("text", "")
+        text = (event.get("text") or "").strip()
         subtype = event.get("subtype")
         bot_id = event.get("bot_id")
+        thread_ts = event.get("thread_ts") or event.get("ts")
 
+        # Never process messages from bots to prevent loops
         if bot_id or subtype == "bot_message" or not user_id:
             return
         if subtype in ["message_deleted", "message_changed", "channel_join", "channel_leave", "pinned_info"]:
@@ -58,6 +60,42 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         if not is_channel_watched(channel_id):
             return
 
+        clean_lower = text.lower().strip()
+
+        # Instant in-chat triggers: users can type /level, !level, or level directly!
+        if clean_lower in ("/level", "!level", ".level", "level", "/rank", "!rank", ".rank", "rank", "my level", "my rank", "check level"):
+            user_data = get_or_create_user(user_id)
+            card = format_rank_card(user_data)
+            try:
+                say(text=card, channel=channel_id, thread_ts=thread_ts)
+            except Exception as e:
+                logger.error(f"Failed to send rank card via chat command: {e}")
+            return
+
+        if clean_lower in ("/leaderboard", "!leaderboard", ".leaderboard", "leaderboard", "/top", "!top", "top"):
+            leaders = get_leaderboard(limit=10)
+            board = format_leaderboard(leaders)
+            try:
+                say(text=board, channel=channel_id, thread_ts=thread_ts)
+            except Exception as e:
+                logger.error(f"Failed to send leaderboard via chat command: {e}")
+            return
+
+        if clean_lower in ("!help", "/help", "bot help", "bothelp"):
+            templates = CONFIG.get("templates", {})
+            rules = CONFIG.get("interaction_rules", {})
+            help_msg = templates.get("help_message", "Type `/level` or `/leaderboard`!")
+            formatted_help = help_msg.format(
+                bot_id=bot_user_id or "bot",
+                cooldown=rules.get("cooldown_seconds", 30)
+            )
+            try:
+                say(text=formatted_help, channel=channel_id, thread_ts=thread_ts)
+            except Exception as e:
+                logger.error(f"Failed to send help: {e}")
+            return
+
+        # Anti-spam cooldown check
         rules = CONFIG.get("interaction_rules", {})
         cooldown_sec = rules.get("cooldown_seconds", 30)
         can_earn, remaining = check_cooldown(user_id, cooldown_sec)
@@ -102,7 +140,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
                 except Exception as e:
                     logger.error(f"Failed to post level up celebration: {e}")
 
-    # 2. APP MENTION EVENT
+    # 2. APP MENTION EVENT: Handle @bot mentions (AI chat or commands)
     @app.event("app_mention")
     def handle_app_mentions(body, say, client):
         event = body.get("event", {})
@@ -149,21 +187,33 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
 
     # 3. SLASH COMMANDS
     @app.command("/level")
-    def handle_level_command(ack, command, respond):
+    def handle_level_command(ack, command, respond, say):
         ack()
         user_id = command.get("user_id")
         user_data = get_or_create_user(user_id)
-        respond(text=format_rank_card(user_data), response_type="ephemeral")
+        card = format_rank_card(user_data)
+        try:
+            respond(text=card)
+        except Exception:
+            say(text=card)
 
     @app.command("/rank")
-    def handle_rank_command(ack, command, respond):
+    def handle_rank_command(ack, command, respond, say):
         ack()
         user_id = command.get("user_id")
         user_data = get_or_create_user(user_id)
-        respond(text=format_rank_card(user_data), response_type="ephemeral")
+        card = format_rank_card(user_data)
+        try:
+            respond(text=card)
+        except Exception:
+            say(text=card)
 
     @app.command("/leaderboard")
-    def handle_leaderboard_command(ack, respond):
+    def handle_leaderboard_command(ack, respond, say):
         ack()
         leaders = get_leaderboard(limit=10)
-        respond(text=format_leaderboard(leaders), response_type="in_channel")
+        board = format_leaderboard(leaders)
+        try:
+            respond(text=board, response_type="in_channel")
+        except Exception:
+            say(text=board)
