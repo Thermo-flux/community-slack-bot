@@ -139,9 +139,14 @@ if _env_channels:
 else:
     WATCHED_CHANNELS = CONFIG.get("watched_channels", ["*"])
 
-# Database path
-default_db = PROJECT_DIR / "data" / "community_karma.db"
-DB_PATH = os.getenv("DB_PATH", str(default_db))
+# Database path (always resolve relative to PROJECT_DIR if relative)
+_env_db = os.getenv("DB_PATH", "").strip()
+if _env_db:
+    _p = Path(_env_db)
+    DB_PATH = str(_p if _p.is_absolute() else (PROJECT_DIR / _p))
+else:
+    DB_PATH = str(PROJECT_DIR / "data" / "community_karma.db")
+
 
 
 def is_channel_watched(channel_id: str) -> bool:
