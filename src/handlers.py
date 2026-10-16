@@ -9,7 +9,7 @@ Supports querying anyone's level card, public contributor stats, and AI chat.
 
 import re
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict
 from slack_bolt import App
 
 from config import CONFIG, is_channel_watched
@@ -123,6 +123,61 @@ def get_cards_response_for_targets(targets: List[str], caller_id: str) -> str:
                 f"They haven't earned any XP in this channel yet! As soon as they start chatting or sharing ideas, their level card will be generated. 🌱"
             )
     return "\n\n".join(cards)
+
+
+def fetch_conversation_history(
+    client,
+    channel_id: str,
+    thread_ts: Optional[str] = None,
+    bot_user_id: Optional[str] = None,
+    max_messages: int = 10
+) -> List[Dict[str, str]]:
+    """
+    Fetches recent conversation turns from Slack to provide multi-turn memory to the AI.
+    If in a thread, fetches thread replies.
+    If in a channel, fetches recent channel messages.
+    """
+    history: List[Dict[str, str]] = []
+    if not client or not channel_id:
+        return history
+
+    try:
+        raw_msgs = []
+        if thread_ts:
+            res = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=max_messages + 2)
+            raw_msgs = res.get("messages", [])
+        else:
+            res = client.conversations_history(channel=channel_id, limit=max_messages + 2)
+            raw_msgs = res.get("messages", [])
+            raw_msgs.reverse()  # history returns newest first; reverse for chronological order
+
+        for msg in raw_msgs:
+            sender = msg.get("user")
+            text = (msg.get("text") or "").strip()
+            if not text:
+                continue
+
+            # Skip command triggers from conversation history
+            if text.lower().startswith(("/", "!", ".")):
+                continue
+
+            if sender == bot_user_id:
+                clean_text = ai_service.clean_ai_output(text)
+                if clean_text:
+                    history.append({"role": "assistant", "content": clean_text})
+            elif sender:
+                clean_text = clean_mention_text(text)
+                if clean_text:
+                    history.append({"role": "user", "content": clean_text})
+
+        # Keep at most max_messages turns
+        if len(history) > max_messages:
+            history = history[-max_messages:]
+
+    except Exception as e:
+        logger.warning(f"Could not retrieve conversation history from Slack: {e}")
+
+    return history
 
 
 def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
@@ -274,13 +329,23 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             say(text=formatted_help, thread_ts=target_thread_ts)
             return
 
-        # AI Chat with injected real-time community context
+        # AI Chat with conversation memory & injected real-time community context
+        history = fetch_conversation_history(
+            client=client,
+            channel_id=channel_id,
+            thread_ts=event.get("thread_ts"),
+            bot_user_id=bot_user_id,
+            max_messages=10
+        )
+
         ai_reply = ai_service.generate_response(
             user_id=user_id,
             user_message=cleaned_text or "Hello!",
-            channel_id=channel_id
+            channel_id=channel_id,
+            conversation_history=history
         )
         say(text=ai_reply, thread_ts=target_thread_ts)
+
 
     # 3. SLASH COMMANDS
     @app.command("/level")

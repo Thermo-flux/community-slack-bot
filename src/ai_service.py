@@ -2,12 +2,16 @@
 ==============================================================================
 AI REASONING SERVICE MODULE (src/ai_service.py)
 ==============================================================================
+Provides intelligent, multi-turn AI reasoning powered by DeepSeek / OpenAI / Gemini
+with automatic conversation memory, thinking scratchpad cleanup, and live community stats.
+==============================================================================
 """
 
+import re
 import json
 import logging
 import requests
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from config import (
     AI_PROVIDER,
     AI_API_KEY,
@@ -18,6 +22,17 @@ from config import (
 )
 
 logger = logging.getLogger("SlackBotAI")
+
+
+def clean_ai_output(text: str) -> str:
+    """Strips internal chain-of-thought scratchpads and <think> tags from AI output."""
+    if not text:
+        return ""
+    # Strip <think>...</think> blocks common in reasoning models like DeepSeek
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Strip common scratchpad prefixes
+    text = re.sub(r"^Thinking Process:.*?\n\n", "", text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
 
 
 def load_soul_prompt() -> str:
@@ -44,7 +59,8 @@ def build_system_instructions() -> str:
         f"\n\nEMOJI RULES:\n"
         f"- Target emoji frequency: {frequency}\n"
         f"- Only use these approved emojis where appropriate: {' '.join(allowed_emojis)}\n"
-        f"- Keep responses concise and formatted cleanly with Slack Markdown (*bold*, _italic_, `code`)."
+        f"- Keep responses concise and formatted cleanly with Slack Markdown (*bold*, _italic_, `code`).\n"
+        f"- Be direct and natural. Do not output your internal reasoning or thinking notes."
     )
 
     # Inject live community data so AI can accurately answer queries about any user's stats
@@ -86,19 +102,53 @@ def get_offline_fallback(user_id: str) -> str:
     return fallback.format(user_id=user_id)
 
 
-def generate_response(user_id: str, user_message: str, channel_id: Optional[str] = None, timeout: int = 15) -> str:
+def build_messages_payload(
+    system_prompt: str,
+    user_message: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None
+) -> List[Dict[str, str]]:
+    """Builds an OpenAI-compatible messages array with system prompt and conversation history."""
+    messages = [{"role": "system", "content": system_prompt}]
+
+    if conversation_history:
+        for turn in conversation_history:
+            role = turn.get("role")
+            content = (turn.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                # Skip duplicate of the current user message if it is already at the end
+                if role == "user" and content == user_message.strip():
+                    continue
+                messages.append({"role": role, "content": content})
+
+    # Add current user prompt
+    clean_prompt = user_message.strip()
+    if not messages or messages[-1].get("content") != clean_prompt:
+        messages.append({"role": "user", "content": clean_prompt})
+
+    return messages
+
+
+def generate_response(
+    user_id: str,
+    user_message: str,
+    channel_id: Optional[str] = None,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    timeout: int = 35
+) -> str:
+    """Generates an intelligent AI response with multi-turn conversation memory."""
     if not AI_API_KEY or AI_PROVIDER == "mock":
         return get_offline_fallback(user_id)
 
     system_prompt = build_system_instructions()
+    messages = build_messages_payload(system_prompt, user_message, conversation_history)
 
     try:
         if AI_PROVIDER == "gemini":
-            return _call_gemini(user_message, system_prompt, timeout)
+            return _call_gemini(messages, system_prompt, timeout)
         elif AI_PROVIDER in ("openai", "openrouter", "custom"):
-            return _call_openai_compatible(user_message, system_prompt, timeout)
+            return _call_openai_compatible(messages, timeout)
         elif AI_PROVIDER == "anthropic":
-            return _call_anthropic(user_message, system_prompt, timeout)
+            return _call_anthropic(messages, system_prompt, timeout)
         else:
             return get_offline_fallback(user_id)
     except Exception as e:
@@ -106,13 +156,21 @@ def generate_response(user_id: str, user_message: str, channel_id: Optional[str]
         return get_offline_fallback(user_id)
 
 
-def _call_gemini(prompt: str, system_prompt: str, timeout: int) -> str:
+def _call_gemini(messages: List[Dict[str, str]], system_prompt: str, timeout: int) -> str:
     model = AI_MODEL or "gemini-1.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={AI_API_KEY}"
+
+    contents = []
+    for m in messages:
+        if m["role"] == "system":
+            continue
+        role = "user" if m["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": m["content"]}]})
+
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7}
+        "contents": contents,
+        "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.7}
     }
     response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=timeout)
     if response.status_code == 200:
@@ -121,13 +179,14 @@ def _call_gemini(prompt: str, system_prompt: str, timeout: int) -> str:
             parts = candidates[0].get("content", {}).get("parts", [])
             if parts:
                 text = parts[0].get("text") or ""
-                if text.strip():
-                    return text.strip()
-        return "I'm here and listening! Keep up the great discussion! 🚀"
+                cleaned = clean_ai_output(text)
+                if cleaned:
+                    return cleaned
+        return "I'm here with you! Keep up the great discussion! 🚀"
     raise RuntimeError(f"Gemini API status {response.status_code}")
 
 
-def _call_openai_compatible(prompt: str, system_prompt: str, timeout: int) -> str:
+def _call_openai_compatible(messages: List[Dict[str, str]], timeout: int = 35) -> str:
     model = AI_MODEL
     base_url = AI_BASE_URL
     if AI_PROVIDER == "openrouter":
@@ -141,41 +200,67 @@ def _call_openai_compatible(prompt: str, system_prompt: str, timeout: int) -> st
     headers = {"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": model,
-        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-        "max_tokens": 400,
+        "messages": messages,
+        "max_tokens": 1200,
         "temperature": 0.7
     }
-    response = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
-    if response.status_code == 200:
-        choices = response.json().get("choices", [])
-        if choices:
-            msg = choices[0].get("message", {})
-            content = msg.get("content") or ""
-            if not content and "reasoning_content" in msg:
-                content = msg.get("reasoning_content") or ""
-            if content.strip():
-                return content.strip()
-        return "I'm listening and tracking your activity! 🚀"
-    raise RuntimeError(f"OpenAI API status {response.status_code}")
+
+    last_err = None
+    for attempt in range(2):
+        try:
+            response = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
+            if response.status_code == 200:
+                choices = response.json().get("choices", [])
+                if choices:
+                    msg = choices[0].get("message", {})
+                    raw_content = msg.get("content") or ""
+                    # Fallback to reasoning fields if content was blank
+                    if not raw_content.strip():
+                        raw_content = msg.get("reasoning") or msg.get("reasoning_content") or ""
+
+                    cleaned = clean_ai_output(raw_content)
+                    if cleaned:
+                        return cleaned
+
+                return "I'm here! Feel free to ask a question, share an idea, or check your rank with `/level`! 🚀"
+            raise RuntimeError(f"OpenAI API status {response.status_code}: {response.text}")
+        except requests.exceptions.Timeout as e:
+            last_err = e
+            logger.warning(f"AI API timed out (attempt {attempt+1}/2). Retrying...")
+            continue
+        except Exception as e:
+            last_err = e
+            break
+
+    if last_err:
+        raise last_err
+    return "I'm here! Feel free to ask a question, share an idea, or check your rank with `/level`! 🚀"
 
 
-def _call_anthropic(prompt: str, system_prompt: str, timeout: int) -> str:
+def _call_anthropic(messages: List[Dict[str, str]], system_prompt: str, timeout: int) -> str:
     model = AI_MODEL or "claude-3-5-haiku-20241022"
     url = "https://api.anthropic.com/v1/messages"
     headers = {"x-api-key": AI_API_KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+
+    anthropic_messages = []
+    for m in messages:
+        if m["role"] == "system":
+            continue
+        anthropic_messages.append({"role": m["role"], "content": m["content"]})
+
     payload = {
         "model": model,
         "system": system_prompt,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 400
+        "messages": anthropic_messages,
+        "max_tokens": 1000
     }
     response = requests.post(url, json=payload, headers=headers, timeout=timeout)
     if response.status_code == 200:
         content = response.json().get("content", [])
         if content and content[0].get("type") == "text":
             text = content[0].get("text") or ""
-            if text.strip():
-                return text.strip()
-        return "I'm listening and tracking your activity! 🚀"
+            cleaned = clean_ai_output(text)
+            if cleaned:
+                return cleaned
+        return "I'm here with you! Keep up the great discussion! 🚀"
     raise RuntimeError(f"Anthropic API status {response.status_code}")
-

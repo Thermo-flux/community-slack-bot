@@ -59,3 +59,53 @@ def test_gemini_success_mock():
          patch("requests.post", return_value=mock_response):
         reply = ai_service.generate_response(user_id="U_HAPPY", user_message="What should we build?")
         assert "Great idea!" in reply
+
+
+def test_clean_ai_output():
+    """Verifies that think tags and scratchpads are stripped cleanly."""
+    raw = "<think>I should be cheerful and encouraging.</think>Hey there! Great to meet you! 🎉"
+    cleaned = ai_service.clean_ai_output(raw)
+    assert cleaned == "Hey there! Great to meet you! 🎉"
+    assert "<think>" not in cleaned
+
+    scratchpad = "Thinking Process:\n1. User asked for advice.\n\nKeep up the great work! 🚀"
+    assert ai_service.clean_ai_output(scratchpad) == "Keep up the great work! 🚀"
+
+
+def test_build_messages_payload():
+    """Verifies that conversation history is properly structured for the model."""
+    history = [
+        {"role": "user", "content": "can you use slang?"},
+        {"role": "assistant", "content": "Sure, I can use casual phrases!"}
+    ]
+    payload = ai_service.build_messages_payload("system instruction", "cool, thanks!", history)
+    assert len(payload) == 4
+    assert payload[0]["role"] == "system"
+    assert payload[1]["role"] == "user"
+    assert payload[2]["role"] == "assistant"
+    assert payload[3]["role"] == "user"
+    assert payload[3]["content"] == "cool, thanks!"
+
+
+def test_openai_reasoning_fallback_mock():
+    """Verifies that if content is empty but reasoning is present, reasoning is used as fallback."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "Here is the response text from model reasoning! 🚀"
+                }
+            }
+        ]
+    }
+
+    with patch("ai_service.AI_API_KEY", "fake-key"), \
+         patch("ai_service.AI_PROVIDER", "custom"), \
+         patch("requests.post", return_value=mock_response):
+        reply = ai_service.generate_response(user_id="U_TEST", user_message="test message")
+        assert "Here is the response text" in reply
+
