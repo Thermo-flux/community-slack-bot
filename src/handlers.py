@@ -38,6 +38,7 @@ from database import (
     resolve_user,
 )
 from leveling import (
+    evaluate_message_xp,
     format_leaderboard,
     format_level_up_message,
     format_rank_card,
@@ -274,15 +275,15 @@ def parse_card_request_targets(
         "give me my card", "give me my stats",
     }
     self_patterns = [
-        r"^what(?:'s|\s+is)?\s+my\s+(?:rank|card|level|stats|xp|points)\b.*$",
+        r"^what(?:'s|\s+is)?\s+my\s+(?:current\s+)?(?:rank|card|level|stats|xp|points)\b.*$",
         r"^what\s+(?:level|rank|tier)\s+(?:am\s+i|i\s+am|i'?m)\b.*$",
         r"^what\s+level\s+i\s+am\b.*$",
         r"^which\s+(?:level|rank|tier)\s+am\s+i\b.*$",
         r"^how\s+(?:much|many)\s+(?:xp|points|ore)(?:\s+(?:do\s+i\s+have|have\s+i\s+got|have\s+i))?\b.*$",
         r"^am\s+i\s+(?:a\s+)?(?:level|rank|tier)\b.*$",
         r"^do\s+i\s+have\s+(?:any\s+)?(?:xp|points)\b.*$",
-        r"^(?:show|give|gimme|check)\s+(?:me\s+)?my\s+(?:rank|card|level|stats|xp|points)\b.*$",
-        r"^my\s+(?:rank|card|level|stats|xp|points)(?:\s+card)?\b.*$",
+        r"^(?:show|give|gimme|check)\s+(?:me\s+)?my\s+(?:current\s+)?(?:rank|card|level|stats|xp|points)\b.*$",
+        r"^my\s+(?:current\s+)?(?:rank|card|level|stats|xp|points)(?:\s+card)?\b.*$",
         r"^(?:level|rank|card)\s+me\b.*$",
     ]
     if clean_lower in self_triggers or any(
@@ -685,9 +686,11 @@ def _queue_ai_reply(
 
 
 def _record_private_activity(user_id: str, channel_id: str, event, client, say, rules) -> None:
-    """Award base XP atomically in a single DB connection without storing uncalled message text."""
+    """Award base-plus-bonus XP atomically without storing uncalled message text."""
     cooldown_sec = int(rules.get("cooldown_seconds", 30))
-    base_xp = int(rules.get("base_xp_per_message", 10))
+    text = event.get("text") or ""
+    xp_award, is_suggestion, _is_long = evaluate_message_xp(text)
+    message_length = len(text.strip())
     with _DB_LOCK, _managed_connection():
         can_earn, _remaining = check_cooldown(user_id, cooldown_sec)
         if not can_earn:
@@ -696,15 +699,15 @@ def _record_private_activity(user_id: str, channel_id: str, event, client, say, 
 
         current_user = get_or_create_user(user_id)
         old_level, _old_title = get_level_info_for_xp(current_user["xp"])
-        new_total_xp = current_user["xp"] + base_xp
+        new_total_xp = current_user["xp"] + xp_award
         new_level, new_title = get_level_info_for_xp(new_total_xp)
         record_message_and_add_xp(
             user_id=user_id,
             channel_id=channel_id,
-            xp_to_add=base_xp,
+            xp_to_add=xp_award,
             new_level=new_level,
-            message_length=0,
-            is_suggestion=False,
+            message_length=message_length,
+            is_suggestion=is_suggestion,
             update_cooldown=True,
         )
     if new_level > old_level and event.get("ts"):

@@ -183,6 +183,8 @@ def test_parse_card_request_targets():
     assert handlers.parse_card_request_targets("how much xp do i have", "U_CALLER") == ["U_CALLER"]
     assert handlers.parse_card_request_targets("do i have any xp", "U_CALLER") == ["U_CALLER"]
     assert handlers.parse_card_request_targets("gimme my rank", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("what's my current level", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("show me my current stats", "U_CALLER") == ["U_CALLER"]
     assert handlers.parse_card_request_targets(
         "<@U_BOT> what level am i", "U_CALLER", bot_user_id="U_BOT"
     ) == ["U_CALLER"]
@@ -473,6 +475,32 @@ def test_thread_mention_uses_its_full_thread_context():
         {"role": "user", "content": "Should we use SQLite?"},
         {"role": "user", "content": "The app is single-user."},
     ]
+
+
+def test_uncalled_messages_award_configured_bonus_xp():
+    """Ordinary chatter earns base XP, and suggestion messages earn the configured bonus."""
+    from contextlib import nullcontext
+
+    def run(text):
+        with patch("handlers.check_cooldown", return_value=(True, 0)), \
+             patch("handlers.get_or_create_user", return_value={"user_id": "U1", "xp": 0, "level": 1}), \
+             patch("handlers.get_level_info_for_xp", return_value=(1, "Hatchling")), \
+             patch("handlers.record_message_and_add_xp") as record, \
+             patch("handlers._managed_connection", return_value=nullcontext()), \
+             patch("handlers._DB_LOCK", nullcontext()):
+            handlers._record_private_activity(
+                "U1", "C1", {"text": text, "ts": "1.0"}, MagicMock(), MagicMock(),
+                {"cooldown_seconds": 30},
+            )
+        return record.call_args.kwargs
+
+    plain = run("morning all")
+    assert plain["xp_to_add"] == 10
+    assert plain["is_suggestion"] is False
+
+    suggestion = run("I have a suggestion for the onboarding flow")
+    assert suggestion["xp_to_add"] == 25
+    assert suggestion["is_suggestion"] is True
 
 
 def test_unmentioned_messages_never_trigger_an_ai_reply():

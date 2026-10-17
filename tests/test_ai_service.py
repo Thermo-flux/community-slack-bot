@@ -104,6 +104,18 @@ def test_fallback_prompt_keeps_privacy_and_bruce_lee_rules(monkeypatch):
     assert "only speak when you are directly called" in instructions
 
 
+def test_leveling_knowledge_is_authoritative_and_config_driven():
+    knowledge = ai_service.build_leveling_knowledge()
+    assert "LEVELING" in knowledge
+    assert "10 XP" in knowledge
+    assert "30-second cooldown" in knowledge
+    assert "Head Duck" in knowledge
+    assert "Hatchling" in knowledge
+    assert "/leaderboard" in knowledge
+    assert "current tracked members" not in knowledge.lower()
+    assert knowledge in ai_service.build_system_instructions()
+
+
 def test_may_decline_instructions_only_added_when_asked():
     """Thread follow-ups get the 'chime in or stay quiet' instruction; direct calls do not."""
     assert ai_service.NO_REPLY_TOKEN not in ai_service.build_system_instructions()

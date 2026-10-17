@@ -440,6 +440,49 @@ def retrieve_loadout_knowledge(
 NO_REPLY_TOKEN = "[[NO_REPLY]]"
 
 
+def build_leveling_knowledge() -> str:
+    """Authoritative, config-driven facts about Goose's own community leveling."""
+    from leveling import get_level_tiers
+
+    rules = CONFIG.get("interaction_rules") or {}
+    base_xp = int(rules.get("base_xp_per_message", 10))
+    long_bonus = int(rules.get("bonus_xp_long_message", 5))
+    long_threshold = int(rules.get("long_message_threshold", 80))
+    suggestion_bonus = int(rules.get("bonus_xp_suggestion", 15))
+    cooldown = int(rules.get("cooldown_seconds", 30))
+    announce = bool(rules.get("announce_level_up_in_channel", True))
+    keywords = rules.get("suggestion_keywords") or []
+    tiers = get_level_tiers()
+    tier_line = ", ".join(
+        f"{int(t['level'])} {t['title']} ({int(t['min_xp'])} XP)" for t in tiers
+    )
+    max_level = int(tiers[-1]["level"]) if tiers else 0
+    keyword_line = ", ".join(str(k) for k in keywords) if keywords else "suggest, idea, what if"
+
+    return (
+        "\n\nLEVELING (Goose's own community levels; answer these confidently, do not guess):\n"
+        "- By default, questions about leveling up or about levels in this server mean the community duck "
+        "levels (earn XP by chatting). Only discuss LOADOUT Track XP field levels when the person clearly "
+        "asks about LOADOUT, a track, or field levels.\n"
+        "- XP comes from chatting normally in the watched channels. Only ordinary messages count; "
+        "messages that call Goose or run a command do not earn XP.\n"
+        f"- Each counted message gives {base_xp} XP. Add {long_bonus} XP if the message is at least "
+        f"{long_threshold} characters, and add {suggestion_bonus} XP if it contains a suggestion or idea "
+        f"keyword ({keyword_line}). A long, thoughtful suggestion can earn up to {base_xp + long_bonus + suggestion_bonus} XP at once.\n"
+        f"- There is a {cooldown}-second cooldown per member: right after earning XP, further messages for "
+        f"{cooldown} seconds still count toward message count but give no XP.\n"
+        f"- Levels and the XP needed to reach them: {tier_line}. Level {max_level} is the maximum. "
+        "The curve is about 6 * (level - 1) * level XP, so every level costs more than the last.\n"
+        f"- Leveling up adds a :tada: reaction; at level 4 and above Goose {'also posts a short celebration in the channel' if announce else 'posts no public celebration'}.\n"
+        "- To check progress: /level, /rank, or /card show a member's card (level, title, XP, progress, XP to next level); "
+        "/leaderboard shows the top 10. Text works too: \"!level\", \"!rank\", \"!leaderboard\", or \"goose what's my level\".\n"
+        "- Only members who have chatted and earned XP appear on cards or the leaderboard. A brand-new member is Level 1 with 0 XP.\n"
+        "- These are Goose's community duck levels. They are separate from LOADOUT's Track XP field levels "
+        "(per-track, 1-15, milestones at 3/6/9/12/15, about 350 hours to LV.15), which come from the LOADOUT docs.\n"
+        "- Never invent a member's XP, level, or rank; if unsure, tell them to run the level command."
+    )
+
+
 def is_no_reply(text: str) -> bool:
     """True when the model chose to stay quiet for a follow-up it was not really part of."""
     if not text:
@@ -536,6 +579,7 @@ def build_system_instructions(knowledge: str = "", may_decline: bool = False) ->
     return (
         base_soul
         + privacy_and_persona_rules
+        + build_leveling_knowledge()
         + assistance_limits
         + emoji_instruction
         + decline_block
