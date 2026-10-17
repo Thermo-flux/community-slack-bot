@@ -104,6 +104,19 @@ def test_fallback_prompt_keeps_privacy_and_bruce_lee_rules(monkeypatch):
     assert "explicit opinion question that names goose, goose lee, or orry" in instructions
 
 
+def test_loadout_knowledge_is_mirrored_and_injected():
+    """The mirrored LOADOUT docs are loaded and appended to the system prompt."""
+    knowledge = ai_service.load_loadout_knowledge()
+    assert knowledge
+    assert "Raspberry Pi 5" in knowledge
+    assert "approved hours" in knowledge.lower()
+    assert "Field Requisition" in knowledge
+
+    instructions = ai_service.build_system_instructions()
+    assert "LOADOUT PROGRAM KNOWLEDGE" in instructions
+    assert "Raspberry Pi 5" in instructions
+
+
 def test_error_resilience_on_network_failure():
     """Simulates API network exception to verify the bot catches it and falls back safely."""
     with patch("ai_service.AI_API_KEY", "fake-key-for-test"), \
