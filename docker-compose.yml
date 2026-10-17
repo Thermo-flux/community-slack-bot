@@ -1,45 +1,15 @@
-# goose-lee. Start the gateway with: docker compose up -d
-# Start the voice only when it is allowed (see docs/RUNBOOK.md): docker compose --profile voice up -d voice
-name: goose-lee
-
-x-hardening: &hardening
-  read_only: true
-  tmpfs:
-    - /tmp
-  cap_drop:
-    - ALL
-  security_opt:
-    - no-new-privileges:true
-
 services:
-  gateway:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: goose-lee-gateway:local
-    <<: *hardening
-    env_file: .env
+  slack-bot:
+    build: .
+    container_name: community_slack_bot
+    restart: unless-stopped
+    env_file:
+      - .env
     volumes:
       - ./data:/app/data
-      - ./config:/app/config:ro
-    networks:
-      - default
-      - voice_net
-    restart: on-failure:5
-
-  voice:
-    profiles: ["voice"]
-    build:
-      context: .
-      dockerfile: Dockerfile.voice
-    image: goose-lee-voice:local
-    <<: *hardening
-    env_file: voice.env
-    # No ports: only the gateway reaches the voice, over the private network below.
-    networks:
-      - voice_net
-    restart: on-failure:5
-
-networks:
-  voice_net:
-    driver: bridge
+      - ./config:/app/config
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M

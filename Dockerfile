@@ -1,29 +1,20 @@
-# Gateway image: the Slack bot process and its core. No LLM key, no voice code.
 FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-
-RUN groupadd --system goose \
-    && useradd --system --gid goose --home-dir /app --shell /usr/sbin/nologin goose
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Pinned, with upper bounds. Keep in step with pyproject.toml.
-RUN pip install "PyYAML==6.0.*" "slack_bolt==1.*" "tzdata>=2024.1,<2027"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY goose/ goose/
-COPY config/ config/
-COPY slack/ slack/
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# The data directory is a volume (see docker-compose.yml). The image itself stays read-only friendly.
-RUN mkdir -p /app/data && chown goose:goose /app/data
+COPY . .
 
-USER goose
+RUN mkdir -p /app/data
+ENV DB_PATH=/app/data/community_karma.db
 
-HEALTHCHECK --interval=60s --timeout=10s --start-period=20s --retries=3 \
-    CMD ["python", "-m", "goose.gateway.app", "--version"]
-
-CMD ["python", "-m", "goose.gateway.app", "--config", "config/goose.yaml"]
+CMD ["python", "run_bot.py"]
