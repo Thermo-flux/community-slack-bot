@@ -51,7 +51,7 @@ voice:
   elaborate_max_chars: 1200
   max_tokens: 350
   elaborate_max_tokens: 600
-  timeout_s: 25.0
+  timeout_s: 45.0
   # alert_tokens_per_day: 200000  # optional heads-up to the organizer channel, never stops anything
 
 rewards:

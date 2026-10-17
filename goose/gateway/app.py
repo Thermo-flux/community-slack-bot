@@ -31,7 +31,7 @@ DEFAULT_CONFIG = "config/goose.yaml"
 BOT_PREFIX = "xoxb-"
 APP_PREFIX = "xapp-"
 SLASH_COMMAND = "/goose"
-STALE_JOB_S = 35.0              # a voice job older than this (since admission) posts the canned line, no call
+STALE_JOB_S = 45.0              # a voice job older than this (since admission) posts the canned line, no call
 RECENT_TEXT_S = 86400           # posted texts remembered per channel for the no-repeat check
 THREAD_CACHE_MAX = 500          # thread lookups remembered (oldest dropped)
 THREAD_EXCERPT_MAX = 6          # earlier thread messages sent with an addressed message
@@ -352,12 +352,22 @@ def build_handlers(ctx: Any, router: Any, client: Any, *, submit: Optional[Calla
             _post_canned_now(ctx, client, job, "queue_full")
             return
         job.created_ts = clock_fn()
-        # Immediate visual feedback: react with :eyes: within ~50ms so user knows Goose heard them
-        if job.channel and job.message_ts:
+        # Immediate visual feedback: send a temporary thinking message into the thread/channel
+        thinking_ts = ""
+        if job.channel and not job.ephemeral:
             try:
-                client.reactions_add(channel=job.channel, name="eyes", timestamp=job.message_ts)
+                target_thread = job.thread_ts or job.message_ts
+                resp = client.chat_postMessage(
+                    channel=job.channel,
+                    text="_Thinking... :duck:_",
+                    thread_ts=target_thread or None,
+                    parse="none",
+                )
+                if isinstance(resp, dict):
+                    thinking_ts = str(resp.get("ts") or "")
             except Exception as exc:
-                log.debug("initial eyes reaction skipped: %s", exc)
+                log.debug("initial thinking message skipped: %s", exc)
+        job.thinking_ts = thinking_ts
         try:
             voice_fn(run_voice_job, ctx, client, job, clock_fn, admission)
         except BaseException:

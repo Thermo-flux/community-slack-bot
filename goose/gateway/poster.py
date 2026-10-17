@@ -478,12 +478,16 @@ def _fallback(job: VoiceJob, lines: LineBank, reason: str) -> List[Action]:
 
 
 def _deliver(job: VoiceJob, text: str, reaction: str) -> List[Action]:
+    actions: List[Action] = []
+    thinking_ts = getattr(job, "thinking_ts", "")
     if job.ephemeral:
         if not job.user:
             return []                      # a private reply with no recipient is never posted publicly
-        actions = [Action(kind="ephemeral", channel=job.channel, user=job.user, text=text, thread_ts=job.thread_ts)]
+        actions.append(Action(kind="ephemeral", channel=job.channel, user=job.user, text=text, thread_ts=job.thread_ts))
+    elif thinking_ts:
+        actions.append(Action(kind="update", channel=job.channel, text=text, message_ts=thinking_ts, thread_ts=job.thread_ts))
     else:
-        actions = [Action(kind="post", channel=job.channel, text=text, thread_ts=job.thread_ts)]
+        actions.append(Action(kind="post", channel=job.channel, text=text, thread_ts=job.thread_ts))
     if reaction and job.message_ts:
         actions.append(Action(kind="reaction", channel=job.channel, message_ts=job.message_ts, emoji=reaction))
     return actions

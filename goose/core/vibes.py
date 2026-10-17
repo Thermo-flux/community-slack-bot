@@ -40,7 +40,7 @@ PATTERNS = {
     "zzz": re.compile(r"\b(?:good night|gn)\b"),
     "feather": re.compile(r"\bfeathers?\b"),
     "bread": re.compile(r"\bbread\b"),
-    "duck": re.compile(r"\b(?:quack|quak|duck|ducks|goose-lee)\b"),
+    "duck": re.compile(r"\b(?:quack|quak|duck|ducks)\b"),
 }
 BIRTHDAY_BLOCK = re.compile(r"\b(?:died|dies|dead|miss\w*)\b|first without")
 LOL_RE = re.compile(r"\blol\b")

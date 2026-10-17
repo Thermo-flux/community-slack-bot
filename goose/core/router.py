@@ -317,8 +317,6 @@ class Router:
             return self._goose(ev, now)
 
         res = Result()
-        if not flags.quiet and not sad:
-            res.actions.append(self._reaction(ev, "duck"))
         if is_program_question(text):
             res.actions.append(self._post(ev, self._line("program_redirect")))
             return res
@@ -335,8 +333,16 @@ class Router:
         return res
 
     def _is_goose_call(self, ev: Event, text: str, flags: _Flags) -> bool:
-        """A bare 'goose' aimed at the duck, naming nobody else. Quiet people get no teasing, so they never add heat."""
-        return (not flags.quiet) and mentions_goose(text) and not self._others(ev, text)
+        """A bare 'goose' aimed at the duck (e.g. 'goose' or 'you goose!'), not an actual query/conversation."""
+        if flags.quiet or self._others(ev, text):
+            return False
+        clean = normalize_text(text).strip().lower()
+        tokens = clean.split()
+        if len(tokens) <= 3 and any(t in ("goose", "geese") for t in tokens):
+            if any(t in ("hey", "hi", "yo", "hello", "what", "how", "why", "who", "can", "could", "tell", "help") for t in tokens):
+                return False
+            return True
+        return False
 
     def _goose(self, ev: Event, now: float) -> Result:
         ctx = self.ctx

@@ -228,6 +228,21 @@ def _run_action(client: Any, action: Action, default_channel: str) -> None:
         if action.text:
             kwargs["initial_comment"] = action.text
         client.files_upload_v2(**kwargs)
+    elif kind == "update":
+        if not action.text or not action.message_ts:
+            return
+        try:
+            client.chat_update(
+                channel=channel, ts=action.message_ts, text=action.text,
+                parse="none", link_names=False,
+            )
+        except Exception as exc:
+            log.warning("chat_update failed: %s, falling back to chat_postMessage", type(exc).__name__)
+            client.chat_postMessage(
+                channel=channel, text=action.text,
+                thread_ts=action.thread_ts or None,
+                parse="none", link_names=False, unfurl_links=False, unfurl_media=False,
+            )
     else:
         raise ValueError("unknown_kind")
 

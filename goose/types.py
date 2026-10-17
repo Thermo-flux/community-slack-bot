@@ -9,7 +9,7 @@ EVENT_KINDS = (
     "reaction_added", "reaction_removed", "command", "member_joined",
 )
 FACT_KINDS = ("msg", "thanks", "helpful", "star", "bigstar")
-ACTION_KINDS = ("post", "ephemeral", "reaction", "organizer_post", "file")
+ACTION_KINDS = ("post", "ephemeral", "reaction", "organizer_post", "file", "update")
 
 MEMBER_COMMANDS = (
     "help", "join", "leave", "show", "hide", "rest", "quiet", "me", "top", "all",
@@ -79,6 +79,7 @@ class VoiceJob:
     allow_roast: bool = False
     reply_cap: int = 300
     created_ts: float = 0.0         # monotonic time the job was admitted; the gateway drops stale jobs
+    thinking_ts: str = ""           # Slack ts of initial thinking placeholder to be updated in-place
 
 
 @dataclass
