@@ -222,7 +222,7 @@ def _positive_int_setting(name: str, default: int, minimum: int = 1, maximum: in
     return value
 
 
-AI_TIMEOUT_SECONDS = _positive_float_setting("AI_TIMEOUT_SECONDS", 15.0)
+AI_TIMEOUT_SECONDS = _positive_float_setting("AI_TIMEOUT_SECONDS", 30.0)
 AI_MAX_OUTPUT_TOKENS = _positive_int_setting("AI_MAX_OUTPUT_TOKENS", 512, maximum=16384)
 AI_MAX_REPLY_CHARS = _positive_int_setting("AI_MAX_REPLY_CHARS", 400, maximum=4000)
 AI_REPLY_WORKERS = _positive_int_setting("AI_REPLY_WORKERS", 4, maximum=16)

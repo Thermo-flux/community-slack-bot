@@ -65,7 +65,7 @@ def test_build_system_instructions():
     assert ":duck:" in instructions
     assert "current tracked members" not in instructions.lower()
     assert "direct messages, clear goose name calls" in instructions.lower()
-    assert "explicit opinion question that names goose, goose lee, or orry" in instructions.lower()
+    assert "only speak when you are directly called" in instructions.lower()
 
 
 def test_soul_has_a_dry_bruce_lee_easter_egg_without_forced_hype():
@@ -101,7 +101,7 @@ def test_fallback_prompt_keeps_privacy_and_bruce_lee_rules(monkeypatch):
     instructions = ai_service.build_system_instructions().lower()
     assert "jackie chan" in instructions
     assert "direct messages, clear goose name calls" in instructions
-    assert "explicit opinion question that names goose, goose lee, or orry" in instructions
+    assert "only speak when you are directly called" in instructions
 
 
 def test_loadout_knowledge_is_retrieved_on_demand_only():

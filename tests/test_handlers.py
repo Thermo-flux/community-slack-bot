@@ -546,7 +546,12 @@ def test_bot_opened_threads_accept_followups_without_rechecking_slack_history():
             handlers._BOT_THREADS.pop(("C_THREAD", "ROOT_TS"), None)
 
 
-def test_explicit_opinion_questions_can_trigger_an_ai_reply_without_a_mention():
+def test_unprompted_opinion_questions_do_not_trigger_a_reply():
+    """Questions that never call Goose by name are not addressed and must stay silent."""
+    assert not handlers.is_addressed_to_bot(
+        "What do you think about the goose sculpture?", bot_user_id="U_BOT"
+    )
+
     class ListenerApp:
         def __init__(self):
             self.events = {}
@@ -557,31 +562,49 @@ def test_explicit_opinion_questions_can_trigger_an_ai_reply_without_a_mention():
         def command(self, _name):
             return lambda fn: fn
 
-    assert handlers.is_explicit_opinion_request("What's your opinion on this design, Goose?")
-    assert handlers.is_explicit_opinion_request("Goose, your opinion?")
-    assert handlers.is_explicit_opinion_request("What's your opinion, goose?")
-    assert handlers.is_explicit_opinion_request("Who's better, you or orry?")
-    assert handlers.is_explicit_opinion_request("Is Goose Lee better than Orry?")
-    assert handlers.is_explicit_opinion_request("Do you think Goose's answer is right?")
-    assert not handlers.is_explicit_opinion_request("The design has two options.")
-    assert not handlers.is_explicit_opinion_request("What's your opinion on this design?")
-    assert not handlers.is_explicit_opinion_request("Your opinion?")
-    assert not handlers.is_explicit_opinion_request("What do you think about the goose sculpture?")
-
     app = ListenerApp()
     handlers.register_handlers(app, bot_user_id="U123BOT")
     with patch("handlers._queue_ai_reply") as queue, \
          patch("handlers.check_cooldown", return_value=(False, 0)), \
          patch("handlers.increment_message_count_only"):
         app.events["message"](
-            body={"event": {"channel": "C1", "user": "U1", "text": "What's your opinion on this design, Goose?", "ts": "3.0"}},
+            body={"event": {"channel": "C1", "user": "U1", "text": "What do you think about the goose sculpture?", "ts": "3.0"}},
+            client=MagicMock(),
+            say=MagicMock(),
+        )
+
+    queue.assert_not_called()
+
+
+def test_name_calls_anywhere_in_a_message_are_addressed():
+    """Calling Goose by name mid-sentence still reaches it, but passing mentions do not."""
+    assert handlers.is_addressed_to_bot("what do you think, goose?", bot_user_id="U_BOT")
+    assert handlers.is_addressed_to_bot("yo goose can you check this", bot_user_id="U_BOT")
+    assert handlers.is_addressed_to_bot("thoughts on this goose", bot_user_id="U_BOT")
+    assert not handlers.is_addressed_to_bot("the goose sculpture is huge", bot_user_id="U_BOT")
+    assert not handlers.is_addressed_to_bot("I fed the ducks today", bot_user_id="U_BOT")
+
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U123BOT")
+    with patch("handlers._queue_ai_reply") as queue:
+        app.events["message"](
+            body={"event": {"channel": "C1", "user": "U1", "text": "thoughts on this goose", "ts": "4.0"}},
             client=MagicMock(),
             say=MagicMock(),
         )
 
     queue.assert_called_once()
-    assert queue.call_args.kwargs["message"] == "What's your opinion on this design, Goose?"
-    assert queue.call_args.kwargs["current_ts"] == "3.0"
+    assert queue.call_args.kwargs["message"] == "thoughts on this goose"
 
 
 def test_full_ai_queue_replies_immediately_instead_of_silently_dropping_the_mention():

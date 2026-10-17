@@ -62,22 +62,14 @@ _IGNORED_SUBTYPES = {
     "channel_name",
 }
 
-_ORRY_NAME_RE = re.compile(r"\borry\b", re.IGNORECASE)
-_NAMED_GOOSE_RE = re.compile(r"\bGoose(?:\s+Lee)?\b")
 _BOT_NAME_PREFIX_RE = re.compile(
     r"^\s*(?:(?:hey|yo|hi|hello)\s+)?@?(?:goose(?:-|\s)?lee|goose|duck)\b"
     r"(?:\s*[,!:]\s*|\s+(?=(?:can|could|would|will|what|who|how|help|please|check|look|tell|show|explain|do|is|are|your)\b)|\s*$)",
     re.IGNORECASE,
 )
-_ADDRESSED_GOOSE_RE = re.compile(r"[,!:]\s*@?goose\b\s*[,!?]", re.IGNORECASE)
-_GOOSE_COMPARISON_RE = re.compile(
-    r"\b(?:you\s+or|between)\s+goose\b|\bgoose\s+or\s+orry\b", re.IGNORECASE
-)
-_EXPLICIT_OPINION_RE = re.compile(
-    r"\b(?:what\s+do\s+you\s+think(?:\s+about)?|do\s+you\s+think|what(?:['’]s| is)\s+your\s+(?:opinion|take)|"
-    r"what\s+are\s+your\s+thoughts(?:\s+on)?|your\s+(?:opinion|thoughts)(?:\s+(?:on|about))?|"
-    r"who\s+do\s+you\s+think|do\s+you\s+prefer|which\s+do\s+you\s+prefer|who(?:['’]s| is)\s+better|"
-    r"is\s+.{1,80}\s+better\s+than)\b",
+_GOOSE_CALL_RE = re.compile(
+    r"(?:^|[,\s])(?:(?:hey|yo|hi|hello|sup|oi)\s+)?@?(?:goose(?:-|\s)?lee|goose|duck)\b"
+    r"(?:\s*[,!:?]|\s+(?=(?:can|could|would|will|what|who|how|help|please|check|look|tell|show|explain|do|is|are|your|you|any|come|give)\b)|\s*$)",
     re.IGNORECASE,
 )
 _CARD_KEYWORD_WORD_RE = re.compile(r"\b(?:card|level|rank|stats|xp|points)\b", re.IGNORECASE)
@@ -140,7 +132,7 @@ def is_addressed_to_bot(
         rf"<@{re.escape(bot_user_id)}(?:\|[^>]+)?>", text, flags=re.IGNORECASE
     ):
         return True
-    return bool(_BOT_NAME_PREFIX_RE.search(text))
+    return bool(_GOOSE_CALL_RE.search(text))
 
 
 def clean_bot_addressing(text: str, bot_user_id: Optional[str] = None) -> str:
@@ -196,22 +188,6 @@ def _bot_thread_queue_key(channel_id: Optional[str], thread_ts: Optional[str]):
         return None
     with _BOT_THREADS_LOCK:
         return _BOT_THREAD_QUEUE_KEYS.get((str(channel_id), str(thread_ts)))
-
-
-def is_explicit_opinion_request(text: str) -> bool:
-    """Only recognize explicit opinion requests that name Goose or Orry."""
-    message = text or ""
-    names_goose_or_orry = any(
-        matcher.search(message)
-        for matcher in (
-            _ORRY_NAME_RE,
-            _NAMED_GOOSE_RE,
-            _BOT_NAME_PREFIX_RE,
-            _ADDRESSED_GOOSE_RE,
-            _GOOSE_COMPARISON_RE,
-        )
-    )
-    return bool(_EXPLICIT_OPINION_RE.search(message) and names_goose_or_orry)
 
 
 def _split_target_tokens(raw_targets: str) -> List[str]:
@@ -716,9 +692,8 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             _is_known_bot_thread(channel_id, event.get("thread_ts"))
             and not mentions_other_user_at_start
         )
-        is_opinion_question = not is_direct_bot_mention and is_explicit_opinion_request(text)
         is_prefixed_cmd = bool(_COMMAND_PREFIX_RE.match(text))
-        is_called = is_addressed or is_opinion_question or is_prefixed_cmd
+        is_called = is_addressed or is_prefixed_cmd
 
         if not is_called:
             _record_private_activity(user_id, channel_id, event, client, say, rules)
@@ -765,7 +740,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         should_respond = is_addressed and (is_dm or not is_direct_bot_mention)
         if is_direct_bot_mention and not is_dm:
             return
-        if should_respond or is_opinion_question:
+        if should_respond:
             _queue_ai_reply(
                 client=client,
                 say=say,
