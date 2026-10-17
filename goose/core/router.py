@@ -15,7 +15,7 @@ from goose.core.commands_member import index_of, row_user_id
 from goose.core.context import AppContext
 from goose.core.rules import (
     extract_user_ids, is_calling_goose, is_elaborate_request, is_explain_request, is_near_duplicate, mentions_goose,
-    qualify_message, simhash,
+    normalize_text, qualify_message, simhash,
 )
 from goose.core.safety import is_distress, is_program_question, is_sad, safety_reply
 from goose.core.wordlists import SECRET_PATTERNS
