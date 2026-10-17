@@ -159,6 +159,9 @@ else:
 def is_channel_watched(channel_id: str) -> bool:
     if not channel_id:
         return False
+    # Always allow Direct Messages (Slack DM channel IDs start with 'D')
+    if channel_id.startswith("D"):
+        return True
     if "*" in WATCHED_CHANNELS:
         return True
     return channel_id in WATCHED_CHANNELS

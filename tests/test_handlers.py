@@ -120,3 +120,27 @@ def test_fetch_conversation_history():
     assert history[1]["content"] == "Hey! What's up? 🚀"
 
 
+def test_is_addressed_to_bot():
+    """Verifies that goose-lee recognizes when he is being spoken to."""
+    # Direct mention
+    assert handlers.is_addressed_to_bot("<@U_BOT> hello", bot_user_id="U_BOT") is True
+    # Name prefixes
+    assert handlers.is_addressed_to_bot("goose-lee can you check this?", bot_user_id="U_BOT") is True
+    assert handlers.is_addressed_to_bot("hey goose, how are you?", bot_user_id="U_BOT") is True
+    assert handlers.is_addressed_to_bot("@gooselee what's up", bot_user_id="U_BOT") is True
+    assert handlers.is_addressed_to_bot("yo duck: look at this", bot_user_id="U_BOT") is True
+    # DMs are always addressed to the bot
+    assert handlers.is_addressed_to_bot("anything at all", bot_user_id="U_BOT", is_dm=True) is True
+    # Random channel chatter between other members is NOT addressed to the bot
+    assert handlers.is_addressed_to_bot("I am working on the database", bot_user_id="U_BOT", is_dm=False) is False
+    assert handlers.is_addressed_to_bot("hey netic did you see the PR?", bot_user_id="U_BOT", is_dm=False) is False
+
+
+def test_clean_bot_addressing():
+    """Verifies stripping of bot names and mention tags."""
+    assert handlers.clean_bot_addressing("hey goose: can you help?") == "can you help?"
+    assert handlers.clean_bot_addressing("@gooselee check this out") == "check this out"
+    assert handlers.clean_bot_addressing("<@U_BOT> what is the score?", bot_user_id="U_BOT") == "what is the score?"
+
+
+

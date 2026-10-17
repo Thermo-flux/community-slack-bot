@@ -2,8 +2,9 @@
 ==============================================================================
 SLACK EVENT & COMMAND HANDLERS (src/handlers.py)
 ==============================================================================
-This module contains the event listeners and slash command handlers for Slack.
-Supports querying anyone's level card, public contributor stats, and AI chat.
+This module contains event listeners and slash command handlers for Slack.
+Supports querying anyone's level card, public contributor stats, conversational AI chat,
+and responsive bot name addressing while preventing accidental popup spam.
 ==============================================================================
 """
 
@@ -38,18 +39,59 @@ def clean_mention_text(text: str) -> str:
     """Removes Slack user mention tags like <@U12345678> from text."""
     if not text:
         return ""
-    return re.sub(r"<@[A-Z0-9]+(?:\|[^>]+)?>", "", text, flags=re.IGNORECASE).strip()
+    return re.sub(r"<@[A-Z0-9_]+(?:\|[^>]+)?>", "", text, flags=re.IGNORECASE).strip()
+
+
+def is_addressed_to_bot(text: str, bot_user_id: Optional[str] = None, is_dm: bool = False) -> bool:
+    """
+    Checks if a message is intended for goose-lee:
+    - 100% of messages in Direct Messages (DMs).
+    - Rich Slack user mentions (<@bot_user_id>).
+    - Conversational name triggers (e.g., 'goose-lee:', 'hey goose', '@gooselee', 'goose,').
+    """
+    if is_dm:
+        return True
+    if not text:
+        return False
+    if bot_user_id and f"<@{bot_user_id}>" in text:
+        return True
+
+    # Check for text names at start of sentence, or calling out goose/duck
+    pattern = r"(?:^|\b)(?:@?goose-?lee|@?goose|hey\s+goose|yo\s+goose|duck:|@?duck)\b"
+    return bool(re.search(pattern, text, re.IGNORECASE))
+
+
+def clean_bot_addressing(text: str, bot_user_id: Optional[str] = None) -> str:
+    """Strips both Slack mention tags and conversational name prefixes/suffixes from text."""
+    if not text:
+        return ""
+    cleaned = clean_mention_text(text)
+    # Strip leading @gooselee, goose-lee:, hey goose, etc.
+    cleaned = re.sub(
+        r"^(?:(?:hey|yo|hi|hello)\s+)?@?(?:goose-?lee|goose|duck)[:,\s]*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE
+    ).strip()
+    return cleaned
+
+
+def is_bot_thread(client, channel_id: str, thread_ts: Optional[str], bot_user_id: Optional[str]) -> bool:
+    """Checks if the bot has previously sent a message in this thread."""
+    if not client or not bot_user_id or not thread_ts:
+        return False
+    try:
+        res = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=10)
+        messages = res.get("messages", [])
+        return any(m.get("user") == bot_user_id for m in messages)
+    except Exception:
+        return False
 
 
 def parse_card_request_targets(text: str, caller_id: str, bot_user_id: Optional[str] = None) -> Optional[List[str]]:
     """
     Parses a message or command string to determine if it is asking for a rank/level card,
     and returns a list of target user identifiers (mentions, IDs, or usernames).
-    
-    Returns:
-      - None if text is not asking for a card.
-      - [caller_id] if asking for caller's own card (e.g. '!level', 'card').
-      - List of target strings if asking for others (e.g. ['jerry', 'netic']).
     """
     if not text:
         return None
@@ -124,7 +166,7 @@ def get_cards_response_for_targets(targets: List[str], caller_id: str) -> str:
             clean_name = target.strip().lstrip("@")
             cards.append(
                 f"🔍 *No activity record found for '{clean_name}'.*\n"
-                f"They haven't earned any XP in this channel yet! As soon as they start chatting or sharing ideas, their level card will be generated. 🌱"
+                f"They haven't earned any XP in this channel yet! As soon as they start chatting or sharing ideas, their level card will be generated. 🐣"
             )
     return "\n\n".join(cards)
 
@@ -140,8 +182,6 @@ def fetch_conversation_history(
 ) -> List[Dict[str, str]]:
     """
     Fetches recent conversation turns from Slack to provide multi-turn memory to the AI.
-    If in a thread, fetches thread replies.
-    If in a channel, filters to relevant interactions with the bot or current user.
     """
     history: List[Dict[str, str]] = []
     if not client or not channel_id:
@@ -155,11 +195,10 @@ def fetch_conversation_history(
         else:
             res = client.conversations_history(channel=channel_id, limit=max_messages + 5)
             raw_msgs = res.get("messages", [])
-            raw_msgs.reverse()  # history returns newest first; reverse for chronological order
+            raw_msgs.reverse()
 
         for msg in raw_msgs:
             msg_ts = msg.get("ts")
-            # Exclude the current incoming message being handled
             if exclude_ts and msg_ts == exclude_ts:
                 continue
 
@@ -168,11 +207,9 @@ def fetch_conversation_history(
             if not text:
                 continue
 
-            # Skip command triggers like /level or !leaderboard from conversation history
             if text.lower().startswith(("/", "!", ".")):
                 continue
 
-            # If not in a thread, only include messages involving the bot or current user
             if not thread_ts:
                 is_bot = sender == bot_user_id
                 is_bot_mention = bot_user_id and f"<@{bot_user_id}>" in text
@@ -189,7 +226,6 @@ def fetch_conversation_history(
                 if clean_text:
                     history.append({"role": "user", "content": clean_text})
 
-        # Keep at most max_messages turns
         if len(history) > max_messages:
             history = history[-max_messages:]
 
@@ -202,7 +238,7 @@ def fetch_conversation_history(
 def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
     """Registers all Slack Bolt event listeners and slash commands."""
 
-    # 1. MESSAGE EVENT: Track activity and support in-chat command triggers
+    # 1. MESSAGE EVENT: Track activity, support commands, and respond when addressed
     @app.event("message")
     def handle_message_events(body, client, say):
         event = body.get("event", {})
@@ -211,11 +247,12 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         text = (event.get("text") or "").strip()
         subtype = event.get("subtype")
         bot_id = event.get("bot_id")
+        thread_ts = event.get("thread_ts")
 
         # Determine thread target based on config
         rules = CONFIG.get("interaction_rules", {})
         reply_in_thread = rules.get("reply_in_thread", False)
-        target_thread_ts = event.get("thread_ts") or (event.get("ts") if reply_in_thread else None)
+        target_thread_ts = thread_ts or (event.get("ts") if reply_in_thread else None)
 
         # Never process messages from bots to prevent loops
         if bot_id or subtype == "bot_message" or not user_id:
@@ -225,56 +262,89 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         if not is_channel_watched(channel_id):
             return
 
-        clean_lower = text.lower().strip()
+        is_dm = bool(channel_id and channel_id.startswith("D")) or (event.get("channel_type") == "im")
         is_direct_bot_mention = bool(bot_user_id and f"<@{bot_user_id}>" in text)
+        is_in_bot_thread = bool(thread_ts and is_bot_thread(client, channel_id, thread_ts, bot_user_id))
+        is_addressed = is_addressed_to_bot(text, bot_user_id, is_dm=is_dm) or is_in_bot_thread
 
-        # Only process in-chat commands if the message is NOT directly mentioning the bot.
-        # When mentioning the bot, handle_app_mentions will handle the command/reply, avoiding double-replies!
-        if not is_direct_bot_mention:
-            # Check if the user is asking for their card or anyone else's card
-            card_targets = parse_card_request_targets(text, caller_id=user_id, bot_user_id=bot_user_id)
-            if card_targets is not None:
-                reply_text = get_cards_response_for_targets(card_targets, caller_id=user_id)
-                try:
-                    say(text=reply_text, channel=channel_id, thread_ts=target_thread_ts)
-                except Exception as e:
-                    logger.error(f"Failed to send rank card via chat command: {e}")
-                return
+        cleaned_text = clean_bot_addressing(text, bot_user_id)
+        clean_lower = cleaned_text.lower().strip()
+        is_prefixed_cmd = text.strip().startswith(("!", "/", "."))
 
-            # Leaderboard in-chat trigger
-            if clean_lower in ("/leaderboard", "!leaderboard", ".leaderboard", "leaderboard", "/top", "!top", "top", "ranks"):
-                leaders = get_leaderboard(limit=10)
-                board = format_leaderboard(leaders)
-                try:
-                    say(text=board, channel=channel_id, thread_ts=target_thread_ts)
-                except Exception as e:
-                    logger.error(f"Failed to send leaderboard via chat command: {e}")
-                return
+        # We respond if addressed to the bot (and NOT already handled by app_mention unless it's a DM)
+        should_respond = is_addressed and (is_dm or not is_direct_bot_mention)
 
-            # Repo in-chat trigger
-            if clean_lower in ("/repo", "!repo", ".repo", "repo", "github", "gh repo", "!github"):
-                repo_msg = "🚀 *Community Slack Bot GitHub Repository:*\n<https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>\nFeel free to explore the code, open issues, or contribute! ✨"
-                try:
-                    say(text=repo_msg, channel=channel_id, thread_ts=target_thread_ts)
-                except Exception as e:
-                    logger.error(f"Failed to send repo: {e}")
-                return
+        # A. Card Command Check
+        card_targets = parse_card_request_targets(cleaned_text, caller_id=user_id, bot_user_id=bot_user_id)
+        if card_targets is not None and (should_respond or is_prefixed_cmd):
+            reply_text = get_cards_response_for_targets(card_targets, caller_id=user_id)
+            try:
+                say(text=reply_text, channel=channel_id, thread_ts=target_thread_ts)
+            except Exception as e:
+                logger.error(f"Failed to send rank card via chat command: {e}")
+            return
 
-            # Help in-chat trigger
-            if clean_lower in ("!help", "/help", "bot help", "bothelp", "help"):
-                templates = CONFIG.get("templates", {})
-                help_msg = templates.get("help_message", "Type `/level` or `/leaderboard`!")
-                formatted_help = help_msg.format(
-                    bot_id=bot_user_id or "bot",
-                    cooldown=rules.get("cooldown_seconds", 30)
-                )
-                try:
-                    say(text=formatted_help, channel=channel_id, thread_ts=target_thread_ts)
-                except Exception as e:
-                    logger.error(f"Failed to send help: {e}")
-                return
+        # B. Leaderboard Command Check (prefixed or addressed)
+        if (is_prefixed_cmd and clean_lower in ("/leaderboard", "!leaderboard", ".leaderboard", "!top", "/top")) or \
+           (should_respond and clean_lower in ("leaderboard", "top", "ranks", "scores", "!leaderboard", "/leaderboard")):
+            leaders = get_leaderboard(limit=10)
+            board = format_leaderboard(leaders)
+            try:
+                say(text=board, channel=channel_id, thread_ts=target_thread_ts)
+            except Exception as e:
+                logger.error(f"Failed to send leaderboard: {e}")
+            return
 
-        # Anti-spam cooldown check
+        # C. Repo Command Check (prefixed or addressed)
+        if (is_prefixed_cmd and clean_lower in ("/repo", "!repo", ".repo", "!github", "/github")) or \
+           (should_respond and clean_lower in ("repo", "github", "gh repo", "bot repo")):
+            repo_msg = "🚀 *Here is our GitHub repository:*\n<https://github.com/jeremy341/community-slack-bot|jeremy341/community-slack-bot>\nCheck out the code, star it, or propose features! ✨"
+            try:
+                say(text=repo_msg, channel=channel_id, thread_ts=target_thread_ts)
+            except Exception as e:
+                logger.error(f"Failed to send repo: {e}")
+            return
+
+        # D. Help Command Check (prefixed or addressed)
+        if (is_prefixed_cmd and clean_lower in ("!help", "/help", ".help")) or \
+           (should_respond and clean_lower in ("help", "commands")):
+            templates = CONFIG.get("templates", {})
+            help_msg = templates.get("help_message", "Type `/level` or `/leaderboard`!")
+            formatted_help = help_msg.format(
+                bot_id=bot_user_id or "bot",
+                cooldown=rules.get("cooldown_seconds", 30)
+            )
+            try:
+                say(text=formatted_help, channel=channel_id, thread_ts=target_thread_ts)
+            except Exception as e:
+                logger.error(f"Failed to send help: {e}")
+            return
+
+        # E. Conversational AI Response when addressed to goose-lee
+        if should_respond and cleaned_text:
+            history = fetch_conversation_history(
+                client=client,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                bot_user_id=bot_user_id,
+                current_user_id=user_id,
+                exclude_ts=event.get("ts"),
+                max_messages=10
+            )
+
+            ai_reply = ai_service.generate_response(
+                user_id=user_id,
+                user_message=cleaned_text,
+                channel_id=channel_id,
+                conversation_history=history
+            )
+            try:
+                say(text=ai_reply, channel=channel_id, thread_ts=target_thread_ts)
+            except Exception as e:
+                logger.error(f"Failed to send AI response: {e}")
+            return
+
+        # F. Anti-spam Cooldown & XP Recording for regular community activity
         cooldown_sec = rules.get("cooldown_seconds", 30)
         can_earn, remaining = check_cooldown(user_id, cooldown_sec)
 
@@ -308,15 +378,23 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
                 pass
 
         if new_level > old_level:
-            logger.info(f"User {user_id} leveled up to Level {new_level}!")
-            if rules.get("announce_level_up_in_channel", True):
+            logger.info(f"User {user_id} leveled up to Level {new_level} ({new_title})!")
+            # Add celebratory reaction directly on the user's message
+            if event.get("ts"):
+                try:
+                    client.reactions_add(channel=channel_id, timestamp=event["ts"], name="tada")
+                except Exception:
+                    pass
+
+            # Only post an in-channel text celebration for milestone levels (Level >= 4: Dabbler, Mallard, etc.)
+            # to avoid interrupting the channel with repetitive Level 2 / Level 3 spam on every single new chatter!
+            if rules.get("announce_level_up_in_channel", True) and new_level >= 4:
                 announcement = format_level_up_message(user_id, new_level, new_title)
                 try:
                     say(text=announcement, channel=channel_id)
-                    if event.get("ts"):
-                        client.reactions_add(channel=channel_id, timestamp=event["ts"], name="tada")
                 except Exception as e:
                     logger.error(f"Failed to post level up celebration: {e}")
+
 
     # 2. APP MENTION EVENT: Handle @bot mentions (AI chat or commands)
     @app.event("app_mention")
@@ -333,7 +411,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         if not user_id:
             return
 
-        cleaned_text = clean_mention_text(raw_text).strip()
+        cleaned_text = clean_bot_addressing(raw_text, bot_user_id)
         clean_lower = cleaned_text.lower()
 
         # Check if the user is asking for their card or someone else's card
@@ -352,7 +430,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
 
         # Repo command
         if clean_lower in ("repo", "github", "gh repo", "gimme the gh repo", "give me the gh repo", "give me the repo", "link"):
-            repo_msg = "🚀 *Here is our GitHub repository:*\n<https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>\nCheck out the code, star it, or propose features! ✨"
+            repo_msg = "🚀 *Here is our GitHub repository:*\n<https://github.com/jeremy341/community-slack-bot|jeremy341/community-slack-bot>\nCheck out the code, star it, or propose features! ✨"
             say(text=repo_msg, thread_ts=target_thread_ts)
             return
 
@@ -424,8 +502,26 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         except Exception:
             say(text=reply)
 
+    @app.command("/card")
+    def handle_card_command(ack, command, respond, say):
+        ack()
+        caller_id = command.get("user_id")
+        raw_text = (command.get("text") or "").strip()
+
+        if raw_text:
+            tokens = [t.strip() for t in re.split(r",\s*|\s+and\s+|\s+&\s+", raw_text) if t.strip()]
+            targets = tokens if tokens else [caller_id]
+        else:
+            targets = [caller_id]
+
+        reply = get_cards_response_for_targets(targets, caller_id)
+        try:
+            respond(text=reply, response_type="in_channel")
+        except Exception:
+            say(text=reply)
+
     @app.command("/leaderboard")
-    def handle_leaderboard_command(ack, respond, say):
+    def handle_leaderboard_command(ack, command, respond, say):
         ack()
         leaders = get_leaderboard(limit=10)
         board = format_leaderboard(leaders)
