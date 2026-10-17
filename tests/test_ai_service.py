@@ -104,17 +104,24 @@ def test_fallback_prompt_keeps_privacy_and_bruce_lee_rules(monkeypatch):
     assert "explicit opinion question that names goose, goose lee, or orry" in instructions
 
 
-def test_loadout_knowledge_is_mirrored_and_injected():
-    """The mirrored LOADOUT docs are loaded and appended to the system prompt."""
-    knowledge = ai_service.load_loadout_knowledge()
-    assert knowledge
-    assert "Raspberry Pi 5" in knowledge
-    assert "approved hours" in knowledge.lower()
-    assert "Field Requisition" in knowledge
+def test_loadout_knowledge_is_retrieved_on_demand_only():
+    """The mirrored docs are pulled in only for LOADOUT questions, never kept in context by default."""
+    pages = ai_service.load_loadout_pages()
+    assert pages
+    assert any("Raspberry Pi 5" in page["text"] for page in pages)
 
-    instructions = ai_service.build_system_instructions()
+    # A LOADOUT question retrieves the relevant docs.
+    knowledge = ai_service.retrieve_loadout_knowledge("how much Ore is the Raspberry Pi 5?")
+    assert "Raspberry Pi 5" in knowledge
+
+    # The docs are only in the system prompt when explicitly supplied.
+    assert "LOADOUT PROGRAM KNOWLEDGE" not in ai_service.build_system_instructions()
+    instructions = ai_service.build_system_instructions(knowledge)
     assert "LOADOUT PROGRAM KNOWLEDGE" in instructions
     assert "Raspberry Pi 5" in instructions
+
+    # Plain chit-chat does not pull the docs.
+    assert ai_service.retrieve_loadout_knowledge("hey goose how's the pond today?") == ""
 
 
 def test_error_resilience_on_network_failure():
