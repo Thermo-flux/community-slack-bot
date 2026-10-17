@@ -207,7 +207,7 @@ def _format_markdown_outside_code(segment: str) -> str:
 _CRINGE_PHRASE_RE = re.compile(
     r"(?i)\b(?:no\s+cap|big\s+w|solid\s+w|let'?s\s+cook|based|goated|cooked|"
     r"fr|ngl|lowkey|highkey|clean\s+ship|duck\s+pride|welcome\s+to\s+the\s+pond|"
-    r"pond|crumbs?|quak\w*|honk)\b"
+    r"quak\w*|honk)\b"
 )
 
 
@@ -437,7 +437,18 @@ def retrieve_loadout_knowledge(
     return "\n\n---\n\n".join(chosen)
 
 
-def build_system_instructions(knowledge: str = "") -> str:
+NO_REPLY_TOKEN = "[[NO_REPLY]]"
+
+
+def is_no_reply(text: str) -> bool:
+    """True when the model chose to stay quiet for a follow-up it was not really part of."""
+    if not text:
+        return False
+    upper = text.upper()
+    return "NO_REPLY" in upper or "NO REPLY" in upper
+
+
+def build_system_instructions(knowledge: str = "", may_decline: bool = False) -> str:
     base_soul = load_soul_prompt()
     emoji_cfg = CONFIG.get("emoji_settings") or {}
     frequency = str(emoji_cfg.get("frequency", "low")).lower()
@@ -469,7 +480,7 @@ def build_system_instructions(knowledge: str = "") -> str:
         "- For account-security questions, distinguish evidence from guesses; a commit author email alone does not prove account access.\n"
         "- Do not invent live facts, member activity, or scores; use local commands for tracked stats.\n"
         "- Never roast, mock, tease, or criticize other members, by name or implication. Keep any dry edge pointed at yourself, at bugs, or at messy code, never at a person.\n"
-        "- Never use slang, catchphrases, puns, or roleplay. Banned examples: Big W, solid W, let's cook, based, no cap, fire, W, L, cooked, goated. Never talk about ponds, bread, crumbs, or duck pride. Keep the voice plain and understated with no flavor bits.\n"
+        "- Be warm, upbeat, and goofy, never cold or cringe: playful bits and gentle self-deprecation are good, but no slang hype (Big W, solid W, let's cook, based, no cap, fire, W, L, cooked, goated), no forced catchphrases, and never mock or roast a member. Keep any silliness aimed at yourself, at bugs, or at code.\n"
     )
 
     assistance_limits = (
@@ -500,11 +511,28 @@ def build_system_instructions(knowledge: str = "") -> str:
     else:
         knowledge_block = ""
         reminder_block = ""
+
+    decline_block = ""
+    if may_decline:
+        decline_block = (
+            "\n\nDECIDING WHETHER TO CHIME IN:\n"
+            "- This follow-up is in a thread Goose Lee started, but most follow-ups are NOT for Goose.\n"
+            "- Reply ONLY when the message: calls Goose by name or @mentions it, asks Goose a direct question, "
+            "or continues a task Goose is actively working on with that person.\n"
+            "- Stay quiet for acknowledgements (thanks, ok, nice, got it), reactions (lol, haha, wow), banter or "
+            "chatter between other people, side topics, or anything that does not need Goose.\n"
+            "- Silence is the default and the preferred choice. When unsure, stay quiet.\n"
+            f"- To stay quiet, reply with exactly {NO_REPLY_TOKEN} and nothing else. To engage, reply normally in Goose's short voice.\n"
+            "- Quiet examples: \"yeah that sounds fun\", \"thanks!\", \"lol nice\", \"brb\", \"jerry did you see this\".\n"
+            "- Engage examples: \"goose, can you explain the hardware track?\", \"what about the pricing?\""
+        )
+
     return (
         base_soul
         + privacy_and_persona_rules
         + assistance_limits
         + emoji_instruction
+        + decline_block
         + knowledge_block
         + reminder_block
     )
@@ -577,6 +605,7 @@ def generate_response(
     context_messages: Optional[List[Dict[str, str]]] = None,
     conversation_history: Optional[List[Dict[str, str]]] = None,
     timeout: Optional[float] = None,
+    may_decline: bool = False,
 ) -> str:
     """Generate a reply from the direct mention and messages in its own thread or channel."""
     if not AI_API_KEY or AI_PROVIDER == "mock":
@@ -587,7 +616,7 @@ def generate_response(
             user_message,
             context_messages if context_messages is not None else conversation_history,
         )
-        system_prompt = build_system_instructions(knowledge)
+        system_prompt = build_system_instructions(knowledge, may_decline=may_decline)
         messages = build_messages_payload(
             system_prompt,
             user_message,
@@ -625,7 +654,7 @@ def _call_gemini(messages: List[Dict[str, str]], system_prompt: str, timeout: fl
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": contents,
-        "generationConfig": {"maxOutputTokens": AI_MAX_OUTPUT_TOKENS, "temperature": 0.4},
+        "generationConfig": {"maxOutputTokens": AI_MAX_OUTPUT_TOKENS, "temperature": 0.6},
     }
     data = _post_ai_json(url, payload, headers, timeout)
     candidates = data.get("candidates") or []
@@ -674,7 +703,7 @@ def _call_openai_compatible(messages: List[Dict[str, str]], timeout: Optional[fl
         "model": model,
         "messages": messages,
         "max_tokens": AI_MAX_OUTPUT_TOKENS,
-        "temperature": 0.4,
+        "temperature": 0.6,
     }
     reasoning_effort = os.getenv("AI_REASONING_EFFORT", "low").strip().lower()
     if reasoning_effort and _supports_reasoning_effort(AI_PROVIDER, model):

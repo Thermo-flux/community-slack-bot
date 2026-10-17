@@ -168,7 +168,7 @@ def format_level_up_message(user_id: str, new_level: int, new_title: str) -> str
     templates = CONFIG.get("templates") or {}
     template = templates.get(
         "level_up",
-        ":sparkles: Level up, <@{user_id}>. You reached Level {level}: {title}. Nice work.",
+        ":sparkles: <@{user_id}> hit Level {level}: {title}. The duck does a tiny victory waddle.",
     )
     return template.format(user_id=user_id, level=new_level, title=new_title)
 

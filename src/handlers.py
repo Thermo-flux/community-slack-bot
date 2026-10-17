@@ -273,11 +273,21 @@ def parse_card_request_targets(
         "show my card", "show me my card", "show my level", "show me my level",
         "give me my card", "give me my stats",
     }
-    self_regex = (
-        r"^(?:what(?:'s|\s+is)\s+my|show\s+(?:me\s+)?my|give\s+me\s+my|check\s+my)"
-        r"\s+(?:rank|card|level|stats|xp|points)(?:\s+card)?.*$"
-    )
-    if clean_lower in self_triggers or re.match(self_regex, clean_lower):
+    self_patterns = [
+        r"^what(?:'s|\s+is)?\s+my\s+(?:rank|card|level|stats|xp|points)\b.*$",
+        r"^what\s+(?:level|rank|tier)\s+(?:am\s+i|i\s+am|i'?m)\b.*$",
+        r"^what\s+level\s+i\s+am\b.*$",
+        r"^which\s+(?:level|rank|tier)\s+am\s+i\b.*$",
+        r"^how\s+(?:much|many)\s+(?:xp|points|ore)(?:\s+(?:do\s+i\s+have|have\s+i\s+got|have\s+i))?\b.*$",
+        r"^am\s+i\s+(?:a\s+)?(?:level|rank|tier)\b.*$",
+        r"^do\s+i\s+have\s+(?:any\s+)?(?:xp|points)\b.*$",
+        r"^(?:show|give|gimme|check)\s+(?:me\s+)?my\s+(?:rank|card|level|stats|xp|points)\b.*$",
+        r"^my\s+(?:rank|card|level|stats|xp|points)(?:\s+card)?\b.*$",
+        r"^(?:level|rank|card)\s+me\b.*$",
+    ]
+    if clean_lower in self_triggers or any(
+        re.match(pattern, clean_lower) for pattern in self_patterns
+    ):
         return [caller_id]
 
     # 2. Conversational card queries like "give me the card for X", "card for X and Y"
@@ -312,6 +322,8 @@ def parse_card_request_targets(
 
     # 4. Mention(s) combined with a standalone card/level/rank/stats/xp/points word
     mentions = re.findall(r"(<@[UW][A-Z0-9]+(?:\|[^>]+)?>)", clean, flags=re.IGNORECASE)
+    if bot_user_id:
+        mentions = [m for m in mentions if bot_user_id.lower() not in m.lower()]
     if mentions and _CARD_KEYWORD_WORD_RE.search(clean_lower):
         return [re.sub(r"^<@([uw][a-z0-9]+)", lambda m_: f"<@{m_.group(1).upper()}", tok) for tok in mentions]
 
@@ -542,10 +554,13 @@ def _run_ai_reply(
     context_thread_ts: Optional[str],
     current_ts: Optional[str],
     bot_user_id: Optional[str],
+    require_decision: bool,
     queue_key,
 ) -> None:
     try:
-        placeholder_ts = _post_ai_placeholder(client, channel_id, thread_ts, queue_key)
+        placeholder_ts = (
+            "" if require_decision else _post_ai_placeholder(client, channel_id, thread_ts, queue_key)
+        )
         try:
             if context_thread_ts:
                 context_messages = fetch_mentioned_thread_context(
@@ -561,13 +576,21 @@ def _run_ai_reply(
                 channel_id=channel_id,
                 context_messages=context_messages,
                 timeout=AI_TIMEOUT_SECONDS,
+                may_decline=require_decision,
             )
+            if require_decision and ai_service.is_no_reply(reply):
+                return
             reply = (reply or "").strip() or ai_service.get_offline_fallback(user_id)
         except Exception as exc:
             logger.error("AI reply failed (%s)", type(exc).__name__)
+            if require_decision:
+                return
             reply = "I could not complete that reply. Please try again."
 
-        _deliver_ai_reply(client, channel_id, thread_ts, placeholder_ts, reply, queue_key)
+        if placeholder_ts:
+            _deliver_ai_reply(client, channel_id, thread_ts, placeholder_ts, reply, queue_key)
+        else:
+            _post_final_ai_reply(client, channel_id, thread_ts, reply, queue_key)
     finally:
         _AI_REPLY_SLOTS.release()
 
@@ -583,7 +606,7 @@ def _drain_ai_reply_queue(key) -> None:
                 return
             job = jobs.popleft()
         try:
-            _run_ai_reply(*job[:9])
+            _run_ai_reply(*job[:10])
         except Exception as exc:
             logger.error("Queued AI reply worker failed (%s)", type(exc).__name__)
 
@@ -598,6 +621,7 @@ def _queue_ai_reply(
     context_thread_ts: Optional[str],
     current_ts: Optional[str],
     bot_user_id: Optional[str],
+    require_decision: bool = False,
 ) -> None:
     if not _claim_reply_trigger(channel_id, current_ts):
         return
@@ -627,6 +651,7 @@ def _queue_ai_reply(
         context_thread_ts,
         current_ts,
         bot_user_id,
+        require_decision,
         key,
         say,
     )
@@ -648,7 +673,7 @@ def _queue_ai_reply(
             pending = [job]
         for pending_job in pending:
             _AI_REPLY_SLOTS.release()
-            _, job_channel, job_user, _, job_thread, _, _, _, _, job_say = pending_job
+            _, job_channel, job_user, _, job_thread, _, _, _, _, _, job_say = pending_job
             try:
                 job_say(
                     text=ai_service.get_offline_fallback(job_user),
@@ -736,10 +761,12 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             not is_direct_bot_mention
             and re.match(r"^\s*<@[UW][A-Z0-9]+(?:\|[^>]+)?>", text, flags=re.IGNORECASE)
         )
-        is_addressed = is_addressed_to_bot(text, bot_user_id, is_dm=is_dm) or (
+        is_named = is_addressed_to_bot(text, bot_user_id, is_dm=is_dm)
+        is_thread_followup = (
             _is_known_bot_thread(channel_id, event.get("thread_ts"))
             and not mentions_other_user_at_start
         )
+        is_addressed = is_named or is_thread_followup
         is_prefixed_cmd = bool(_COMMAND_PREFIX_RE.match(text))
         is_called = is_addressed or is_prefixed_cmd
 
@@ -789,6 +816,9 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         if is_direct_bot_mention and not is_dm:
             return
         if should_respond:
+            require_decision = (
+                is_thread_followup and not is_named and not is_prefixed_cmd and not is_dm
+            )
             _queue_ai_reply(
                 client=client,
                 say=say,
@@ -801,6 +831,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
                 ),
                 current_ts=event.get("ts"),
                 bot_user_id=bot_user_id,
+                require_decision=require_decision,
             )
 
     # 2. APP MENTION EVENT: Handle @bot mentions (AI chat or commands)

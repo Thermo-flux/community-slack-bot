@@ -176,6 +176,16 @@ def test_parse_card_request_targets():
     assert handlers.parse_card_request_targets("what's my rank card? show me my stats", "U_CALLER") == ["U_CALLER"]
     assert handlers.parse_card_request_targets("show me my stats", "U_CALLER") == ["U_CALLER"]
     assert handlers.parse_card_request_targets("what is my level", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("what level am i", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("what level am i at?", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("which level am i", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("what rank am i", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("how much xp do i have", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("do i have any xp", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets("gimme my rank", "U_CALLER") == ["U_CALLER"]
+    assert handlers.parse_card_request_targets(
+        "<@U_BOT> what level am i", "U_CALLER", bot_user_id="U_BOT"
+    ) == ["U_CALLER"]
 
     # Conversational & multiple targets
     assert handlers.parse_card_request_targets("give me the card for X", "U_CALLER") == ["X"]
@@ -609,6 +619,39 @@ def test_name_calls_in_vocative_positions_are_addressed():
 
     queue.assert_called_once()
     assert queue.call_args.kwargs["message"] == "can you check this"
+
+
+def test_thread_followup_stays_silent_when_the_model_declines():
+    class Slots:
+        def release(self):
+            return None
+
+    client = MagicMock()
+    with patch("handlers._AI_REPLY_SLOTS", Slots()), \
+         patch("handlers.fetch_mentioned_channel_context", return_value=[]), \
+         patch("handlers.ai_service.generate_response", return_value=handlers.ai_service.NO_REPLY_TOKEN):
+        handlers._run_ai_reply(client, "C1", "U1", "yeah that sounds fun", None, None, "5.0", "U_BOT", True, None)
+
+    client.chat_postMessage.assert_not_called()
+    client.chat_update.assert_not_called()
+
+
+def test_thread_followup_posts_one_reply_when_the_model_engages():
+    class Slots:
+        def release(self):
+            return None
+
+    client = MagicMock()
+    client.chat_postMessage.return_value = {"ok": True, "ts": "FINAL_TS"}
+    with patch("handlers._AI_REPLY_SLOTS", Slots()), \
+         patch("handlers.fetch_mentioned_channel_context", return_value=[]), \
+         patch("handlers.ai_service.generate_response", return_value="Sure, here you go.") as generate:
+        handlers._run_ai_reply(client, "C1", "U1", "goose, thoughts?", None, None, "5.0", "U_BOT", True, None)
+
+    assert generate.call_args.kwargs["may_decline"] is True
+    assert client.chat_postMessage.call_count == 1
+    assert client.chat_postMessage.call_args.kwargs["text"] == "Sure, here you go."
+    client.chat_update.assert_not_called()
 
 
 def test_duplicate_deliveries_of_one_message_yield_a_single_reply():

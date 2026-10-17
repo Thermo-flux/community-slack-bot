@@ -109,7 +109,7 @@
     }
   ],
   "templates": {
-    "level_up": ":sparkles: Level up, <@{user_id}>. You reached Level {level}: {title}. Nice work.",
+    "level_up": ":sparkles: <@{user_id}> hit Level {level}: {title}. The duck does a tiny victory waddle.",
     "rank_card": "*Level Card for <@{user_id}>*\n• Level {level}: {title}\n• XP: {xp} XP\n• Progress: {progress_bar} {percent}%\n• XP Needed: {xp_needed} XP",
     "leaderboard_header": "Top contributors",
     "leaderboard_row": "*{rank}.* <@{user_id}> — Level {level} (*{title}*) • `{xp} XP`",

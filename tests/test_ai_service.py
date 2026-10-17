@@ -104,6 +104,18 @@ def test_fallback_prompt_keeps_privacy_and_bruce_lee_rules(monkeypatch):
     assert "only speak when you are directly called" in instructions
 
 
+def test_may_decline_instructions_only_added_when_asked():
+    """Thread follow-ups get the 'chime in or stay quiet' instruction; direct calls do not."""
+    assert ai_service.NO_REPLY_TOKEN not in ai_service.build_system_instructions()
+    decline_prompt = ai_service.build_system_instructions(may_decline=True)
+    assert ai_service.NO_REPLY_TOKEN in decline_prompt
+
+    assert ai_service.is_no_reply(ai_service.NO_REPLY_TOKEN)
+    assert ai_service.is_no_reply("  [[no_reply]] ")
+    assert not ai_service.is_no_reply("Sure, here you go.")
+    assert not ai_service.is_no_reply("")
+
+
 def test_loadout_knowledge_is_retrieved_on_demand_only():
     """The mirrored docs are pulled in only for LOADOUT questions, never kept in context by default."""
     pages = ai_service.load_loadout_pages()

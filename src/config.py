@@ -138,7 +138,7 @@ def _get_default_config() -> Dict[str, Any]:
             {"level": 12, "min_xp": 792, "title": "Head Duck"},
         ],
         "templates": {
-            "level_up": ":sparkles: Level up, <@{user_id}>. You reached Level {level}: {title}. Nice work.",
+            "level_up": ":sparkles: <@{user_id}> hit Level {level}: {title}. The duck does a tiny victory waddle.",
             "rank_card": (
                 "*Level Card for <@{user_id}>*\n"
                 "• Level {level}: {title}\n"
