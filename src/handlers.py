@@ -25,6 +25,8 @@ from config import (
     AI_REPLY_WORKERS,
     AI_TIMEOUT_SECONDS,
     CONFIG,
+    OFFICIAL_LOADOUT_CHANNEL_ID,
+    ORGANIZER_USER_IDS,
     is_channel_watched,
 )
 from database import (
@@ -45,6 +47,7 @@ from leveling import (
     get_level_info_for_xp,
 )
 import ai_service
+import crumbs
 
 logger = logging.getLogger("SlackBotHandlers")
 
@@ -332,16 +335,164 @@ def parse_card_request_targets(
 
 
 def get_cards_response_for_targets(targets: List[str], caller_id: str) -> str:
-    """Resolves targets (usernames, user IDs, or mentions) to formatted level cards."""
+    """Resolves targets (usernames, user IDs, or mentions) to Pond Level cards."""
     cards = []
     for target in targets:
-        _uid, user_data = resolve_user(target)
-        if user_data:
-            cards.append(format_rank_card(user_data))
+        uid, _user_data = resolve_user(target, create_if_missing=True)
+        if uid:
+            cards.append(crumbs.format_pond_card(crumbs.get_pond_status(uid)))
         else:
             clean_name = target.strip().lstrip("@")
             cards.append(f"No activity record found for '{clean_name}' yet.")
     return "\n\n".join(cards)
+
+
+def _is_organizer(user_id: Optional[str]) -> bool:
+    if not user_id:
+        return False
+    return user_id.upper() in {u.upper() for u in ORGANIZER_USER_IDS}
+
+
+POND_HELP_TEXT = (
+    "Pond commands: `goose join` to start earning crumbs, `goose me` for your private card, "
+    "`goose leaderboard` for the standings. Organizers: `goose star @person`, "
+    "`goose bigstar @person`, `goose revoke <id> [reason]`."
+)
+
+
+def parse_pond_command(text: str) -> Optional[tuple]:
+    """Parse a Pond text command from already-cleaned/addressed text."""
+    t = (text or "").strip().lower()
+    rest = t
+    for prefix in ("!goose", ".goose", "goose", "!g", ".g"):
+        if t == prefix:
+            return ("help", [])
+        if t.startswith(prefix + " "):
+            rest = t[len(prefix) + 1:].strip()
+            break
+    parts = [p for p in rest.split() if p]
+    if not parts:
+        return None
+    sub = parts[0]
+    if sub in ("join", "me", "star", "bigstar", "revoke", "help", "pond"):
+        return (sub, parts[1:])
+    return None
+
+
+def _resolve_target_identifier(args: List[str]) -> Optional[str]:
+    if not args:
+        return None
+    uid, _data = resolve_user(args[0], create_if_missing=True)
+    return uid
+
+
+def _post_private(client, say, channel_id: str, user_id: str, text: str, thread_ts: Optional[str]) -> None:
+    """Send a private note: ephemeral in-channel if possible, else a threaded reply."""
+    try:
+        client.chat_postEphemeral(channel=channel_id, user=user_id, text=text, thread_ts=thread_ts)
+        return
+    except Exception:
+        pass
+    try:
+        client.chat_postMessage(channel=channel_id, text=text, thread_ts=thread_ts)
+    except Exception as exc:
+        logger.error("Could not send a private pond note (%s)", type(exc).__name__)
+
+
+def _handle_pond_command(
+    sub: str,
+    args: List[str],
+    client,
+    say,
+    channel_id: str,
+    user_id: str,
+    thread_ts: Optional[str],
+) -> bool:
+    if sub in ("help", "pond"):
+        _post_private(client, say, channel_id, user_id, POND_HELP_TEXT, thread_ts)
+        return True
+
+    if sub == "join":
+        already = crumbs.is_opted_in(user_id)
+        crumbs.set_opted_in(user_id)
+        status = crumbs.get_pond_status(user_id)
+        lead = "You're already in the pond. " if already else "Welcome to the pond. "
+        _post_private(client, say, channel_id, user_id, lead + "\n" + crumbs.format_pond_card(status), thread_ts)
+        return True
+
+    if sub == "me":
+        target_id = _resolve_target_identifier(args)
+        if target_id and target_id != user_id:
+            if not _is_organizer(user_id):
+                _post_private(client, say, channel_id, user_id,
+                              "Only organizers can look up another member. Use `goose me` for your own card.", thread_ts)
+                return True
+            _post_private(client, say, channel_id, user_id,
+                          crumbs.format_pond_card(crumbs.get_pond_status(target_id)), thread_ts)
+            return True
+        _post_private(client, say, channel_id, user_id,
+                      crumbs.format_pond_card(crumbs.get_pond_status(user_id)), thread_ts)
+        return True
+
+    if sub in ("star", "bigstar"):
+        if not _is_organizer(user_id):
+            _post_private(client, say, channel_id, user_id, "Only organizers can give stars.", thread_ts)
+            return True
+        target_id = _resolve_target_identifier(args)
+        if not target_id:
+            _post_private(client, say, channel_id, user_id,
+                          f"Usage: `goose {sub} @person [reason]`", thread_ts)
+            return True
+        kind = "star" if sub == "star" else "bigstar"
+        amount = crumbs.STAR_CRUMBS if sub == "star" else crumbs.BIGSTAR_CRUMBS
+        reason = " ".join(args[1:]).strip()
+        before = crumbs.get_pond_status(target_id)
+        crumbs.add_ledger_event(target_id, kind, amount=amount, ref=f"by {user_id}: {reason}", source_ts=time.time())
+        after = crumbs.get_pond_status(target_id)
+        if after["level"] > before["level"]:
+            _post_private(client, say, channel_id, target_id, crumbs.level_up_message(after), thread_ts)
+        _post_private(client, say, channel_id, user_id,
+                      f"{kind.title()} logged for <@{target_id}> - now PL.{after['level']} {after['title']}.", thread_ts)
+        return True
+
+    if sub == "revoke":
+        if not _is_organizer(user_id):
+            _post_private(client, say, channel_id, user_id, "Only organizers can revoke entries.", thread_ts)
+            return True
+        if not args or not args[0].lstrip("#").isdigit():
+            _post_private(client, say, channel_id, user_id,
+                          "Usage: `goose revoke <ledger id> [reason]`", thread_ts)
+            return True
+        event_id = int(args[0].lstrip("#"))
+        reason = " ".join(args[1:]).strip()
+        row = crumbs.void_ledger_event(event_id, reason)
+        if not row:
+            _post_private(client, say, channel_id, user_id,
+                          f"No ledger entry #{event_id} found.", thread_ts)
+            return True
+        affected = row["user_id"]
+        after = crumbs.get_pond_status(affected)
+        _post_private(client, say, channel_id, affected,
+                      crumbs.DEMOTE_LINE.format(level=after["level"], title=after["title"] or ""), thread_ts)
+        _post_private(client, say, channel_id, user_id,
+                      f"Revoked entry #{event_id}. <@{affected}> is now PL.{after['level']} {after['title']}.", thread_ts)
+        return True
+
+    return False
+
+
+def _score_loadout_activity(user_id: str, channel_id: str, event, client, text: str, rules) -> None:
+    """Score a qualified message in the official #loadout channel for opted-in members."""
+    if channel_id != OFFICIAL_LOADOUT_CHANNEL_ID:
+        return
+    if not crumbs.is_opted_in(user_id):
+        return
+    if not crumbs.is_qualified_message(text):
+        return
+    thread_ts = event.get("thread_ts") or event.get("ts")
+    result = crumbs.record_qualified_message(user_id, channel_id, text, event.get("ts") or "")
+    if result:
+        _post_private(client, None, channel_id, user_id, crumbs.level_up_message(result["after"]), thread_ts)
 
 
 def _context_turns(
@@ -685,43 +836,6 @@ def _queue_ai_reply(
                 logger.error("Could not send an AI fallback (%s)", type(send_exc).__name__)
 
 
-def _record_private_activity(user_id: str, channel_id: str, event, client, say, rules) -> None:
-    """Award base-plus-bonus XP atomically without storing uncalled message text."""
-    cooldown_sec = int(rules.get("cooldown_seconds", 30))
-    text = event.get("text") or ""
-    xp_award, is_suggestion, _is_long = evaluate_message_xp(text)
-    message_length = len(text.strip())
-    with _DB_LOCK, _managed_connection():
-        can_earn, _remaining = check_cooldown(user_id, cooldown_sec)
-        if not can_earn:
-            increment_message_count_only(user_id)
-            return
-
-        current_user = get_or_create_user(user_id)
-        old_level, _old_title = get_level_info_for_xp(current_user["xp"])
-        new_total_xp = current_user["xp"] + xp_award
-        new_level, new_title = get_level_info_for_xp(new_total_xp)
-        record_message_and_add_xp(
-            user_id=user_id,
-            channel_id=channel_id,
-            xp_to_add=xp_award,
-            new_level=new_level,
-            message_length=message_length,
-            is_suggestion=is_suggestion,
-            update_cooldown=True,
-        )
-    if new_level > old_level and event.get("ts"):
-        try:
-            client.reactions_add(channel=channel_id, timestamp=event["ts"], name="tada")
-        except Exception:
-            pass
-    if new_level > old_level and new_level >= 4 and rules.get("announce_level_up_in_channel", True):
-        try:
-            say(text=format_level_up_message(user_id, new_level, new_title), channel=channel_id)
-        except Exception as exc:
-            logger.warning("Could not announce level up (%s)", type(exc).__name__)
-
-
 def _safe_say(say, **kwargs) -> None:
     try:
         say(**kwargs)
@@ -750,10 +864,8 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             return
 
         rules = CONFIG.get("interaction_rules") or {}
-        reply_in_thread = bool(rules.get("reply_in_thread", False))
-        target_thread_ts = event.get("thread_ts") or (
-            event.get("ts") if reply_in_thread or event.get("reply_count") else None
-        )
+        # ALWAYS reply in a thread: continue the existing thread, or start one on the message.
+        target_thread_ts = event.get("thread_ts") or event.get("ts")
 
         is_dm = bool(channel_id and channel_id.startswith("D")) or event.get("channel_type") == "im"
         is_direct_bot_mention = bool(
@@ -774,13 +886,18 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         is_called = is_addressed or is_prefixed_cmd
 
         if not is_called:
-            _record_private_activity(user_id, channel_id, event, client, say, rules)
+            _score_loadout_activity(user_id, channel_id, event, client, text, rules)
             return
 
         clean_addressed = clean_bot_addressing(text, bot_user_id)
         clean_lower = clean_addressed.lower().strip()
 
         if not is_direct_bot_mention:
+            pond_cmd = parse_pond_command(clean_lower)
+            if pond_cmd is not None:
+                if _handle_pond_command(pond_cmd[0], pond_cmd[1], client, say, channel_id, user_id, target_thread_ts):
+                    return
+
             card_targets = parse_card_request_targets(
                 clean_addressed, caller_id=user_id, bot_user_id=bot_user_id
             )
@@ -791,10 +908,9 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
 
             if clean_lower in (
                 "/leaderboard", "!leaderboard", ".leaderboard", "leaderboard",
-                "/top", "!top", ".top", "top", "ranks",
+                "/top", "!top", ".top", "top", "ranks", "pond leaderboard",
             ):
-                leaders = get_leaderboard(limit=10)
-                board = format_leaderboard(leaders)
+                board = crumbs.format_pond_leaderboard(crumbs.get_pond_leaderboard(limit=10))
                 _safe_say(say, text=board, channel=channel_id, thread_ts=target_thread_ts)
                 return
 
@@ -818,6 +934,8 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         should_respond = is_addressed and (is_dm or not is_direct_bot_mention)
         if is_direct_bot_mention and not is_dm:
             return
+        # A real addressed message (not a command) still counts as pond activity.
+        _score_loadout_activity(user_id, channel_id, event, client, clean_addressed, rules)
         if should_respond:
             require_decision = (
                 is_thread_followup and not is_named and not is_prefixed_cmd and not is_dm
@@ -855,13 +973,16 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             return
 
         rules = CONFIG.get("interaction_rules") or {}
-        reply_in_thread = bool(rules.get("reply_in_thread", False))
-        target_thread_ts = event.get("thread_ts") or (
-            event.get("ts") if reply_in_thread or event.get("reply_count") else None
-        )
+        # ALWAYS reply in a thread: continue the existing thread, or start one on the mention.
+        target_thread_ts = event.get("thread_ts") or event.get("ts")
 
         cleaned_text = sanitize_context_text(clean_bot_addressing(raw_text, bot_user_id))
         clean_lower = cleaned_text.lower()
+
+        pond_cmd = parse_pond_command(clean_lower)
+        if pond_cmd is not None:
+            if _handle_pond_command(pond_cmd[0], pond_cmd[1], client, say, channel_id, user_id, target_thread_ts):
+                return
 
         card_targets = parse_card_request_targets(
             raw_text, caller_id=user_id, bot_user_id=bot_user_id
@@ -871,9 +992,11 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             _safe_say(say, text=reply_text, thread_ts=target_thread_ts)
             return
 
-        if clean_lower in ("leaderboard", "top", "ranks", "scores"):
-            leaders = get_leaderboard(limit=10)
-            board = format_leaderboard(leaders)
+        if clean_lower in (
+            "/leaderboard", "!leaderboard", ".leaderboard", "leaderboard",
+            "/top", "!top", ".top", "top", "ranks", "scores", "pond leaderboard",
+        ):
+            board = crumbs.format_pond_leaderboard(crumbs.get_pond_leaderboard(limit=10))
             _safe_say(say, text=board, thread_ts=target_thread_ts)
             return
 
@@ -897,6 +1020,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             _safe_say(say, text=formatted_help, thread_ts=target_thread_ts)
             return
 
+        _score_loadout_activity(user_id, channel_id, event, client, cleaned_text, rules)
         _queue_ai_reply(
             client=client,
             say=say,
@@ -911,7 +1035,52 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             bot_user_id=bot_user_id,
         )
 
-    # 3. SLASH COMMANDS
+    # 3. REACTIONS: :duck: = thanks, :white_check_mark: from the thread asker = helpful
+    @app.event("reaction_added")
+    def handle_reaction_added(body, client):
+        event = body.get("event", {})
+        reaction = (event.get("reaction") or "").lower()
+        item = event.get("item") or {}
+        if item.get("type") != "message":
+            return
+        channel_id = item.get("channel")
+        message_ts = item.get("ts")
+        reactor = event.get("user")
+        author = event.get("item_user")
+        if not channel_id or not author or not reactor or not message_ts:
+            return
+        if channel_id != OFFICIAL_LOADOUT_CHANNEL_ID:
+            return
+        if reactor == author or (bot_user_id and reactor == bot_user_id):
+            return
+        if not crumbs.is_opted_in(author):
+            return
+
+        kind = None
+        if reaction in ("duck", "gooselove"):
+            kind = "thanks"
+        elif reaction in ("white_check_mark", "heavy_check_mark"):
+            try:
+                resp = client.conversations_replies(channel=channel_id, ts=message_ts, limit=2)
+                parent = (resp.get("messages") or [{}])[0]
+                if parent.get("user") != reactor:
+                    return
+            except Exception:
+                return
+            kind = "helpful"
+        if kind is None:
+            return
+
+        before = crumbs.get_pond_status(author)
+        crumbs.add_ledger_event(
+            author, kind, channel_id=channel_id, message_ts=message_ts,
+            ref=reactor, source_ts=time.time(),
+        )
+        after = crumbs.get_pond_status(author)
+        if after["level"] > before["level"]:
+            _post_private(client, None, channel_id, author, crumbs.level_up_message(after), message_ts)
+
+    # 4. SLASH COMMANDS
     def _handle_card_slash_command(ack, command, respond, say):
         ack()
         caller_id = command.get("user_id")
@@ -940,8 +1109,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
     @app.command("/leaderboard")
     def handle_leaderboard_command(ack, respond, say):
         ack()
-        leaders = get_leaderboard(limit=10)
-        board = format_leaderboard(leaders)
+        board = crumbs.format_pond_leaderboard(crumbs.get_pond_leaderboard(limit=10))
         try:
             respond(text=board, response_type="in_channel")
         except Exception:

@@ -10,7 +10,9 @@ reads, code-safe Markdown-to-Slack formatting, and shortcode normalization.
 import json
 import logging
 import os
+import random
 import re
+import threading
 import time
 import zlib
 from pathlib import Path
@@ -20,8 +22,10 @@ import requests
 from config import (
     AI_API_KEY,
     AI_BASE_URL,
+    AI_MAX_CONCURRENCY,
     AI_MAX_OUTPUT_TOKENS,
     AI_MAX_REPLY_CHARS,
+    AI_MAX_RETRIES,
     AI_MODEL,
     AI_PROVIDER,
     AI_TIMEOUT_SECONDS,
@@ -115,7 +119,70 @@ def _limit_reply(text: str, max_chars: Optional[int] = None) -> str:
     return clipped.rsplit(" ", 1)[0].rstrip() + "…"
 
 
+class AIHttpStatusError(RuntimeError):
+    """Raised for non-200 AI API responses, carrying status and any Retry-After hint."""
+
+    def __init__(self, status: int, retry_after: Optional[float] = None):
+        super().__init__(f"AI API status {status}")
+        self.status = status
+        self.retry_after = retry_after
+
+
+_AI_SEMAPHORE = threading.BoundedSemaphore(max(1, AI_MAX_CONCURRENCY))
+
+RETRYABLE_CONNECTION_ERRORS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def _retry_backoff_seconds(attempt: int, retry_after: Optional[float]) -> float:
+    """Exponential backoff with jitter, honoring a server Retry-After when longer."""
+    base = min(8.0, 1.0 * (2 ** attempt)) + random.uniform(0.0, 0.5)
+    if retry_after is not None and retry_after > 0:
+        return min(30.0, max(base, float(retry_after)))
+    return base
+
+
 def _post_ai_json(
+    endpoint: str,
+    payload: Dict[str, Any],
+    headers: Dict[str, str],
+    timeout: float,
+) -> Dict[str, Any]:
+    """POST JSON with bounded concurrency and rate-limit/transient retry with backoff.
+
+    A process-wide semaphore caps how many AI requests are in flight at once so a
+    burst of concurrent chatter cannot overwhelm the provider. Retryable failures
+    (HTTP 429 or 5xx, transient connection errors) are retried up to AI_MAX_RETRIES
+    times, honoring Retry-After for 429s.
+    """
+    attempts = max(1, AI_MAX_RETRIES)
+    last_error: Optional[Exception] = None
+    with _AI_SEMAPHORE:
+        for attempt in range(attempts):
+            try:
+                return _post_ai_json_once(endpoint, payload, headers, timeout)
+            except AIHttpStatusError as exc:
+                last_error = exc
+                if exc.status != 429 and exc.status < 500:
+                    raise
+            except RETRYABLE_CONNECTION_ERRORS as exc:
+                last_error = exc
+            if attempt >= attempts - 1:
+                break
+            delay = _retry_backoff_seconds(attempt, getattr(last_error, "retry_after", None))
+            logger.warning(
+                "AI request failed (%s); retry %s/%s in %.2fs",
+                last_error, attempt + 1, attempts - 1, delay,
+            )
+            time.sleep(delay)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("AI request failed")
+
+
+def _post_ai_json_once(
     endpoint: str,
     payload: Dict[str, Any],
     headers: Dict[str, str],
@@ -134,7 +201,14 @@ def _post_ai_json(
     )
     try:
         if response.status_code != 200:
-            raise RuntimeError(f"AI API status {response.status_code}")
+            retry_after = None
+            raw_retry_after = response.headers.get("Retry-After")
+            if raw_retry_after:
+                try:
+                    retry_after = float(raw_retry_after)
+                except (TypeError, ValueError):
+                    retry_after = None
+            raise AIHttpStatusError(response.status_code, retry_after)
         raw = getattr(response, "raw", None)
         reader = getattr(raw, "read", None)
         if not callable(reader):
@@ -441,47 +515,30 @@ NO_REPLY_TOKEN = "[[NO_REPLY]]"
 
 
 def build_leveling_knowledge() -> str:
-    """Authoritative, config-driven facts about Goose's own community leveling."""
-    from leveling import get_level_tiers
-
-    rules = CONFIG.get("interaction_rules") or {}
-    base_xp = int(rules.get("base_xp_per_message", 10))
-    long_bonus = int(rules.get("bonus_xp_long_message", 5))
-    long_threshold = int(rules.get("long_message_threshold", 80))
-    suggestion_bonus = int(rules.get("bonus_xp_suggestion", 15))
-    cooldown = int(rules.get("cooldown_seconds", 30))
-    announce = bool(rules.get("announce_level_up_in_channel", True))
-    keywords = rules.get("suggestion_keywords") or []
-    tiers = get_level_tiers()
-    tier_line = ", ".join(
-        f"{int(t['level'])} {t['title']} ({int(t['min_xp'])} XP)" for t in tiers
-    )
-    max_level = int(tiers[-1]["level"]) if tiers else 0
-    keyword_line = ", ".join(str(k) for k in keywords) if keywords else "suggest, idea, what if"
-
+    """Authoritative, config-free facts about Goose's crumbs-only Pond Levels."""
     return (
-        "\n\nLEVELING (Goose's own community levels; answer these confidently, do not guess):\n"
-        "- By default, questions about leveling up or about levels in this server mean the community duck "
-        "levels (earn XP by chatting). Only discuss LOADOUT Track XP field levels when the person clearly "
-        "asks about LOADOUT, a track, or field levels.\n"
-        "- XP comes from chatting normally in the watched channels. Only ordinary messages count; "
-        "messages that call Goose or run a command do not earn XP.\n"
-        f"- Each counted message gives {base_xp} XP. Add {long_bonus} XP if the message is at least "
-        f"{long_threshold} characters, and add {suggestion_bonus} XP if it contains a suggestion or idea "
-        f"keyword ({keyword_line}). A long, thoughtful suggestion can earn up to {base_xp + long_bonus + suggestion_bonus} XP at once.\n"
-        f"- There is a {cooldown}-second cooldown per member: right after earning XP, further messages for "
-        f"{cooldown} seconds still count toward message count but give no XP.\n"
-        f"- Levels and the XP needed to reach them: {tier_line}. Level {max_level} is the maximum. "
-        "The curve is about 6 * (level - 1) * level XP, so every level costs more than the last.\n"
-        f"- Leveling up adds a :tada: reaction; at level 4 and above Goose {'also posts a short celebration in the channel' if announce else 'posts no public celebration'}.\n"
-        "- To check progress: type \"!level\", \"!rank\", or \"!card\" for a member's card (level, title, XP, "
-        "progress, XP to next level); type \"!leaderboard\" for the top 10. People can also just ask, like "
-        "\"goose what's my level\". Never tell anyone to use a slash command with a leading \"/\"; slash "
-        "commands are not set up here, only the text commands work.\n"
-        "- Only members who have chatted and earned XP appear on cards or the leaderboard. A brand-new member is Level 1 with 0 XP.\n"
-        "- These are Goose's community duck levels. They are separate from LOADOUT's Track XP field levels "
-        "(per-track, 1-15, milestones at 3/6/9/12/15, about 350 hours to LV.15), which come from the LOADOUT docs.\n"
-        "- Never invent a member's XP, level, or rank; if unsure, tell them to run the level command."
+        "\n\nLEVELING (Goose's Pond Levels; deterministic - answer confidently, never compute a member's level yourself):\n"
+        "- Goose tracks crumbs that add up to Pond Levels (PL.1, PL.2, ...). Only activity in the official "
+        "#loadout channel counts, and only after a member opts in by typing `goose join`.\n"
+        "- Crumbs come from: qualified messages (at least 3 words and 12 characters after removing mentions, "
+        "links and emoji; worth 8*ln(1 + n/5) for n messages in a week); active days (+1.5 each, capped at "
+        "10.5 per week); thanks (:duck: reactions from other people: 6*ln(1 + n/3)); helpful answers "
+        "(:white_check_mark: from the thread's asker: 14*ln(1 + n/3)); and organizer stars (a star is +25, a "
+        "bigstar is +60). A 30-second flood limit sits between scored messages.\n"
+        "- Pond Levels use fixed thresholds: PL.1 Hatchling 0, PL.2 Duckling 10, PL.3 Paddler 25, "
+        "PL.4 Dabbler 50, PL.5 Mallard 100, PL.6 Diver 155, PL.7 Pond Scout 235, PL.8 Flock Leader 330, "
+        "PL.9 Wing Commander 445, PL.10 Golden Beak 580, PL.11 Pond Elder 735, PL.12 Head Duck 890. "
+        "Above PL.12 each level needs 20% more crumbs, uncapped.\n"
+        "- Star gate: chatting, thanks and helpful answers alone can reach at most PL.5 (100 crumbs). "
+        "PL.6 and above require at least one organizer star.\n"
+        "- Levels are derived from the ledger, so revoking a star or an entry can lower a member's level "
+        "(capped back to PL.5 if they have no stars left). Demotions are private, never announced publicly, "
+        "and level-ups are private notes in the channel too - Goose never posts a public level-up.\n"
+        "- Members check their own level privately with `goose me`; `goose leaderboard` shows the standings. "
+        "Never tell anyone to use a slash command - only the text commands work.\n"
+        "- Never calculate, guess, or reveal a member's crumbs or Pond Level yourself. Point them to `goose me`.\n"
+        "- These are Goose's community Pond Levels, separate from LOADOUT's Track XP field levels "
+        "(per-track, 1-15, milestones at 3/6/9/12/15, about 350 hours to LV.15), which come from the LOADOUT docs."
     )
 
 

@@ -73,6 +73,21 @@ def _managed_connection(db_path: str = DB_PATH) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _ensure_user_columns(conn) -> None:
+    """Idempotently add crumb-system columns to an existing users table."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    wanted = {
+        "opted_in": "INTEGER NOT NULL DEFAULT 0",
+        "joined_at": "REAL NOT NULL DEFAULT 0.0",
+        "level_floor": "INTEGER NOT NULL DEFAULT 1",
+        "last_scored_ts": "REAL NOT NULL DEFAULT 0.0",
+        "last_scored_text": "TEXT NOT NULL DEFAULT ''",
+    }
+    for name, decl in wanted.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {name} {decl};")
+
+
 def init_db(db_path: str = DB_PATH) -> None:
     resolved = os.path.abspath(db_path)
     Path(resolved).parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +124,24 @@ def init_db(db_path: str = DB_PATH) -> None:
                         created_at REAL NOT NULL
                     );
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS crumbs_ledger (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        amount REAL NOT NULL DEFAULT 0.0,
+                        week_key TEXT NOT NULL DEFAULT '',
+                        day_key TEXT NOT NULL DEFAULT '',
+                        source_ts REAL NOT NULL DEFAULT 0.0,
+                        channel_id TEXT NOT NULL DEFAULT '',
+                        message_ts TEXT NOT NULL DEFAULT '',
+                        ref TEXT NOT NULL DEFAULT '',
+                        voided INTEGER NOT NULL DEFAULT 0,
+                        void_reason TEXT NOT NULL DEFAULT '',
+                        created_at REAL NOT NULL DEFAULT 0.0
+                    );
+                """)
+                _ensure_user_columns(conn)
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_users_xp ON users(xp DESC, message_count DESC);"
                 )
@@ -117,6 +150,12 @@ def init_db(db_path: str = DB_PATH) -> None:
                 )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_aliases_user ON user_aliases(user_id);"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_crumbs_user ON crumbs_ledger(user_id, voided);"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_crumbs_week ON crumbs_ledger(week_key, kind);"
                 )
 
                 now = time.time()

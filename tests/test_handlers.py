@@ -50,7 +50,7 @@ def test_bot_loop_prevention():
     say = MagicMock()
     client = MagicMock()
     with patch("handlers._queue_ai_reply") as queue, \
-         patch("handlers._record_private_activity") as record:
+         patch("handlers._score_loadout_activity") as record:
         for payload in (body_with_bot_id, body_with_subtype, body_from_self):
             app.events["message"](body=payload, client=client, say=say)
             app.events["app_mention"](body=payload, say=say, client=client)
@@ -206,9 +206,15 @@ def test_parse_card_request_targets():
 
 def test_get_cards_response_for_targets():
     """Verifies card responses for known and unknown users."""
-    with patch("handlers.resolve_user") as mock_resolve:
-        mock_resolve.side_effect = lambda t: ("U1", {"user_id": "U1", "xp": 100, "level": 2, "message_count": 5}) if t == "jerry" else (None, None)
-        
+    fake_status = {
+        "user_id": "U1", "opted_in": True, "crumbs": 15.0, "level": 2, "title": "Duckling",
+        "next_level": 3, "next_title": "Paddler", "crumbs_to_next": 10, "next_threshold": 25,
+        "has_star": False, "stars": 0, "bigstars": 0, "level_floor": 1, "weekly": [], "gated": False,
+    }
+    with patch("handlers.resolve_user") as mock_resolve, \
+         patch("handlers.crumbs.get_pond_status", return_value=fake_status):
+        mock_resolve.side_effect = lambda t, **k: ("U1", {"user_id": "U1"}) if t == "jerry" else (None, None)
+
         # Test found user
         reply = handlers.get_cards_response_for_targets(["jerry"], "U_CALLER")
         assert "Level" in reply
@@ -381,9 +387,11 @@ def test_ai_mention_queues_work_and_updates_the_placeholder():
     assert client.calls[-1][1]["text"] == "Bruce Lee wins."
     assert generate.call_args.kwargs["user_message"] == "who wins?"
     assert generate.call_args.kwargs["context_messages"] == []
-    assert handlers._is_known_bot_thread("C_ASYNC", "123.456")
+    assert handlers._is_known_bot_thread("C_ASYNC", "100.0")
     with handlers._BOT_THREADS_LOCK:
-        handlers._BOT_THREADS.pop(("C_ASYNC", "123.456"), None)
+        handlers._BOT_THREADS.pop(("C_ASYNC", "100.0"), None)
+    # Replies are always threaded on the triggering message
+    assert client.calls[0][1]["thread_ts"] == "100.0"
     say.assert_not_called()
 
 
@@ -477,30 +485,25 @@ def test_thread_mention_uses_its_full_thread_context():
     ]
 
 
-def test_uncalled_messages_award_configured_bonus_xp():
-    """Ordinary chatter earns base XP, and suggestion messages earn the configured bonus."""
-    from contextlib import nullcontext
+def test_uncalled_messages_score_crumbs_only_in_the_official_channel():
+    """Ordinary chatter in #loadout scores crumbs for opted-in members; other channels do not."""
+    with patch("handlers.OFFICIAL_LOADOUT_CHANNEL_ID", "C_LOADOUT"), \
+         patch("handlers.crumbs.is_opted_in", return_value=True) as opted, \
+         patch("handlers.crumbs.is_qualified_message", return_value=True), \
+         patch("handlers.crumbs.record_qualified_message", return_value=None) as record:
+        handlers._score_loadout_activity(
+            "U1", "C_LOADOUT", {"text": "I shipped the wear leveling fix today", "ts": "1.0"},
+            MagicMock(), "I shipped the wear leveling fix today", {},
+        )
+        record.assert_called_once()
 
-    def run(text):
-        with patch("handlers.check_cooldown", return_value=(True, 0)), \
-             patch("handlers.get_or_create_user", return_value={"user_id": "U1", "xp": 0, "level": 1}), \
-             patch("handlers.get_level_info_for_xp", return_value=(1, "Hatchling")), \
-             patch("handlers.record_message_and_add_xp") as record, \
-             patch("handlers._managed_connection", return_value=nullcontext()), \
-             patch("handlers._DB_LOCK", nullcontext()):
-            handlers._record_private_activity(
-                "U1", "C1", {"text": text, "ts": "1.0"}, MagicMock(), MagicMock(),
-                {"cooldown_seconds": 30},
-            )
-        return record.call_args.kwargs
-
-    plain = run("morning all")
-    assert plain["xp_to_add"] == 10
-    assert plain["is_suggestion"] is False
-
-    suggestion = run("I have a suggestion for the onboarding flow")
-    assert suggestion["xp_to_add"] == 25
-    assert suggestion["is_suggestion"] is True
+        # A non-official channel must not score
+        record.reset_mock()
+        handlers._score_loadout_activity(
+            "U1", "C_OTHER", {"text": "I shipped the wear leveling fix today", "ts": "2.0"},
+            MagicMock(), "I shipped the wear leveling fix today", {},
+        )
+        record.assert_not_called()
 
 
 def test_unmentioned_messages_never_trigger_an_ai_reply():
@@ -888,6 +891,77 @@ def test_sanitize_context_text():
     assert "sk-proj1234567890abcdef1234" not in sanitized
     assert "[REDACTED_API_KEY]" in sanitized
     assert "Bearer [REDACTED_TOKEN]" in sanitized
+
+
+def test_parse_pond_command_variants():
+    assert handlers.parse_pond_command("goose join") == ("join", [])
+    assert handlers.parse_pond_command("goose me") == ("me", [])
+    assert handlers.parse_pond_command("!goose star <@U1> great work") == ("star", ["<@u1>", "great", "work"])
+    assert handlers.parse_pond_command(".goose revoke 12 oops") == ("revoke", ["12", "oops"])
+    assert handlers.parse_pond_command("goose") == ("help", [])
+    assert handlers.parse_pond_command("goose nonsense") is None
+    assert handlers.parse_pond_command("just chatting") is None
+
+
+def test_reaction_added_thanks_scores_crumbs():
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U_BOT")
+    client = MagicMock()
+    status = {"user_id": "U_AUTHOR", "level": 3, "title": "Paddler"}
+    body = {"event": {
+        "reaction": "duck", "user": "U_GIVER", "item_user": "U_AUTHOR",
+        "item": {"type": "message", "channel": "C_LOADOUT", "ts": "5.0"},
+    }}
+    with patch("handlers.OFFICIAL_LOADOUT_CHANNEL_ID", "C_LOADOUT"), \
+         patch("handlers.crumbs.is_opted_in", return_value=True), \
+         patch("handlers.crumbs.get_pond_status", return_value=status), \
+         patch("handlers.crumbs.add_ledger_event") as add:
+        app.events["reaction_added"](body=body, client=client)
+    add.assert_called_once()
+    assert add.call_args.args[0] == "U_AUTHOR"
+    assert add.call_args.args[1] == "thanks"
+
+
+def test_reaction_added_ignores_self_and_non_official_channels():
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U_BOT")
+    client = MagicMock()
+    with patch("handlers.OFFICIAL_LOADOUT_CHANNEL_ID", "C_LOADOUT"), \
+         patch("handlers.crumbs.is_opted_in", return_value=True), \
+         patch("handlers.crumbs.add_ledger_event") as add:
+        # Self-reaction
+        app.events["reaction_added"](
+            body={"event": {"reaction": "duck", "user": "U_AUTHOR", "item_user": "U_AUTHOR",
+                            "item": {"type": "message", "channel": "C_LOADOUT", "ts": "1"}}},
+            client=client,
+        )
+        # Other channel
+        app.events["reaction_added"](
+            body={"event": {"reaction": "duck", "user": "U_GIVER", "item_user": "U_AUTHOR",
+                            "item": {"type": "message", "channel": "C_OTHER", "ts": "2"}}},
+            client=client,
+        )
+    add.assert_not_called()
 
 
 

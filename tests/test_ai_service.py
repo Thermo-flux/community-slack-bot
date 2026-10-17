@@ -104,17 +104,17 @@ def test_fallback_prompt_keeps_privacy_and_bruce_lee_rules(monkeypatch):
     assert "only speak when you are directly called" in instructions
 
 
-def test_leveling_knowledge_is_authoritative_and_config_driven():
+def test_leveling_knowledge_is_authoritative_and_deterministic():
     knowledge = ai_service.build_leveling_knowledge()
     assert "LEVELING" in knowledge
-    assert "10 XP" in knowledge
-    assert "30-second cooldown" in knowledge
+    assert "crumbs" in knowledge
+    assert "Pond Level" in knowledge
     assert "Head Duck" in knowledge
     assert "Hatchling" in knowledge
-    assert "!leaderboard" in knowledge
+    assert "Star gate" in knowledge
+    assert "goose me" in knowledge
     assert "/leaderboard" not in knowledge
     assert "/level" not in knowledge
-    assert "current tracked members" not in knowledge.lower()
     assert knowledge in ai_service.build_system_instructions()
 
 
@@ -315,5 +315,87 @@ def test_ai_response_stream_obeys_a_total_deadline(monkeypatch):
     monkeypatch.setattr(ai_service.requests, "post", lambda *args, **kwargs: response)
     with pytest.raises(ai_service.requests.exceptions.Timeout):
         ai_service._post_ai_json("https://ai.example/v1", {}, {}, timeout=0.1)
+
+
+def test_post_ai_json_retries_on_429_and_honors_retry_after(tmp_path, monkeypatch):
+    calls = []
+    delays = []
+
+    def fake_once(endpoint, payload, headers, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ai_service.AIHttpStatusError(429, retry_after=2.0)
+        return {"ok": True}
+
+    monkeypatch.setattr(ai_service, "_post_ai_json_once", fake_once)
+    monkeypatch.setattr(ai_service.time, "sleep", lambda seconds: delays.append(seconds))
+
+    assert ai_service._post_ai_json("u", {}, {}, timeout=1) == {"ok": True}
+    assert len(calls) == 2
+    assert delays and delays[0] >= 2.0
+
+
+def test_post_ai_json_does_not_retry_on_client_error(monkeypatch):
+    calls = []
+    sleeps = []
+
+    def fake_once(*args, **kwargs):
+        calls.append(1)
+        raise ai_service.AIHttpStatusError(400)
+
+    monkeypatch.setattr(ai_service, "_post_ai_json_once", fake_once)
+    monkeypatch.setattr(ai_service.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    with pytest.raises(ai_service.AIHttpStatusError):
+        ai_service._post_ai_json("u", {}, {}, timeout=1)
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_post_ai_json_gives_up_after_max_retries(monkeypatch):
+    calls = []
+
+    def fake_once(*args, **kwargs):
+        calls.append(1)
+        raise ai_service.AIHttpStatusError(503)
+
+    monkeypatch.setattr(ai_service, "_post_ai_json_once", fake_once)
+    monkeypatch.setattr(ai_service.time, "sleep", lambda seconds: None)
+
+    with pytest.raises(ai_service.AIHttpStatusError):
+        ai_service._post_ai_json("u", {}, {}, timeout=1)
+    assert len(calls) == ai_service.AI_MAX_RETRIES
+
+
+def test_post_ai_json_limits_concurrent_requests(monkeypatch):
+    import threading as _threading
+
+    state = {"active": 0, "peak": 0}
+    lock = _threading.Lock()
+    release = _threading.Event()
+
+    def fake_once(*args, **kwargs):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        release.wait(0.2)
+        with lock:
+            state["active"] -= 1
+        return {}
+
+    monkeypatch.setattr(ai_service, "_post_ai_json_once", fake_once)
+    monkeypatch.setattr(ai_service, "_AI_SEMAPHORE", _threading.BoundedSemaphore(2))
+
+    threads = [
+        _threading.Thread(target=lambda: ai_service._post_ai_json("u", {}, {}, timeout=1))
+        for _ in range(6)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert state["peak"] <= 2
+
 
 

@@ -28,8 +28,8 @@
     ],
     "_comment_level_up": "Whether to post a public celebration message in the channel when a user levels up.",
     "announce_level_up_in_channel": true,
-    "_comment_thread": "Whether command responses (like /level) should be posted in threads where possible.",
-    "reply_in_thread": false
+    "_comment_thread": "Goose always replies in a thread: it continues the triggering thread, or starts one on the mention.",
+    "reply_in_thread": true
   },
   "emoji_settings": {
     "_comment_frequency": "Controls how many emojis the bot uses. Options: 'none', 'low', 'moderate', 'high'",
@@ -114,7 +114,7 @@
     "leaderboard_header": "Top contributors",
     "leaderboard_row": "*{rank}.* <@{user_id}> — Level {level} (*{title}*) • `{xp} XP`",
     "leaderboard_empty": "No contributions recorded yet. Start chatting to earn XP.",
-    "help_message": "I'm Goose Lee. Type `!level` for a card or `!leaderboard` for the standings. Mention me to chat in #loadout or #loadout-development.",
+    "help_message": "I'm Goose Lee. Type `goose join` to earn Pond Levels in #loadout, `goose me` for your card, or `goose leaderboard` for the standings. Mention me to chat in #loadout or #loadout-development.",
     "ai_offline_fallback": "Hi <@{user_id}>. I can't reach my answer service right now. Try again shortly."
   }
 }

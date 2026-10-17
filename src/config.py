@@ -150,7 +150,8 @@ def _get_default_config() -> Dict[str, Any]:
             "leaderboard_row": "*{rank}.* <@{user_id}> — Level {level} (*{title}*) • `{xp} XP`",
             "leaderboard_empty": "No contributions recorded yet. Start chatting to earn XP.",
             "help_message": (
-                "I'm Goose Lee. Type `!level` for a card or `!leaderboard` for the standings. "
+                "I'm Goose Lee. Type `goose join` to earn Pond Levels in #loadout, `goose me` for your card, "
+                "or `goose leaderboard` for the standings. "
                 "Mention me to chat in #loadout or #loadout-development."
             ),
             "ai_offline_fallback": "Hi <@{user_id}>. I can't reach my answer service right now. Try again shortly.",
@@ -227,6 +228,24 @@ AI_MAX_OUTPUT_TOKENS = _positive_int_setting("AI_MAX_OUTPUT_TOKENS", 512, maximu
 AI_MAX_REPLY_CHARS = _positive_int_setting("AI_MAX_REPLY_CHARS", 400, maximum=4000)
 AI_REPLY_WORKERS = _positive_int_setting("AI_REPLY_WORKERS", 4, maximum=16)
 AI_REPLY_QUEUE_SIZE = _positive_int_setting("AI_REPLY_QUEUE_SIZE", 12, minimum=0, maximum=128)
+AI_MAX_CONCURRENCY = _positive_int_setting("AI_MAX_CONCURRENCY", 3, maximum=16)
+AI_MAX_RETRIES = _positive_int_setting("AI_MAX_RETRIES", 3, minimum=1, maximum=8)
+
+
+def _user_id_list(env_name: str) -> List[str]:
+    """Parse a comma/space separated list of Slack user IDs into a set-like list."""
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return []
+    ids = []
+    for entry in re.split(r"[,\s]+", raw):
+        entry = entry.strip().upper()
+        if entry and re.fullmatch(r"[UW][A-Z0-9]{6,}", entry) and entry not in ids:
+            ids.append(entry)
+    return ids
+
+
+ORGANIZER_USER_IDS = _user_id_list("ORGANIZER_USER_IDS")
 
 
 def _channel_id_setting(env_name: str, config_name: str) -> str:
