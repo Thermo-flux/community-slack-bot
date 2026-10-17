@@ -76,6 +76,26 @@ def test_soul_has_a_dry_bruce_lee_easter_egg_without_forced_hype():
     assert "high-energy" not in soul
 
 
+def test_assistance_limits_forbid_code_and_bulk_work():
+    """The persona and system prompt must forbid code output and general-assistant use."""
+    soul = ai_service.load_soul_prompt().lower()
+    instructions = ai_service.build_system_instructions().lower()
+
+    for text in (soul, instructions):
+        assert "never write, complete, review, debug, or refactor code" in text
+        assert "code blocks" in text
+        assert "general-purpose assistant" in text
+        assert "refuse homework, essays, translations" in text
+        assert "generic chatbot" in text
+
+
+def test_fallback_prompt_keeps_assistance_limits(monkeypatch):
+    """Assistance limits survive even when soul.md cannot be read."""
+    monkeypatch.setattr(ai_service, "SOUL_PATH", MagicMock(exists=lambda: False))
+    instructions = ai_service.build_system_instructions().lower()
+    assert "assistance limits" in instructions
+    assert "never write, complete, review, debug, or refactor code" in instructions
+
 def test_fallback_prompt_keeps_privacy_and_bruce_lee_rules(monkeypatch):
     monkeypatch.setattr(ai_service, "SOUL_PATH", MagicMock(exists=lambda: False))
     instructions = ai_service.build_system_instructions().lower()
