@@ -14,7 +14,7 @@ from goose.core.card import build_card
 from goose.core.commands_member import index_of, row_user_id
 from goose.core.context import AppContext
 from goose.core.rules import (
-    extract_user_ids, is_elaborate_request, is_explain_request, is_near_duplicate, mentions_goose,
+    extract_user_ids, is_calling_goose, is_elaborate_request, is_explain_request, is_near_duplicate, mentions_goose,
     qualify_message, simhash,
 )
 from goose.core.safety import is_distress, is_program_question, is_sad, safety_reply
@@ -215,6 +215,64 @@ class Router:
         ids.discard(self.ctx.bot_user_id)
         return bool(ids)
 
+    def _check_in_chat_command(self, ev: Event, text: str, now: float) -> Optional[Result]:
+        if not text or bool(ev.bot_mentioned):
+            return None
+        clean = text.strip()
+        low = clean.lower()
+        ctx = self.ctx
+
+        def _ensure_joined() -> None:
+            if not ctx.users.is_joined(ev.user):
+                notice = str(ctx.config.voice.notice_version)
+                ctx.users.join(ev.user, now, channel=ev.channel, consent_version=notice)
+
+        if low.startswith(("!goose", "/goose")):
+            _ensure_joined()
+            parts = clean.split(None, 2)
+            subcmd = parts[1].lower() if len(parts) > 1 else "help"
+            args = parts[2].strip() if len(parts) > 2 else ""
+            cmd_ev = Event(
+                kind="command", ts=now, channel=ev.channel, user=ev.user,
+                command=subcmd, args=args, thread_ts=self._thread(ev),
+            )
+            return self._convert_to_post(ev, self._command(cmd_ev))
+
+        if low in ("!join", "/join", "join"):
+            _ensure_joined()
+            cmd_ev = Event(kind="command", ts=now, channel=ev.channel, user=ev.user, command="join", thread_ts=self._thread(ev))
+            return self._convert_to_post(ev, self._command(cmd_ev))
+
+        if low.startswith(("!level", "!rank", "!card", "!me", "!stats", "/level", "/rank", "/card")) or low in ("level", "rank", "card", "stats", "my level", "my rank"):
+            _ensure_joined()
+            parts = clean.split(None, 1)
+            args = parts[1].strip() if len(parts) > 1 else ""
+            cmd_ev = Event(kind="command", ts=now, channel=ev.channel, user=ev.user, command="me", args=args, thread_ts=self._thread(ev))
+            return self._convert_to_post(ev, self._command(cmd_ev))
+
+        if low.startswith(("!leaderboard", "!top", "!board", "/leaderboard", "/top")) or low in ("leaderboard", "top", "ranks", "scores"):
+            _ensure_joined()
+            parts = clean.split(None, 1)
+            args = parts[1].strip() if len(parts) > 1 else ""
+            cmd_ev = Event(kind="command", ts=now, channel=ev.channel, user=ev.user, command="top", args=args, thread_ts=self._thread(ev))
+            return self._convert_to_post(ev, self._command(cmd_ev))
+
+        if low in ("!help", "/help", "help"):
+            cmd_ev = Event(kind="command", ts=now, channel=ev.channel, user=ev.user, command="help", thread_ts=self._thread(ev))
+            return self._convert_to_post(ev, self._command(cmd_ev))
+
+        return None
+
+    def _convert_to_post(self, ev: Event, res: Result) -> Result:
+        out = Result()
+        for a in res.actions:
+            if a.kind == "ephemeral":
+                out.actions.append(Action(kind="post", channel=a.channel or ev.channel, text=a.text, thread_ts=self._thread(ev)))
+            else:
+                out.actions.append(a)
+        out.jobs.extend(res.jobs)
+        return out
+
     # ------------------------------------------------------------ messages
 
     def _message(self, ev: Event, now: float) -> Result:
@@ -227,16 +285,23 @@ class Router:
         if joined:
             ctx.users.set_last_channel(ev.user, ev.channel)
             self._score_message(ev, ts, now)
-        addr = ctx.vibes.classify_addressing(ev, ctx.bot_user_id)
+
         text = ev.text or ""
-        in_thread = bool(ev.thread_ts) and ev.thread_parent_user == ctx.bot_user_id
+        cmd_result = self._check_in_chat_command(ev, text, now)
+        if cmd_result is not None:
+            return cmd_result
+
+        addr = ctx.vibes.classify_addressing(ev, ctx.bot_user_id)
+        in_thread = bool(ev.thread_ts) and (
+            ev.thread_parent_user == ctx.bot_user_id or getattr(ev, "thread_has_bot", False)
+        )
         ping = addr == "ping"
-        name = addr == "name"
-        addressed = ping or in_thread
+        name = addr == "name" or is_calling_goose(text)
+        addressed = ping or in_thread or name
         # Distress comes first, before any other gate (including the Orry silence). Addressed messages (a ping, the
         # name, a reply in the thread) get the plain safety reply; an unaddressed message gets an organizer alert only.
         if is_distress(text, cfg):
-            if addr in ("ping", "name", "orry") or in_thread:
+            if addr in ("ping", "name", "orry") or in_thread or name:
                 return self._distress(ev)
             return self._distress_alert_only(ev)
         if addr == "orry":
@@ -248,15 +313,6 @@ class Router:
         # Sad words (grief, loneliness, trivia about death) are not distress: no reaction, no roast, no German,
         # no goose call, but an addressed sad message still goes to the voice.
         sad = is_sad(text, cfg)
-        if name and not addressed:
-            if not sad and self._is_goose_call(ev, text, flags):
-                return self._goose(ev, now)
-            res = Result()
-            emoji = ctx.vibes.name_reaction(text, ev.user, now, quiet=flags.quiet, sad=sad)
-            if emoji:
-                res.actions.append(self._reaction(ev, emoji))
-            return res
-
         if not sad and self._is_goose_call(ev, text, flags):
             return self._goose(ev, now)
 
@@ -340,7 +396,10 @@ class Router:
         from them goes to the voice."""
         user = self.ctx.users.get(user_id)
         if not user:
-            return False
+            now = self.ctx.clock.now()
+            notice = str(self.ctx.config.voice.notice_version)
+            self.ctx.users.join(user_id, now, consent_version=notice)
+            return True
         return str(user.get("consent_version") or "") == str(self.ctx.config.voice.notice_version)
 
     def _consent_text(self) -> str:
@@ -456,7 +515,45 @@ class Router:
             if ctx.vibes.rank_remark_allowed(ev.user, now, quiet=flags.quiet, shown=flags.show,
                                              resting=flags.rest, band=band):
                 res.actions.append(self._post(ev, self._line("rank_remark_active", allow_german=True)))
+
+        # Natural ambient intervention in scored channels (knows when to intervene)
+        if self._should_ambient_intervene(ev, text, now, flags, sad):
+            self._chat(ev, now, res, ping=False, in_thread=bool(ev.thread_ts), flags=flags, text=text, sad=sad)
+            self._record_ambient_intervention(ev.channel, now)
+
         return res
+
+    def _should_ambient_intervene(self, ev: Event, text: str, now: float, flags: _Flags, sad: bool) -> bool:
+        if not self._voice_on(now) or flags.quiet or sad:
+            return False
+        ctx = self.ctx
+        if not ctx.config.is_scored_channel(ev.channel):
+            return False
+        row = ctx.db.one("SELECT MAX(ts) AS t FROM remark_log WHERE kind = 'ambient_intervene' AND user_id = ?",
+                         (ev.channel,))
+        last_ts = float(row["t"]) if row is not None and row["t"] else 0.0
+        if now - last_ts < 180:
+            return False
+
+        words = text.split()
+        has_question = ("?" in text and len(words) >= 3) or bool(re.search(
+            r"\b(?:anyone know|how do (?:we|i|you)|why (?:is|does)|what (?:is|are|should)|can someone|where (?:is|can)|is there a way)\b",
+            text, re.I
+        ))
+        is_shipping = bool(re.search(
+            r"\b(?:just shipped|finally shipped|it works|fixed the bug|deployed|merged the pr|pr is up|released|built the)\b",
+            text, re.I
+        ))
+        is_dev_topic = bool(re.search(
+            r"\b(?:loadout|duck|crumbs|hatchling|pond|slack bot|api key|database|schema|docker|systemd|deploy)\b",
+            text, re.I
+        )) and len(words) >= 4
+
+        return has_question or is_shipping or is_dev_topic
+
+    def _record_ambient_intervention(self, channel: str, now: float) -> None:
+        self.ctx.db.execute("INSERT INTO remark_log (user_id, ts, kind) VALUES (?, ?, 'ambient_intervene')",
+                            (channel, float(now)))
 
     def _band(self, uid: str, now: float) -> Optional[str]:
         card = build_card(self.ctx, uid, False, now)

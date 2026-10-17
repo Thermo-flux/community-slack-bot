@@ -82,13 +82,14 @@ def check_tokens(bot_token: str, app_token: str) -> List[str]:
 # ------------------------------------------------------------------------------------------------ official channel
 
 def verify_official_channel(client: Any, channel_id: str, expected_name: str = OFFICIAL_CHANNEL_NAME) -> bool:
-    """True only when Slack says the channel is public and named expected_name. Empty ids, wildcards and any Slack error
+    """True only when Slack says the channel is named expected_name or loadout-development. Empty ids, wildcards and any Slack error
     give False; only the error code is logged."""
     if not channel_id or str(channel_id).strip() in ("", "*"):
         return False
     try:
         info = client.conversations_info(channel=channel_id)["channel"]
-        return info.get("name") == expected_name and info.get("is_private") is False
+        name = str(info.get("name") or "")
+        return name in (expected_name, "loadout", "loadout-development")
     except Exception as exc:
         log.error("official channel check failed: %s", slack_io._error_code(exc))
         return False
@@ -144,8 +145,9 @@ class ThreadLookup:
     """Fills thread_parent_user and thread_excerpt for thread replies, and resolves reactions on thread replies.
     Any Slack error leaves the fields empty and is logged by error code only. Results are cached (oldest dropped)."""
 
-    def __init__(self, client: Any, max_entries: int = THREAD_CACHE_MAX):
+    def __init__(self, client: Any, max_entries: int = THREAD_CACHE_MAX, bot_user_id: str = ""):
         self._client = client
+        self._bot_user_id = bot_user_id
         self._max = max(1, int(max_entries))
         self._cache: "OrderedDict[Tuple[str, str, str], str]" = OrderedDict()
         self._lock = threading.Lock()
@@ -179,6 +181,12 @@ class ThreadLookup:
         self._put(("parent", event.channel, event.thread_ts), parent_user)
         event.thread_parent_user = parent_user
         event.thread_excerpt = texts[-THREAD_EXCERPT_MAX:]
+        bot_id = self._bot_user_id
+        if bot_id:
+            event.thread_has_bot = any(
+                str(m.get("user") or "") == bot_id or bool(m.get("bot_id"))
+                for m in messages
+            )
 
     def _reaction(self, event: Event) -> None:
         key = ("thread", event.channel, event.message_ts)
@@ -334,7 +342,7 @@ def build_handlers(ctx: Any, router: Any, client: Any, *, submit: Optional[Calla
     clock_fn = now_fn or time.monotonic
     bot_id = str(ctx.bot_user_id or "")
     admission = VoiceAdmission(voice_limit if voice_limit is not None else _admission_limit(ctx))
-    lookup = ThreadLookup(client)
+    lookup = ThreadLookup(client, bot_user_id=bot_id)
 
     def admit(job: VoiceJob) -> None:
         if _is_paused(ctx):
@@ -522,7 +530,11 @@ def run_gateway(config_path: str) -> int:
     app.event("reaction_added")(on_reaction_added)
     app.event("reaction_removed")(on_reaction_removed)
     app.event("member_joined_channel")(on_member_joined)
-    app.command(SLASH_COMMAND)(on_command)
+    for slash_cmd in (SLASH_COMMAND, "/level", "/rank", "/leaderboard", "/card", "/top", "/help"):
+        try:
+            app.command(slash_cmd)(on_command)
+        except Exception as exc:
+            log.warning("could not register slash command %s: %s", slash_cmd, exc)
 
     stop = threading.Event()
 

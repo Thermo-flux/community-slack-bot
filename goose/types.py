@@ -14,6 +14,7 @@ ACTION_KINDS = ("post", "ephemeral", "reaction", "organizer_post", "file")
 MEMBER_COMMANDS = (
     "help", "join", "leave", "show", "hide", "rest", "quiet", "me", "top", "all",
     "explain", "pun", "quack", "report", "appeal",
+    "card", "level", "rank", "stats", "leaderboard",
 )
 ORGANIZER_COMMANDS = (
     "results", "winners", "stars", "roster", "audit", "export", "star", "bigstar",
@@ -42,6 +43,7 @@ class Event:
     args: str = ""                  # kind "command": the rest of the text after the subcommand
     mentions: List[str] = field(default_factory=list)   # user ids found in <@U123|name> tokens in text/args
     thread_parent_user: str = ""    # author of the thread's parent message, if known
+    thread_has_bot: bool = False    # true if the bot has sent a message in this thread
     previous_text: str = ""         # message_changed: the old text
     deleted_ts: str = ""            # message_deleted: ts of the deleted message
     thread_excerpt: List[str] = field(default_factory=list)   # gateway-filled: up to 6 earlier thread texts, oldest first

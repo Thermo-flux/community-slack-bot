@@ -133,6 +133,28 @@ def mentions_goose(text: str) -> bool:
     return False
 
 
+def is_calling_goose(text: str) -> bool:
+    """True when someone is calling Goose by name or talking to Goose without a Slack @ mention."""
+    if mentions_name(text):
+        return True
+    vis = _visible(text).strip()
+    if not vis:
+        return False
+    patterns = [
+        r"\b(?:hey|hi|yo|hello|sup|okay|ok)\s+goose\b",
+        r"\bgoose\s*[,:?!]",
+        r"^\s*goose\b",
+        r"\bgoose\s*\?*$",
+        r"\b(?:what do you think|thoughts|opinion)\s*,?\s*goose\b",
+        r"\btell me\s*,?\s*goose\b",
+        r"\b(?:duck|goose)\s*,\s*",
+    ]
+    for pat in patterns:
+        if re.search(pat, vis, re.I):
+            return True
+    return False
+
+
 def _explain_norm(text: str) -> str:
     s = (text or "").lower()
     s = s.replace("ß", "ss").replace("ü", "ue").replace("ö", "oe").replace("ä", "ae")

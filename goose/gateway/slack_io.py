@@ -152,13 +152,29 @@ def normalize_command(body: Dict[str, Any], now: Optional[float] = None) -> Even
     """Slash command payload (command '/goose', text, user_id, channel_id). With should_escape true mentions arrive as
     <@U123|name>. `now` is the receive time; the gateway always passes ctx.clock.now(). Without it the event time is 0.0."""
     raw = str(body.get("text") or "").strip()
+    slash = str(body.get("command") or "").lower().strip()
     parsed = parse_command_text(raw)
     trigger = str(body.get("trigger_id") or "")
+
+    cmd = parsed["command"]
+    args = parsed["args"]
+    mentions = parsed["mentions"]
+
+    if slash in ("/level", "/rank", "/card"):
+        cmd = "me"
+        args = raw
+    elif slash in ("/leaderboard", "/top"):
+        cmd = "top"
+        args = raw
+    elif slash == "/help":
+        cmd = "help"
+        args = raw
+
     return Event(
         kind="command", ts=float(now) if now is not None else 0.0,
         channel=str(body.get("channel_id") or ""), user=str(body.get("user_id") or ""),
-        event_id="cmd:%s" % trigger if trigger else "", text=raw, command=parsed["command"],
-        args=parsed["args"], mentions=parsed["mentions"],
+        event_id="cmd:%s" % trigger if trigger else "", text=raw, command=cmd,
+        args=args, mentions=mentions,
     )
 
 
