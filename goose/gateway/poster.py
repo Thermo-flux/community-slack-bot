@@ -279,6 +279,16 @@ class PostFilter:
         if not text.strip():
             raise _Fail("empty")
 
+        # Clean surrogate pairs and normalize unicode emojis into shortcodes
+        try:
+            text = text.encode("utf-16", "surrogatepass").decode("utf-16", "ignore")
+        except Exception:
+            pass
+        for u_emoji, s_code in _UNICODE_EMOJI_MAP.items():
+            text = text.replace(u_emoji, s_code)
+        # Strip lone surrogates or remaining unsupported emoji chars
+        text = "".join(ch for ch in text if not _is_emoji_char(ch) and unicodedata.category(ch) not in ("Cs",))
+
         # 2. placeholders: only the listed kinds, approved German ids only
         approved = set(self.lines.german_ids())
         for m in PLACEHOLDER_RE.finditer(text):
@@ -300,14 +310,7 @@ class PostFilter:
         if _bad_control(text):
             raise _Fail("control")
 
-        # 4. emoji allowlist (normalizing unicode emojis to shortcodes)
-        for u_emoji, s_code in _UNICODE_EMOJI_MAP.items():
-            text = text.replace(u_emoji, s_code)
-            plain = plain.replace(u_emoji, s_code)
-        # Strip any unmapped unicode emoji chars instead of failing the reply
-        plain = "".join(ch if not _is_emoji_char(ch) else "" for ch in plain)
-        text = "".join(ch if not _is_emoji_char(ch) else "" for ch in text)
-
+        # 4. emoji allowlist (shortcodes and reaction)
         shortcodes = [m.lower() for m in SHORTCODE_RE.findall(plain)]
         if any(code not in _EMOJI_ALLOWED for code in shortcodes):
             raise _Fail("emoji")
@@ -375,8 +378,8 @@ class PostFilter:
         # 9. roast lint
         if flags["roasted"]:
             if persona.get("roast_allowed") is not True:
-                raise _Fail("roast")
-            if _first_word(plain_l, ROAST_TOPICS):
+                flags["roasted"] = False
+            elif _first_word(plain_l, ROAST_TOPICS):
                 raise _Fail("roast_topic")
 
         # 10. threat lint: only the exact approved goose joke may carry a threat word
