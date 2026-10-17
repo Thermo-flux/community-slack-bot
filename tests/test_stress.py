@@ -206,8 +206,8 @@ def test_multi_level_jump():
     lvl_start, title_start = leveling.get_level_info_for_xp(0)
     assert lvl_start == 1
 
-    # Jump straight to 235 XP (Level 7: Pond Scout)
-    lvl_end, title_end = leveling.get_level_info_for_xp(235)
+    # Jump straight to 252 XP (Level 7: Pond Scout)
+    lvl_end, title_end = leveling.get_level_info_for_xp(252)
     assert lvl_end == 7
     assert "Pond Scout" in title_end
 

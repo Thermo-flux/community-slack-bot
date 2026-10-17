@@ -13,15 +13,15 @@ def test_level_info_for_xp():
     assert level == 1
     assert "Hatchling" in title
 
-    level, title = leveling.get_level_info_for_xp(10)
+    level, title = leveling.get_level_info_for_xp(12)
     assert level == 2
     assert "Duckling" in title
 
-    level, title = leveling.get_level_info_for_xp(25)
+    level, title = leveling.get_level_info_for_xp(36)
     assert level == 3
     assert "Paddler" in title
 
-    level, title = leveling.get_level_info_for_xp(50)
+    level, title = leveling.get_level_info_for_xp(72)
     assert level == 4
     assert "Dabbler" in title
 
@@ -31,11 +31,11 @@ def test_level_info_for_xp():
 
 def test_progress_to_next_level():
     """Tests percentage and remaining XP math."""
-    # User at 5 XP (halfway between Level 1 [0 XP] and Level 2 [10 XP])
-    prog = leveling.get_progress_to_next_level(5)
+    # User at 6 XP (halfway between Level 1 [0 XP] and Level 2 [12 XP])
+    prog = leveling.get_progress_to_next_level(6)
     assert prog["level"] == 1
     assert prog["next_level"] == 2
-    assert prog["xp_needed"] == 5
+    assert prog["xp_needed"] == 6
     assert prog["percent"] == 50
     assert prog["is_max_level"] is False
 
