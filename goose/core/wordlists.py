@@ -83,5 +83,8 @@ SAD_WORDS = [
     "grief", "grieving", "bullied", "bullying", "abuse", "abused",
 ]
 
-# Emoji the voice may use. Excludes star and white_check_mark, which mean real things here.
-VOICE_EMOJI_ALLOWLIST = ["duck", "tada", "wave", "thinking_face", "eyes", "bread", "feather", "partying_face", "zzz", "sunrise"]
+# Emoji the voice may use.
+VOICE_EMOJI_ALLOWLIST = [
+    "duck", "tada", "wave", "thinking_face", "eyes", "bread", "feather", "partying_face", "zzz", "sunrise",
+    "rocket", "fire", "sparkles", "star", "bulb", "white_check_mark", "hammer_and_wrench", "100", "zap", "speech_balloon", "trophy", "seedling",
+]

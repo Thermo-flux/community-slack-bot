@@ -47,11 +47,11 @@ voice:
   model: ""
   messages_per_person_per_hour: 200  # the message limit. There is deliberately no spend cap
   person_gap_s: 5
-  reply_max_chars: 300
-  elaborate_max_chars: 700
-  max_tokens: 100
-  elaborate_max_tokens: 200
-  timeout_s: 5.0
+  reply_max_chars: 800
+  elaborate_max_chars: 1200
+  max_tokens: 350
+  elaborate_max_tokens: 600
+  timeout_s: 25.0
   # alert_tokens_per_day: 200000  # optional heads-up to the organizer channel, never stops anything
 
 rewards:

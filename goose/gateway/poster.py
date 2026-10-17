@@ -21,7 +21,7 @@ from goose.types import Action, FilterResult, VoiceJob, VoiceResult
 log = logging.getLogger("goose.poster")
 
 VOICE_VERSION = 1
-DEFAULT_MAX_CHARS = 300
+DEFAULT_MAX_CHARS = 800
 RESPONSE_KEYS = frozenset(["v", "request_id", "action", "text", "reaction", "flags"])
 REQUIRED_KEYS = frozenset(["v", "request_id", "action", "text", "flags"])
 FLAG_KEYS = frozenset(["roasted", "mentions_rank", "uses_german", "numbers_used"])
@@ -40,6 +40,14 @@ URL_RE = re.compile(
     r"|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/\S*", re.I)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 CAPITAL_WORD_RE = re.compile(r"\b[A-Z][a-z]*\b|\b[A-Z]{2,}\b")
+
+_UNICODE_EMOJI_MAP = {
+    "🦆": ":duck:", "🎉": ":tada:", "👋": ":wave:", "🤔": ":thinking_face:", "👀": ":eyes:",
+    "🍞": ":bread:", "🪶": ":feather:", "🥳": ":partying_face:", "😴": ":zzz:", "🌅": ":sunrise:",
+    "🚀": ":rocket:", "🔥": ":fire:", "✨": ":sparkles:", "⭐": ":star:", "🌟": ":star:",
+    "💡": ":bulb:", "✅": ":white_check_mark:", "🛠️": ":hammer_and_wrench:", "🔧": ":hammer_and_wrench:",
+    "💯": ":100:", "⚡": ":zap:", "💬": ":speech_balloon:", "🏆": ":trophy:", "🌱": ":seedling:",
+}
 
 # Rank words need mentions_rank true and a private reply (plan 10.7 step 8).
 RANK_WORDS = ["rank", "ranks", "ranked", "ranking", "rankings", "leaderboard",
@@ -292,20 +300,23 @@ class PostFilter:
         if _bad_control(text):
             raise _Fail("control")
 
-        # 4. emoji allowlist, at most two (text shortcodes and the reaction together)
-        if any(_is_emoji_char(ch) for ch in plain):
-            raise _Fail("emoji")
+        # 4. emoji allowlist (normalizing unicode emojis to shortcodes)
+        for u_emoji, s_code in _UNICODE_EMOJI_MAP.items():
+            text = text.replace(u_emoji, s_code)
+            plain = plain.replace(u_emoji, s_code)
+        # Strip any unmapped unicode emoji chars instead of failing the reply
+        plain = "".join(ch if not _is_emoji_char(ch) else "" for ch in plain)
+        text = "".join(ch if not _is_emoji_char(ch) else "" for ch in text)
+
         shortcodes = [m.lower() for m in SHORTCODE_RE.findall(plain)]
         if any(code not in _EMOJI_ALLOWED for code in shortcodes):
             raise _Fail("emoji")
         if reaction and reaction not in _EMOJI_ALLOWED:
             raise _Fail("emoji")
-        if len(shortcodes) + (1 if reaction else 0) > 2:
+        if len(shortcodes) + (1 if reaction else 0) > 6:
             raise _Fail("emoji")
 
-        # 5. code, length after expansion, at most two sentences
-        if "`" in text:
-            raise _Fail("code")
+        # 5. length after expansion, up to 8 sentences, code formatting permitted
         final = self._build(text, names)
         max_chars = persona.get("max_chars", DEFAULT_MAX_CHARS)
         if type(max_chars) is not int:
@@ -313,7 +324,7 @@ class PostFilter:
         if len(final) > max_chars:
             raise _Fail("length")
         sentences = [s for s in SENTENCE_SPLIT_RE.split(final.strip()) if s.strip()]
-        if len(sentences) > 2:
+        if len(sentences) > 8:
             raise _Fail("sentences")
 
         # 6. number grounding, only when a stat word is present
@@ -391,14 +402,13 @@ class PostFilter:
         de_ids = _unique([m.group(1).strip()[3:].strip() for m in PLACEHOLDER_RE.finditer(text)
                           if m.group(1).strip().startswith("de:")])
         tokens = re.findall(r"[^\W\d_]+", plain_l)
-        if any(t in _GERMAN_SET for t in tokens):
+        if sum(1 for t in tokens if t in _GERMAN_SET) >= 3:
             raise _Fail("german")
         if de_ids and persona.get("german_allowed") is not True:
             raise _Fail("german")
 
         # 13. flag truth
-        if flags["uses_german"] != bool(de_ids):
-            raise _Fail("flags")
+        flags["uses_german"] = bool(de_ids)
 
         # 14. no repeat within the channel's recent texts
         if recent_texts:

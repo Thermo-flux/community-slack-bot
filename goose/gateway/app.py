@@ -352,6 +352,12 @@ def build_handlers(ctx: Any, router: Any, client: Any, *, submit: Optional[Calla
             _post_canned_now(ctx, client, job, "queue_full")
             return
         job.created_ts = clock_fn()
+        # Immediate visual feedback: react with :eyes: within ~50ms so user knows Goose heard them
+        if job.channel and job.message_ts:
+            try:
+                client.reactions_add(channel=job.channel, name="eyes", timestamp=job.message_ts)
+            except Exception as exc:
+                log.debug("initial eyes reaction skipped: %s", exc)
         try:
             voice_fn(run_voice_job, ctx, client, job, clock_fn, admission)
         except BaseException:

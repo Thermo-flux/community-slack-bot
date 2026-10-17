@@ -229,7 +229,7 @@ def handle_request(body: Dict[str, Any], provider: Provider) -> Tuple[int, Dict[
     request_id = body["request_id"]
     try:
         result = provider.complete_usage(
-            build_messages(body), max_tokens_for(body, default=100, elaborate=200), timeout=4.0,
+            build_messages(body), max_tokens_for(body, default=350, elaborate=600), timeout=25.0,
             parts=build_parts(body))
         text, tokens_in, tokens_out = result.text, result.tokens_in, result.tokens_out
     except ProviderError as exc:
