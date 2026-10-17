@@ -105,9 +105,9 @@ def test_format_rank_card():
 
 def test_format_level_up_message():
     """Tests level-up announcement template."""
-    msg = leveling.format_level_up_message("U_HERO", 3, "⭐ Active Thinker")
+    msg = leveling.format_level_up_message("U_HERO", 3, "Active Thinker")
     assert "<@U_HERO>" in msg
-    assert "Level 3: ⭐ Active Thinker" in msg
+    assert "Level 3: Active Thinker" in msg
 
 
 def test_format_leaderboard():
@@ -120,7 +120,7 @@ def test_format_leaderboard():
     board = leveling.format_leaderboard(entries)
     assert "<@U1>" in board
     assert "<@U2>" in board
-    assert "Leaderboard" in board
+    assert "Top contributors" in board
 
     # Empty
     empty_board = leveling.format_leaderboard([])

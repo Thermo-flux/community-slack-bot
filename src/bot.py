@@ -22,6 +22,8 @@ from config import (
     SLACK_APP_TOKEN,
     CONFIG,
     WATCHED_CHANNELS,
+    get_configured_channels,
+    set_watched_channel_verified,
     AI_PROVIDER,
     AI_MODEL,
     DB_PATH
@@ -73,7 +75,7 @@ def check_tokens() -> bool:
         print("\n👉 QUICK FIX:")
         print("  1. Copy '.env.example' to '.env'")
         print("  2. Open '.env' and paste your Slack tokens.")
-        print("  3. For full step-by-step guidance, check 'HANDOVER_GUIDE.md'.")
+        print("  3. For setup guidance, check 'README.md'.")
         print("=" * 70 + "\n")
         return False
 
@@ -102,6 +104,27 @@ def main():
         logger.error(f"Failed to authenticate with Slack: {e}")
         print("\n⚠️ Authentication with Slack failed. Please verify your SLACK_BOT_TOKEN.\n")
         sys.exit(1)
+
+    configured_channels = get_configured_channels()
+    if not configured_channels:
+        logger.warning("No valid public channels are configured; channel handling is disabled (DMs remain enabled).")
+    for channel_id, expected_name in configured_channels:
+        try:
+            channel_info = app.client.conversations_info(channel=channel_id).get("channel", {})
+            if set_watched_channel_verified(
+                channel_id=channel_info.get("id", ""),
+                name=channel_info.get("name", ""),
+                is_private=channel_info.get("is_private"),
+            ):
+                logger.info("Verified public #%s channel.", expected_name)
+            else:
+                logger.error(
+                    "Configured channel did not resolve to public #%s; that channel is disabled.",
+                    expected_name,
+                )
+        except Exception as exc:
+            set_watched_channel_verified(channel_id, "", True)
+            logger.error("Could not verify public #%s (%s); that channel is disabled.", expected_name, type(exc).__name__)
 
     register_handlers(app, bot_user_id=bot_user_id)
 

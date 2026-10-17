@@ -4,8 +4,15 @@ Validates event routing, bot loop prevention, channel restrictions, and text cle
 """
 
 from unittest.mock import MagicMock, patch
+import json
+import pytest
 import handlers
 import config
+
+
+@pytest.fixture(autouse=True)
+def allow_test_channels(monkeypatch):
+    monkeypatch.setattr(handlers, "is_channel_watched", lambda channel_id: channel_id != "C_UNWATCHED")
 
 
 def test_clean_mention_text():
@@ -41,13 +48,71 @@ def test_bot_loop_prevention():
 
 def test_channel_restriction():
     """Verifies that channel filtering respects config settings."""
-    with patch("config.WATCHED_CHANNELS", ["C_ALLOWED"]):
+    with patch("config.OFFICIAL_LOADOUT_CHANNEL_ID", "C_ALLOWED"), \
+         patch("config.LOADOUT_DEVELOPMENT_CHANNEL_ID", "C_DEV"), \
+         patch("config.VERIFIED_CHANNEL_IDS", {"C_ALLOWED", "C_DEV"}):
         assert config.is_channel_watched("C_ALLOWED") is True
+        assert config.is_channel_watched("C_DEV") is True
         assert config.is_channel_watched("C_RANDOM") is False
+        assert config.is_channel_watched("D123456") is True
 
-    with patch("config.WATCHED_CHANNELS", ["*"]):
-        assert config.is_channel_watched("C_ANY") is True
-        assert config.is_channel_watched("C_SECRET") is True
+    with patch("config.OFFICIAL_LOADOUT_CHANNEL_ID", ""), \
+         patch("config.LOADOUT_DEVELOPMENT_CHANNEL_ID", ""), \
+         patch("config.VERIFIED_CHANNEL_IDS", set()):
+        assert config.is_channel_watched("C_ANY") is False
+        assert config.is_channel_watched("D123456") is True
+
+
+def test_both_channels_require_exact_public_name_verification(monkeypatch):
+    monkeypatch.setattr(config, "OFFICIAL_LOADOUT_CHANNEL_ID", "C_LOADOUT")
+    monkeypatch.setattr(config, "LOADOUT_DEVELOPMENT_CHANNEL_ID", "C_DEV")
+    monkeypatch.setattr(config, "VERIFIED_CHANNEL_IDS", set())
+    monkeypatch.setattr(config, "WATCHED_CHANNELS", [])
+
+    assert config.get_configured_channels() == [
+        ("C_LOADOUT", "loadout"),
+        ("C_DEV", "loadout-development"),
+    ]
+    assert not config.is_channel_watched("C_LOADOUT")
+    assert not config.is_channel_watched("C_DEV")
+
+    assert not config.set_watched_channel_verified("C_LOADOUT", "loadout-development", False)
+    assert not config.set_watched_channel_verified("C_DEV", "loadout", False)
+    assert not config.set_watched_channel_verified("C_LOADOUT", "loadout", True)
+    assert config.set_watched_channel_verified("C_LOADOUT", "loadout", False)
+    assert config.set_watched_channel_verified("C_DEV", "loadout-development", False)
+    assert config.is_channel_watched("C_LOADOUT")
+    assert config.is_channel_watched("C_DEV")
+    assert config.WATCHED_CHANNELS == ["C_LOADOUT", "C_DEV"]
+
+
+def test_duplicate_channel_ids_disable_both_public_channel_entries(monkeypatch):
+    monkeypatch.setattr(config, "OFFICIAL_LOADOUT_CHANNEL_ID", "C_SAME")
+    monkeypatch.setattr(config, "LOADOUT_DEVELOPMENT_CHANNEL_ID", "C_SAME")
+    assert config.get_configured_channels() == []
+
+
+def test_official_channel_verification_fails_closed_for_wrong_or_private_channels():
+    with patch("config.OFFICIAL_LOADOUT_CHANNEL_ID", "C_OFFICIAL"), \
+         patch("config.LOADOUT_DEVELOPMENT_CHANNEL_ID", "C_DEV"), \
+         patch("config.VERIFIED_CHANNEL_IDS", set()):
+        assert not config.set_official_loadout_channel_verified("C_OFFICIAL", "loadout-development", False)
+        assert config.is_channel_watched("C_OFFICIAL") is False
+        assert not config.set_official_loadout_channel_verified("C_OFFICIAL", "loadout", True)
+        assert config.is_channel_watched("C_OFFICIAL") is False
+        assert config.set_official_loadout_channel_verified("C_OFFICIAL", "loadout", False)
+        assert config.is_channel_watched("C_OFFICIAL") is True
+
+
+def test_slack_manifest_enables_one_to_one_dm_events_and_history():
+    manifest_path = config.PROJECT_DIR / "config" / "slack_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "channels:read" in manifest["oauth_config"]["scopes"]["bot"]
+    assert "channels:history" in manifest["oauth_config"]["scopes"]["bot"]
+    assert "im:history" in manifest["oauth_config"]["scopes"]["bot"]
+    assert "groups:history" not in manifest["oauth_config"]["scopes"]["bot"]
+    assert "message.im" in manifest["settings"]["event_subscriptions"]["bot_events"]
+    assert "message.groups" not in manifest["settings"]["event_subscriptions"]["bot_events"]
 
 
 def test_parse_card_request_targets():
@@ -91,33 +156,505 @@ def test_get_cards_response_for_targets():
         assert "No activity record found for 'ghost_user'" in unknown_reply
 
 
-def test_fetch_conversation_history():
-    """Verifies history extraction, exclude_ts, and bot turn identification."""
-    mock_client = MagicMock()
-    mock_client.conversations_replies.return_value = {
-        "messages": [
-            {"ts": "100.0", "user": "U_USER", "text": "hey goose-lee!"},
-            {"ts": "101.0", "user": "U_BOT", "text": "Hey! What's up? 🚀"},
-            {"ts": "102.0", "user": "U_USER", "text": "!level"},
-            {"ts": "103.0", "user": "U_USER", "text": "current question"}
-        ]
-    }
+def test_thread_context_reads_only_the_mentioned_thread_and_only_up_to_the_mention():
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
 
-    history = handlers.fetch_conversation_history(
-        client=mock_client,
-        channel_id="C1",
-        thread_ts="100.0",
+        def conversations_replies(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs.get("cursor") == "page-2":
+                return {
+                    "messages": [
+                        {"ts": "3.0", "user": "U_CURRENT", "text": "<@U_BOT> current question"},
+                        {"ts": "4.0", "user": "U_OTHER", "text": "later message"},
+                    ],
+                    "response_metadata": {"next_cursor": ""},
+                }
+            return {
+                "messages": [
+                    {"ts": "1.0", "user": "U_OTHER", "text": "thread root"},
+                    {"ts": "2.0", "user": "U_BOT", "text": "earlier Goose answer"},
+                ],
+                "response_metadata": {"next_cursor": "page-2"},
+            }
+
+    client = FakeClient()
+    context = handlers.fetch_mentioned_thread_context(
+        client=client,
+        channel_id="C_THREAD",
+        thread_ts="1.0",
+        current_ts="3.0",
         bot_user_id="U_BOT",
-        exclude_ts="103.0",
-        max_messages=5
     )
 
-    # Must contain 2 turns (skips !level command and excludes current ts 103.0)
-    assert len(history) == 2
-    assert history[0]["role"] == "user"
-    assert history[0]["content"] == "hey goose-lee!"
-    assert history[1]["role"] == "assistant"
-    assert history[1]["content"] == "Hey! What's up? 🚀"
+    assert context == [
+        {"role": "user", "content": "thread root"},
+        {"role": "assistant", "content": "earlier Goose answer"},
+    ]
+    assert len(client.calls) == 2
+    assert client.calls[0]["channel"] == "C_THREAD"
+    assert client.calls[0]["ts"] == "1.0"
+    assert client.calls[0]["limit"] == 200
+    assert client.calls[1]["cursor"] == "page-2"
+
+
+def test_thread_context_fails_closed_without_a_valid_message_timestamp():
+    client = MagicMock()
+    assert handlers.fetch_mentioned_thread_context(client, "C1", "ROOT", None, "U_BOT") == []
+    assert handlers._context_turns(
+        [{"ts": "5.0", "user": "U1", "text": "later context"}],
+        "U_BOT",
+        "not-a-timestamp",
+    ) == []
+    client.conversations_replies.assert_not_called()
+
+
+@pytest.mark.parametrize("current_ts", ["NaN", "Infinity", "-Infinity"])
+def test_thread_context_rejects_non_finite_current_timestamps(current_ts):
+    assert handlers._context_turns(
+        [{"ts": "5.0", "user": "U1", "text": "should not be sent"}],
+        "U_BOT",
+        current_ts,
+    ) == []
+
+
+@pytest.mark.parametrize("message_ts", ["NaN", "Infinity", "-Infinity"])
+def test_thread_context_rejects_non_finite_message_timestamps(message_ts):
+    assert handlers._context_turns(
+        [{"ts": message_ts, "user": "U1", "text": "should not be sent"}],
+        "U_BOT",
+        "5.0",
+    ) == []
+
+
+def test_channel_context_uses_recent_same_channel_messages_before_the_mention():
+    class FakeClient:
+        def __init__(self):
+            self.call = None
+
+        def conversations_history(self, **kwargs):
+            self.call = kwargs
+            return {
+                "messages": [
+                    {"ts": "3.0", "user": "U_CURRENT", "text": "<@U_BOT> hi"},
+                    {"ts": "4.0", "user": "U_FUTURE", "text": "future message"},
+                    {"ts": "1.0", "user": "U_OTHER", "text": "earlier channel context"},
+                ]
+            }
+
+    client = FakeClient()
+    context = handlers.fetch_mentioned_channel_context(client, "C1", "3.0", "U_BOT")
+
+    assert context == [{"role": "user", "content": "earlier channel context"}]
+    assert client.call == {
+        "channel": "C1",
+        "latest": "3.0",
+        "inclusive": True,
+        "limit": handlers.CHANNEL_CONTEXT_LIMIT,
+    }
+
+
+def test_ai_mention_queues_work_and_updates_the_placeholder():
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    class DeferredExecutor:
+        def __init__(self):
+            self.jobs = []
+
+        def submit(self, fn, *args, **kwargs):
+            self.jobs.append((fn, args, kwargs))
+            return None
+
+    class FakeSlack:
+        def __init__(self):
+            self.calls = []
+
+        def chat_postMessage(self, **kwargs):
+            self.calls.append(("post", kwargs))
+            return {"ok": True, "ts": "123.456"}
+
+        def chat_update(self, **kwargs):
+            self.calls.append(("update", kwargs))
+            return {"ok": True, "ts": kwargs["ts"]}
+
+        def conversations_replies(self, **kwargs):
+            raise AssertionError("unthreaded mentions must not fetch thread replies")
+
+        def conversations_history(self, **kwargs):
+            self.calls.append(("history", kwargs))
+            return {"messages": []}
+
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U123BOT")
+    executor = DeferredExecutor()
+    client = FakeSlack()
+    say = MagicMock()
+    body = {"event": {"channel": "C_ASYNC", "user": "U_ASYNC", "text": "<@U123BOT> who wins?", "ts": "100.0"}}
+    with patch("handlers._AI_REPLY_EXECUTOR", executor), \
+         patch("handlers.ai_service.generate_response", return_value="Bruce Lee wins.") as generate:
+        app.events["app_mention"](body=body, say=say, client=client)
+
+        assert generate.call_count == 0
+        assert len(executor.jobs) == 1
+        assert client.calls == []
+
+        fn, args, kwargs = executor.jobs[0]
+        fn(*args, **kwargs)
+
+    assert generate.call_count == 1
+    assert client.calls[0][0] == "post"
+    assert client.calls[1][0] == "history"
+    assert client.calls[-1][0] == "update"
+    assert client.calls[-1][1]["ts"] == "123.456"
+    assert client.calls[-1][1]["text"] == "Bruce Lee wins."
+    assert generate.call_args.kwargs["user_message"] == "who wins?"
+    assert generate.call_args.kwargs["context_messages"] == []
+    assert handlers._is_known_bot_thread("C_ASYNC", "123.456")
+    with handlers._BOT_THREADS_LOCK:
+        handlers._BOT_THREADS.pop(("C_ASYNC", "123.456"), None)
+    say.assert_not_called()
+
+
+def test_app_mentions_in_unwatched_channels_do_not_fetch_context_or_queue_ai():
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U123BOT")
+    with patch("handlers.is_channel_watched", return_value=False), \
+         patch("handlers._queue_ai_reply") as queue:
+        app.events["app_mention"](
+            body={"event": {"channel": "C_UNWATCHED", "user": "U1", "text": "<@U123BOT> hi"}},
+            say=MagicMock(),
+            client=MagicMock(),
+        )
+
+    queue.assert_not_called()
+
+
+def test_thread_mention_uses_its_full_thread_context():
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    class DeferredExecutor:
+        def __init__(self):
+            self.jobs = []
+
+        def submit(self, fn, *args, **kwargs):
+            self.jobs.append((fn, args, kwargs))
+
+    class FakeSlack:
+        def __init__(self):
+            self.thread_calls = []
+
+        def chat_postMessage(self, **kwargs):
+            return {"ok": True, "ts": "placeholder-ts"}
+
+        def chat_update(self, **kwargs):
+            return {"ok": True, "ts": kwargs["ts"]}
+
+        def conversations_replies(self, **kwargs):
+            self.thread_calls.append(kwargs)
+            return {
+                "messages": [
+                    {"ts": "1.0", "user": "U_OTHER", "text": "Should we use SQLite?"},
+                    {"ts": "1.5", "user": "U_OTHER", "text": "The app is single-user."},
+                    {"ts": "2.0", "user": "U_CURRENT", "text": "<@U123BOT> what about that?"},
+                ]
+            }
+
+        def conversations_history(self, **kwargs):
+            raise AssertionError("thread mentions must use the thread, not channel history")
+
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U123BOT")
+    executor = DeferredExecutor()
+    client = FakeSlack()
+    say = MagicMock()
+    body = {"event": {
+        "channel": "C_THREAD",
+        "user": "U_CURRENT",
+        "text": "<@U123BOT> what about that?",
+        "ts": "2.0",
+        "thread_ts": "1.0",
+    }}
+    with patch("handlers._AI_REPLY_EXECUTOR", executor), \
+         patch("handlers.ai_service.generate_response", return_value="SQLite works here.") as generate:
+        app.events["app_mention"](body=body, say=say, client=client)
+        fn, args, kwargs = executor.jobs[0]
+        fn(*args, **kwargs)
+
+    assert client.thread_calls == [{"channel": "C_THREAD", "ts": "1.0", "limit": 200}]
+    assert generate.call_args.kwargs["context_messages"] == [
+        {"role": "user", "content": "Should we use SQLite?"},
+        {"role": "user", "content": "The app is single-user."},
+    ]
+
+
+def test_unmentioned_messages_never_trigger_an_ai_reply():
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U123BOT")
+    client = MagicMock()
+    with patch("handlers.check_cooldown", return_value=(False, 0)), \
+         patch("handlers.increment_message_count_only"), \
+         patch("handlers._queue_ai_reply") as queue:
+        app.events["message"](
+            body={"event": {"channel": "C1", "user": "U1", "text": "The build finished."}},
+            client=client,
+            say=MagicMock(),
+        )
+
+    queue.assert_not_called()
+    client.conversations_history.assert_not_called()
+    client.conversations_replies.assert_not_called()
+
+
+def test_dm_messages_are_directly_addressed_without_a_name_mention():
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U123BOT")
+    with patch("handlers._queue_ai_reply") as queue:
+        app.events["message"](
+            body={"event": {"channel": "D123", "channel_type": "im", "user": "U1", "text": "Can you help with xoxb-123456789-abcdef?"}},
+            client=MagicMock(),
+            say=MagicMock(),
+        )
+
+    queue.assert_called_once()
+    assert queue.call_args.kwargs["message"] == "Can you help with [REDACTED_SLACK_TOKEN]?"
+
+
+def test_bot_opened_threads_accept_followups_without_rechecking_slack_history():
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U123BOT")
+    handlers._remember_bot_thread("C_THREAD", "ROOT_TS")
+    client = MagicMock()
+    try:
+        with patch("handlers._queue_ai_reply") as queue:
+            app.events["message"](
+                body={"event": {"channel": "C_THREAD", "user": "U1", "text": "One more question", "ts": "2.0", "thread_ts": "ROOT_TS"}},
+                client=client,
+                say=MagicMock(),
+            )
+
+        queue.assert_called_once()
+        assert queue.call_args.kwargs["context_thread_ts"] == "ROOT_TS"
+        client.conversations_replies.assert_not_called()
+    finally:
+        with handlers._BOT_THREADS_LOCK:
+            handlers._BOT_THREADS.pop(("C_THREAD", "ROOT_TS"), None)
+
+
+def test_explicit_opinion_questions_can_trigger_an_ai_reply_without_a_mention():
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    assert handlers.is_explicit_opinion_request("What's your opinion on this design, Goose?")
+    assert handlers.is_explicit_opinion_request("Goose, your opinion?")
+    assert handlers.is_explicit_opinion_request("What's your opinion, goose?")
+    assert handlers.is_explicit_opinion_request("Who's better, you or orry?")
+    assert handlers.is_explicit_opinion_request("Is Goose Lee better than Orry?")
+    assert handlers.is_explicit_opinion_request("Do you think Goose's answer is right?")
+    assert not handlers.is_explicit_opinion_request("The design has two options.")
+    assert not handlers.is_explicit_opinion_request("What's your opinion on this design?")
+    assert not handlers.is_explicit_opinion_request("Your opinion?")
+    assert not handlers.is_explicit_opinion_request("What do you think about the goose sculpture?")
+
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U123BOT")
+    with patch("handlers._queue_ai_reply") as queue, \
+         patch("handlers.check_cooldown", return_value=(False, 0)), \
+         patch("handlers.increment_message_count_only"):
+        app.events["message"](
+            body={"event": {"channel": "C1", "user": "U1", "text": "What's your opinion on this design, Goose?", "ts": "3.0"}},
+            client=MagicMock(),
+            say=MagicMock(),
+        )
+
+    queue.assert_called_once()
+    assert queue.call_args.kwargs["message"] == "What's your opinion on this design, Goose?"
+    assert queue.call_args.kwargs["current_ts"] == "3.0"
+
+
+def test_full_ai_queue_replies_immediately_instead_of_silently_dropping_the_mention():
+    class FullSlots:
+        def acquire(self, blocking=False):
+            return False
+
+    say = MagicMock()
+    with patch("handlers._AI_REPLY_SLOTS", FullSlots()):
+        handlers._queue_ai_reply(MagicMock(), say, "C1", "U1", "who wins?", None, None, None, None)
+
+    say.assert_called_once()
+    assert "try again in a moment" in say.call_args.kwargs["text"]
+
+
+def test_ambiguous_placeholder_update_failure_does_not_create_a_duplicate_reply():
+    client = MagicMock()
+    client.chat_update.side_effect = TimeoutError("response may have been lost")
+
+    delivered = handlers._deliver_ai_reply(client, "C1", None, "123.456", "Final answer")
+
+    assert delivered is False
+    client.chat_update.assert_called_once()
+    client.chat_postMessage.assert_not_called()
+
+
+def test_fallback_final_reply_registers_its_thread_and_queue_key():
+    client = MagicMock()
+    client.chat_postMessage.return_value = {"ok": True, "ts": "FINAL_TS"}
+    queue_key = ("C1", "user", "U1")
+    try:
+        assert handlers._deliver_ai_reply(
+            client, "C1", None, "", "Final answer", queue_key=queue_key
+        )
+        assert handlers._is_known_bot_thread("C1", "FINAL_TS")
+        assert handlers._bot_thread_queue_key("C1", "FINAL_TS") == queue_key
+    finally:
+        with handlers._BOT_THREADS_LOCK:
+            handlers._BOT_THREADS.pop(("C1", "FINAL_TS"), None)
+            handlers._BOT_THREAD_QUEUE_KEYS.pop(("C1", "FINAL_TS"), None)
+
+
+def test_replies_for_the_same_thread_are_dispatched_in_message_order():
+    class DeferredExecutor:
+        def __init__(self):
+            self.jobs = []
+
+        def submit(self, fn, *args, **kwargs):
+            self.jobs.append((fn, args, kwargs))
+
+    class Slots:
+        def acquire(self, blocking=False):
+            return True
+
+        def release(self):
+            return None
+
+    executor = DeferredExecutor()
+    slots = Slots()
+    processed = []
+
+    def run_job(_client, _channel, _user, message, *_rest):
+        processed.append(message)
+
+    with patch("handlers._AI_REPLY_EXECUTOR", executor), \
+         patch("handlers._AI_REPLY_SLOTS", slots), \
+         patch("handlers._run_ai_reply", side_effect=run_job):
+        for text in ("first", "second"):
+            handlers._queue_ai_reply(
+                MagicMock(), MagicMock(), "C1", "U1", text,
+                "ROOT", "ROOT", "2.0", "U_BOT",
+            )
+
+        assert len(executor.jobs) == 1
+        fn, args, kwargs = executor.jobs[0]
+        fn(*args, **kwargs)
+
+    assert processed == ["first", "second"]
+
+
+def test_followup_to_a_new_placeholder_stays_on_the_original_user_queue():
+    class DeferredExecutor:
+        def __init__(self):
+            self.jobs = []
+
+        def submit(self, fn, *args, **kwargs):
+            self.jobs.append((fn, args, kwargs))
+
+    class Slots:
+        def acquire(self, blocking=False):
+            return True
+
+        def release(self):
+            return None
+
+    executor = DeferredExecutor()
+    slots = Slots()
+    processed = []
+    user_queue = ("C1", "user", "U1")
+    handlers._remember_bot_thread("C1", "PLACEHOLDER", user_queue)
+    try:
+        with patch("handlers._AI_REPLY_EXECUTOR", executor), \
+             patch("handlers._AI_REPLY_SLOTS", slots), \
+             patch("handlers._run_ai_reply", side_effect=lambda *args: processed.append(args[3])):
+            handlers._queue_ai_reply(
+                MagicMock(), MagicMock(), "C1", "U1", "root request",
+                None, None, "1.0", "U_BOT",
+            )
+            handlers._queue_ai_reply(
+                MagicMock(), MagicMock(), "C1", "U1", "thread followup",
+                "PLACEHOLDER", "PLACEHOLDER", "2.0", "U_BOT",
+            )
+
+            assert len(executor.jobs) == 1
+            fn, args, kwargs = executor.jobs[0]
+            fn(*args, **kwargs)
+
+        assert processed == ["root request", "thread followup"]
+    finally:
+        with handlers._BOT_THREADS_LOCK:
+            handlers._BOT_THREADS.pop(("C1", "PLACEHOLDER"), None)
+            handlers._BOT_THREAD_QUEUE_KEYS.pop(("C1", "PLACEHOLDER"), None)
 
 
 def test_is_addressed_to_bot():
@@ -129,11 +666,14 @@ def test_is_addressed_to_bot():
     assert handlers.is_addressed_to_bot("hey goose, how are you?", bot_user_id="U_BOT") is True
     assert handlers.is_addressed_to_bot("@gooselee what's up", bot_user_id="U_BOT") is True
     assert handlers.is_addressed_to_bot("yo duck: look at this", bot_user_id="U_BOT") is True
+    assert handlers.is_addressed_to_bot("goose-lee can you check this?", bot_user_id="U_BOT") is True
+    assert handlers.is_addressed_to_bot("@gooselee what's up", bot_user_id="U_BOT") is True
     # DMs are always addressed to the bot
     assert handlers.is_addressed_to_bot("anything at all", bot_user_id="U_BOT", is_dm=True) is True
     # Random channel chatter between other members is NOT addressed to the bot
     assert handlers.is_addressed_to_bot("I am working on the database", bot_user_id="U_BOT", is_dm=False) is False
     assert handlers.is_addressed_to_bot("hey netic did you see the PR?", bot_user_id="U_BOT", is_dm=False) is False
+    assert handlers.is_addressed_to_bot("What do you think about the goose sculpture?", bot_user_id="U_BOT") is False
 
 
 def test_clean_bot_addressing():

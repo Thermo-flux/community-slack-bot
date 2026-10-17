@@ -16,18 +16,18 @@ def get_level_tiers() -> List[Dict[str, Any]]:
     tiers = CONFIG.get("level_tiers", [])
     if not tiers:
         tiers = [
-            {"level": 1, "min_xp": 0, "title": "🐣 Hatchling"},
-            {"level": 2, "min_xp": 10, "title": "🐥 Duckling"},
-            {"level": 3, "min_xp": 25, "title": "🦆 Paddler"},
-            {"level": 4, "min_xp": 50, "title": "🌾 Dabbler"},
-            {"level": 5, "min_xp": 100, "title": "🦆 Mallard"},
-            {"level": 6, "min_xp": 155, "title": "🌊 Diver"},
-            {"level": 7, "min_xp": 235, "title": "🧭 Pond Scout"},
-            {"level": 8, "min_xp": 330, "title": "🪶 Flock Leader"},
-            {"level": 9, "min_xp": 445, "title": "🎖️ Wing Commander"},
-            {"level": 10, "min_xp": 580, "title": "👑 Golden Beak"},
-            {"level": 11, "min_xp": 735, "title": "📜 Pond Elder"},
-            {"level": 12, "min_xp": 890, "title": "✨ Head Duck"}
+            {"level": 1, "min_xp": 0, "title": "Hatchling"},
+            {"level": 2, "min_xp": 10, "title": "Duckling"},
+            {"level": 3, "min_xp": 25, "title": "Paddler"},
+            {"level": 4, "min_xp": 50, "title": "Dabbler"},
+            {"level": 5, "min_xp": 100, "title": "Mallard"},
+            {"level": 6, "min_xp": 155, "title": "Diver"},
+            {"level": 7, "min_xp": 235, "title": "Pond Scout"},
+            {"level": 8, "min_xp": 330, "title": "Flock Leader"},
+            {"level": 9, "min_xp": 445, "title": "Wing Commander"},
+            {"level": 10, "min_xp": 580, "title": "Golden Beak"},
+            {"level": 11, "min_xp": 735, "title": "Pond Elder"},
+            {"level": 12, "min_xp": 890, "title": "Head Duck"}
         ]
     return sorted(tiers, key=lambda t: t["min_xp"])
 
@@ -142,15 +142,15 @@ def format_rank_card(user_data: Dict[str, Any]) -> str:
 
 def format_level_up_message(user_id: str, new_level: int, new_title: str) -> str:
     templates = CONFIG.get("templates", {})
-    template = templates.get("level_up", "🎉 *LEVEL UP!* Congratulations <@{user_id}>! Level {level}: {title}!")
+    template = templates.get("level_up", ":sparkles: Level up, <@{user_id}>. You reached Level {level}: {title}. Nice work.")
     return template.format(user_id=user_id, level=new_level, title=new_title)
 
 
 def format_leaderboard(leaderboard_entries: List[Dict[str, Any]]) -> str:
     templates = CONFIG.get("templates", {})
-    header = templates.get("leaderboard_header", "🏆 *Top Contributors Leaderboard* 🏆")
+    header = templates.get("leaderboard_header", "Top contributors")
     row_template = templates.get("leaderboard_row", "*{rank}.* <@{user_id}> — Level {level} (*{title}*) • `{xp} XP`")
-    empty_template = templates.get("leaderboard_empty", "No contributions recorded yet. Start chatting to earn XP! 🚀")
+    empty_template = templates.get("leaderboard_empty", "No contributions recorded yet. Start chatting to earn XP.")
 
     if not leaderboard_entries:
         return f"{header}\n\n{empty_template}"

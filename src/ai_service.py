@@ -2,8 +2,8 @@
 ==============================================================================
 AI REASONING SERVICE MODULE (src/ai_service.py)
 ==============================================================================
-Provides intelligent, multi-turn AI reasoning powered by DeepSeek / OpenAI / Gemini
-with automatic conversation memory, thinking scratchpad cleanup, and live community stats.
+Provides concise, single-message multi-provider replies with bounded response reads
+and Slack shortcode normalization.
 ==============================================================================
 """
 
@@ -11,6 +11,8 @@ import os
 import re
 import json
 import logging
+import time
+import zlib
 import requests
 from typing import Optional, List, Dict, Any
 from config import (
@@ -18,11 +20,100 @@ from config import (
     AI_API_KEY,
     AI_MODEL,
     AI_BASE_URL,
+    AI_TIMEOUT_SECONDS,
+    AI_MAX_OUTPUT_TOKENS,
+    AI_MAX_REPLY_CHARS,
     SOUL_PATH,
     CONFIG
 )
 
 logger = logging.getLogger("SlackBotAI")
+
+SLACK_EMOJI_CODES = {
+    "🎉": ":sparkles:", "⭐": ":sparkles:", "🚀": ":rocket:", "💡": ":sparkles:", "🔥": ":rocket:",
+    "✨": ":sparkles:", "👏": ":sparkles:", "🏆": ":sparkles:", "🌱": ":sparkles:", "🌿": ":sparkles:",
+    "🦆": ":duck:", "👀": ":eyes:", "🍞": ":duck:", "👋": ":duck:", "🤔": ":eyes:",
+    "⚡": ":rocket:", "❤️": ":sparkles:", "✅": ":sparkles:", "⚠️": ":eyes:",
+}
+_UNCONVERTED_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2300-\u23FF\u2600-\u27BF\uFE0E\uFE0F\u200D]")
+_SLACK_SHORTCODE_RE = re.compile(r":[a-z0-9_+-]+:", re.IGNORECASE)
+MAX_AI_RESPONSE_BYTES = 1024 * 1024
+
+
+def _limit_reply(text: str, max_chars: Optional[int] = None) -> str:
+    if max_chars is None:
+        max_chars = AI_MAX_REPLY_CHARS
+    if len(text) <= max_chars:
+        return text
+    clipped = text[:max_chars - 1]
+    boundary = max(clipped.rfind("."), clipped.rfind("!"), clipped.rfind("?"))
+    if boundary >= max_chars // 2:
+        return clipped[:boundary + 1].rstrip()
+    return clipped.rsplit(" ", 1)[0].rstrip() + "…"
+
+
+def _post_ai_json(endpoint: str, payload: Dict[str, Any], headers: Dict[str, str],
+                  timeout: float) -> Dict[str, Any]:
+    """Make one request and bound the whole JSON-body read, including slow trickle responses."""
+    deadline = time.monotonic() + timeout
+    request_headers = dict(headers)
+    request_headers["Accept-Encoding"] = "identity"
+    response = requests.post(endpoint, json=payload, headers=request_headers, timeout=timeout, stream=True)
+    try:
+        if response.status_code != 200:
+            raise RuntimeError("AI API status %s" % response.status_code)
+        raw = getattr(response, "raw", None)
+        reader = getattr(raw, "read", None)
+        if not callable(reader):
+            raise RuntimeError("AI response body is not stream-readable")
+
+        encoding = str(response.headers.get("Content-Encoding") or "identity").lower()
+        if encoding not in ("", "identity", "gzip", "deflate"):
+            raise RuntimeError("Unsupported compressed AI response")
+        decoder = None
+        if encoding == "gzip":
+            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        elif encoding == "deflate":
+            decoder = zlib.decompressobj()
+        content_length = response.headers.get("Content-Length")
+        if content_length and int(content_length) > MAX_AI_RESPONSE_BYTES:
+            raise RuntimeError("AI response too large")
+        socket_obj = getattr(
+            getattr(getattr(getattr(raw, "_fp", None), "fp", None), "raw", None),
+            "_sock",
+            None,
+        )
+        body = bytearray()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise requests.exceptions.Timeout("AI response deadline exceeded")
+            if socket_obj is not None:
+                socket_obj.settimeout(remaining)
+            try:
+                chunk = reader(4096, decode_content=False)
+            except TypeError:
+                chunk = reader(4096)
+            if not chunk:
+                break
+            if decoder is None:
+                decoded = chunk
+            else:
+                decoded = decoder.decompress(chunk, MAX_AI_RESPONSE_BYTES + 1 - len(body))
+                if decoder.unconsumed_tail:
+                    raise RuntimeError("AI response too large")
+            body.extend(decoded)
+            if len(body) > MAX_AI_RESPONSE_BYTES:
+                raise RuntimeError("AI response too large")
+            if time.monotonic() > deadline:
+                raise requests.exceptions.Timeout("AI response deadline exceeded")
+        if decoder is not None:
+            body.extend(decoder.flush())
+        if len(body) > MAX_AI_RESPONSE_BYTES:
+            raise RuntimeError("AI response too large")
+        return json.loads(body.decode("utf-8"))
+    finally:
+        response.close()
 
 
 def clean_ai_output(text: str) -> str:
@@ -59,7 +150,31 @@ def clean_ai_output(text: str) -> str:
     text = re.sub(r"\*\*\*([^*\n]+)\*\*\*", r"*_\1_*", text)
     text = re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", text)
 
-    return text.strip()
+    text = text.strip()
+    for symbol, shortcode in SLACK_EMOJI_CODES.items():
+        text = text.replace(symbol, shortcode)
+    text = _UNCONVERTED_EMOJI_RE.sub("", text)
+    emoji_cfg = CONFIG.get("emoji_settings", {})
+    allowed = {
+        str(code).lower()
+        for code in emoji_cfg.get("allowed_emojis", [":duck:", ":eyes:", ":sparkles:", ":rocket:"])
+        if _SLACK_SHORTCODE_RE.fullmatch(str(code))
+    }
+    emoji_limit = 0 if str(emoji_cfg.get("frequency", "low")).lower() == "none" else 1
+    used = 0
+
+    def keep_allowed_shortcode(match):
+        nonlocal used
+        shortcode = match.group(0).lower()
+        if shortcode not in allowed or used >= emoji_limit:
+            return ""
+        used += 1
+        return shortcode
+
+    text = _SLACK_SHORTCODE_RE.sub(keep_allowed_shortcode, text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"[ \t]+([,.;!?])", r"\1", text)
+    return _limit_reply(text.strip())
 
 
 def load_soul_prompt() -> str:
@@ -71,63 +186,51 @@ def load_soul_prompt() -> str:
             logger.warning(f"Could not read soul.md: {e}. Using fallback persona.")
 
     return (
-        "You are goose-lee, a friendly, encouraging Slack bot that tracks "
-        "user contributions, rewards positive ideas, and keeps conversations constructive."
+        "You are Goose Lee, a practical duck and developer peer. Give short, direct answers with dry wit. "
+        "Skip forced hype, catchphrases, and emoji. If asked to choose between Jackie Chan and Bruce Lee, pick Bruce Lee as a joke."
     )
 
 
 def build_system_instructions() -> str:
     base_soul = load_soul_prompt()
     emoji_cfg = CONFIG.get("emoji_settings", {})
-    frequency = emoji_cfg.get("frequency", "moderate")
-    allowed_emojis = emoji_cfg.get("allowed_emojis", ["🎉", "⭐", "🚀", "💡", "🔥", "✨"])
+    frequency = str(emoji_cfg.get("frequency", "low")).lower()
+    allowed_emojis = emoji_cfg.get("allowed_emojis", [":duck:", ":eyes:", ":sparkles:", ":rocket:"])
+    if frequency == "none" or not allowed_emojis:
+        emoji_rule = "- Do not use emoji."
+    else:
+        emoji_rule = (
+            "- Most replies use none; at most one Slack shortcode from this list: "
+            f"{' '.join(allowed_emojis)}"
+        )
 
     emoji_instruction = (
         f"\n\nEMOJI RULES:\n"
-        f"- Target emoji frequency: {frequency}\n"
-        f"- Only use these approved emojis where appropriate: {' '.join(allowed_emojis)}\n"
-        f"- Keep responses concise and formatted cleanly with Slack Markdown (*bold*, _italic_, `code`).\n"
-        f"- Be direct, casual, and natural. NEVER output your internal reasoning, scratchpad, or <think> tags."
+        f"{emoji_rule}\n"
+        f"- Keep responses direct and conversational, at most 2 short sentences and {AI_MAX_REPLY_CHARS} characters.\n"
+        f"- Do not add forced hype, catchphrases, or a joke to every reply.\n"
+        f"- Never output internal reasoning, scratchpad, or <think> tags."
     )
 
-    # Inject live community data and repo links
-    community_context = ""
-    try:
-        from database import get_all_users_summary
-        from leveling import get_level_tiers
-
-        tiers = get_level_tiers()
-        tier_lines = "\n".join([f"  • Level {t['level']}: {t['min_xp']} XP ({t['title']})" for t in tiers])
-
-        users_summary = get_all_users_summary(limit=20)
-        user_lines = []
-        for u in users_summary:
-            alias_part = f" (aliases: {u['aliases']})" if u.get("aliases") else ""
-            user_lines.append(
-                f"  • <@{u['user_id']}>{alias_part}: Level {u['level']}, {u['xp']} XP, {u['message_count']} contributions"
-            )
-
-        community_context = (
-            f"\n\nLIVE COMMUNITY & PROJECT CONTEXT:\n"
-            f"- Bot Identity: goose-lee (@gooselee), resident hacker and cheerleader in Hack Club's `#loadout-development` channel.\n"
-            f"- GitHub Repository: <https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>. Drop this link ONLY if someone asks for our bot's code or repository! When someone talks about their own project, ask for their project link instead.\n"
-            f"- Anyone in the channel is allowed to view anyone's level, points, rank, or card. This is public, non-sensitive data.\n"
-            f"- Level Progression Tiers:\n{tier_lines}\n"
-            f"- Current Tracked Members:\n" + ("\n".join(user_lines) if user_lines else "  • No activity recorded yet.") + "\n"
-            f"- If a user asks for anyone's card, level, XP, or ranking (such as for Netic, Jerry, or others), you have access to the data above. Accurately report their stats and celebrate their progress!\n"
-            f"- Speak naturally, punchy, with casual builder slang ('solid W', 'let's cook', 'my bad', 'Ja, ja') and high builder energy. Never output internal thought tags or robotic corporate disclaimers."
-        )
-    except Exception as e:
-        logger.warning(f"Could not load live community context into AI prompt: {e}")
-
-    return base_soul + emoji_instruction + community_context
+    privacy_and_persona_rules = (
+        "\n\nCONTEXT AND PRIVACY:\n"
+        "- Answer direct mentions, direct messages, clear Goose name calls, and follow-ups in a thread you opened.\n"
+        "- For other untagged channel messages, answer only an explicit opinion question that names Goose, Goose Lee, or Orry. Stay silent on ordinary messages.\n"
+        "- Use supplied context from the same channel or the mentioned thread only to understand the current request.\n"
+        "- Do not bring up unrelated messages or answer an older question unless the current mention refers to it or asks your opinion.\n"
+        "- If needed context is missing, ask the user to include it in a message that mentions you.\n"
+        "- If asked who is better, Jackie Chan or Bruce Lee, pick Bruce Lee as your brief opinion. If asked whether you or Orry is better, pick yourself playfully without insulting Orry.\n"
+        "- For account-security questions, distinguish evidence from guesses; a commit author email alone does not prove account access.\n"
+        "- Do not invent live facts, member activity, or scores; use local commands for tracked stats."
+    )
+    return base_soul + privacy_and_persona_rules + emoji_instruction
 
 
 def get_offline_fallback(user_id: str) -> str:
     templates = CONFIG.get("templates", {})
     fallback = templates.get(
         "ai_offline_fallback",
-        "Hey <@{user_id}>! 👋 I received your message! My AI reasoning engine is currently in standby mode, but I am actively monitoring this channel and recording your activity points! 🚀"
+        "Hi <@{user_id}>. I can't reach my answer service right now. Try again shortly."
     )
     return fallback.format(user_id=user_id)
 
@@ -135,26 +238,17 @@ def get_offline_fallback(user_id: str) -> str:
 def build_messages_payload(
     system_prompt: str,
     user_message: str,
-    conversation_history: Optional[List[Dict[str, str]]] = None
+    context_messages: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict[str, str]]:
-    """Builds an OpenAI-compatible messages array with system prompt and conversation history."""
+    """Build from the direct mention and context selected for that channel or thread."""
     messages = [{"role": "system", "content": system_prompt}]
-
-    if conversation_history:
-        for turn in conversation_history:
+    if context_messages:
+        for turn in context_messages:
             role = turn.get("role")
             content = (turn.get("content") or "").strip()
             if role in ("user", "assistant") and content:
-                # Skip duplicate of the current user message if it is already at the end
-                if role == "user" and content == user_message.strip():
-                    continue
                 messages.append({"role": role, "content": content})
-
-    # Add current user prompt
-    clean_prompt = user_message.strip()
-    if not messages or messages[-1].get("content") != clean_prompt:
-        messages.append({"role": "user", "content": clean_prompt})
-
+    messages.append({"role": "user", "content": user_message.strip()})
     return messages
 
 
@@ -162,61 +256,58 @@ def generate_response(
     user_id: str,
     user_message: str,
     channel_id: Optional[str] = None,
-    conversation_history: Optional[List[Dict[str, str]]] = None,
-    timeout: int = 35
+    context_messages: Optional[List[Dict[str, str]]] = None,
+    timeout: Optional[float] = None
 ) -> str:
-    """Generates an intelligent AI response with multi-turn conversation memory."""
+    """Generate a reply from the direct mention and messages in its own thread, if any."""
     if not AI_API_KEY or AI_PROVIDER == "mock":
         return get_offline_fallback(user_id)
 
     system_prompt = build_system_instructions()
-    messages = build_messages_payload(system_prompt, user_message, conversation_history)
+    messages = build_messages_payload(system_prompt, user_message, context_messages)
+    request_timeout = AI_TIMEOUT_SECONDS if timeout is None else timeout
 
     try:
         if AI_PROVIDER == "gemini":
-            return _call_gemini(messages, system_prompt, timeout)
+            return _call_gemini(messages, system_prompt, request_timeout)
         elif AI_PROVIDER in ("openai", "openrouter", "custom"):
-            return _call_openai_compatible(messages, timeout)
+            return _call_openai_compatible(messages, request_timeout)
         elif AI_PROVIDER == "anthropic":
-            return _call_anthropic(messages, system_prompt, timeout)
+            return _call_anthropic(messages, system_prompt, request_timeout)
         else:
             return get_offline_fallback(user_id)
     except Exception as e:
-        logger.error(f"Error calling AI provider '{AI_PROVIDER}': {e}. Returning safe fallback.")
+        logger.error("AI provider request failed (%s). Returning safe fallback.", type(e).__name__)
         return get_offline_fallback(user_id)
 
 
-def _call_gemini(messages: List[Dict[str, str]], system_prompt: str, timeout: int) -> str:
+def _call_gemini(messages: List[Dict[str, str]], system_prompt: str, timeout: float) -> str:
     model = AI_MODEL or "gemini-1.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={AI_API_KEY}"
 
     contents = []
-    for m in messages:
-        if m["role"] == "system":
+    for message in messages:
+        if message["role"] == "system":
             continue
-        role = "user" if m["role"] == "user" else "model"
-        contents.append({"role": role, "parts": [{"text": m["content"]}]})
+        role = "user" if message["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": message["content"]}]})
 
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": contents,
-        "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.7}
+        "generationConfig": {"maxOutputTokens": AI_MAX_OUTPUT_TOKENS, "temperature": 0.7},
     }
-    response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=timeout)
-    if response.status_code == 200:
-        candidates = response.json().get("candidates", [])
-        if candidates:
-            parts = candidates[0].get("content", {}).get("parts", [])
-            if parts:
-                text = parts[0].get("text") or ""
-                cleaned = clean_ai_output(text)
-                if cleaned:
-                    return cleaned
-        return "I'm right here! Feel free to ask a question, share an idea, or check your rank with `/level`! 🚀"
-    raise RuntimeError(f"Gemini API status {response.status_code}")
+    data = _post_ai_json(url, payload, {"Content-Type": "application/json"}, timeout)
+    candidates = data.get("candidates", [])
+    if candidates:
+        parts = candidates[0].get("content", {}).get("parts", [])
+        if parts:
+            cleaned = clean_ai_output(parts[0].get("text") or "")
+            if cleaned:
+                return cleaned
+    return "I could not get a useful answer. Try asking another way."
 
-
-def _call_openai_compatible(messages: List[Dict[str, str]], timeout: int = 35) -> str:
+def _call_openai_compatible(messages: List[Dict[str, str]], timeout: Optional[float] = None) -> str:
     model = AI_MODEL
     base_url = AI_BASE_URL
     if AI_PROVIDER == "openrouter":
@@ -231,68 +322,45 @@ def _call_openai_compatible(messages: List[Dict[str, str]], timeout: int = 35) -
     payload = {
         "model": model,
         "messages": messages,
-        "max_tokens": 2048,
-        "temperature": 0.7
+        "max_tokens": AI_MAX_OUTPUT_TOKENS,
+        "temperature": 0.7,
     }
-
-    # Pass reasoning_effort="low" for reasoning models like Grok 4.7 to minimize token cost and latency
     reasoning_effort = os.getenv("AI_REASONING_EFFORT", "low").strip().lower()
     if reasoning_effort:
         payload["reasoning_effort"] = reasoning_effort
 
-    last_err = None
-    for attempt in range(2):
-        try:
-            response = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
-            if response.status_code == 200:
-                choices = response.json().get("choices", [])
-                if choices:
-                    msg = choices[0].get("message", {})
-                    # CRUCIAL: Only extract actual user-facing content. Never leak raw internal reasoning!
-                    raw_content = msg.get("content") or ""
-                    cleaned = clean_ai_output(raw_content)
-                    if cleaned:
-                        return cleaned
+    data = _post_ai_json(
+        endpoint,
+        payload,
+        headers,
+        AI_TIMEOUT_SECONDS if timeout is None else timeout,
+    )
+    choices = data.get("choices", [])
+    if choices:
+        message = choices[0].get("message", {})
+        cleaned = clean_ai_output(message.get("content") or "")
+        if cleaned:
+            return cleaned
+    return "I could not get a useful answer. Try asking another way."
 
-                return "I'm right here! Feel free to ask a question, share an idea, or check your rank with `/level`! 🚀"
-            raise RuntimeError(f"OpenAI API status {response.status_code}: {response.text}")
-        except requests.exceptions.Timeout as e:
-            last_err = e
-            logger.warning(f"AI API timed out (attempt {attempt+1}/2). Retrying...")
-            continue
-        except Exception as e:
-            last_err = e
-            break
-
-    if last_err:
-        raise last_err
-    return "I'm right here! Feel free to ask a question, share an idea, or check your rank with `/level`! 🚀"
-
-
-def _call_anthropic(messages: List[Dict[str, str]], system_prompt: str, timeout: int) -> str:
+def _call_anthropic(messages: List[Dict[str, str]], system_prompt: str, timeout: float) -> str:
     model = AI_MODEL or "claude-3-5-haiku-20241022"
     url = "https://api.anthropic.com/v1/messages"
     headers = {"x-api-key": AI_API_KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
-
-    anthropic_messages = []
-    for m in messages:
-        if m["role"] == "system":
-            continue
-        anthropic_messages.append({"role": m["role"], "content": m["content"]})
-
+    turns = [
+        {"role": message["role"], "content": message["content"]}
+        for message in messages if message["role"] != "system"
+    ]
     payload = {
         "model": model,
         "system": system_prompt,
-        "messages": anthropic_messages,
-        "max_tokens": 2048
+        "messages": turns,
+        "max_tokens": AI_MAX_OUTPUT_TOKENS,
     }
-    response = requests.post(url, json=payload, headers=headers, timeout=timeout)
-    if response.status_code == 200:
-        content = response.json().get("content", [])
-        if content and content[0].get("type") == "text":
-            text = content[0].get("text") or ""
-            cleaned = clean_ai_output(text)
-            if cleaned:
-                return cleaned
-        return "I'm right here! Keep up the great discussion! 🚀"
-    raise RuntimeError(f"Anthropic API status {response.status_code}")
+    data = _post_ai_json(url, payload, headers, timeout)
+    content = data.get("content", [])
+    if content and content[0].get("type") == "text":
+        cleaned = clean_ai_output(content[0].get("text") or "")
+        if cleaned:
+            return cleaned
+    return "I could not get a useful answer. Try asking another way."
