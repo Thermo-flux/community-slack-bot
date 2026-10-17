@@ -16,6 +16,7 @@ import logging
 import math
 import re
 import threading
+import time
 from typing import Dict, List, Optional
 from slack_bolt import App
 
@@ -67,9 +68,22 @@ _BOT_NAME_PREFIX_RE = re.compile(
     r"(?:\s*[,!:]\s*|\s+(?=(?:can|could|would|will|what|who|how|help|please|check|look|tell|show|explain|do|is|are|your)\b)|\s*$)",
     re.IGNORECASE,
 )
+_GREETING_WORDS = r"(?:hey|yo|hi|hello|sup|oi|ok|okay)"
+_GOOSE_NAME = r"(?:goose(?:-|\s)?lee|goose|duck)"
+_GOOSE_STRONG_NAME = r"(?:goose(?:-|\s)?lee|goose)"
+# A name counts as a call only in vocative positions: at the start of the
+# message, after a greeting, as @goose, after a comma, or followed by
+# punctuation. A bare mid-sentence mention (e.g. "that goose is ...") is NOT a call.
 _GOOSE_CALL_RE = re.compile(
-    r"(?:^|[,\s])(?:(?:hey|yo|hi|hello|sup|oi)\s+)?@?(?:goose(?:-|\s)?lee|goose|duck)\b"
-    r"(?:\s*[,!:?]|\s+(?=(?:can|could|would|will|what|who|how|help|please|check|look|tell|show|explain|do|is|are|your|you|any|come|give)\b)|\s*$)",
+    r"(?:"
+    rf"^\s*(?:{_GREETING_WORDS}\s+)?@?{_GOOSE_STRONG_NAME}\b"
+    rf"|^\s*(?:{_GREETING_WORDS}\s+)?@?duck\b\s*[?!,:]"
+    rf"|(?:^|\s){_GREETING_WORDS}\s+@?{_GOOSE_NAME}\b"
+    rf"|(?:^|\s|,)@{_GOOSE_NAME}\b"
+    rf"|,\s*@?{_GOOSE_NAME}\b"
+    rf"|@?{_GOOSE_NAME}\b\s*[?!]"
+    rf"|@?{_GOOSE_NAME}\b\s*,"
+    r")",
     re.IGNORECASE,
 )
 _CARD_KEYWORD_WORD_RE = re.compile(r"\b(?:card|level|rank|stats|xp|points)\b", re.IGNORECASE)
@@ -88,6 +102,38 @@ _BOT_THREADS_LOCK = threading.Lock()
 _AI_REPLY_QUEUES: Dict = {}
 _AI_REPLY_ACTIVE_KEYS = set()
 _AI_REPLY_QUEUE_LOCK = threading.Lock()
+
+_REPLY_TRIGGER_TTL_SECONDS = 120.0
+_REPLY_TRIGGER_CACHE_SIZE = 1024
+_RECENT_REPLY_TRIGGERS: "OrderedDict[tuple, float]" = OrderedDict()
+_RECENT_REPLY_TRIGGERS_LOCK = threading.Lock()
+
+
+def _claim_reply_trigger(channel_id: Optional[str], message_ts: Optional[str]) -> bool:
+    """
+    Claim a (channel, message) trigger so the same message yields exactly one AI reply.
+
+    Slack can deliver the same message as both an app_mention and a message event,
+    and can redeliver on reconnect. Returns True for the first claim, False for a
+    duplicate seen within the TTL window.
+    """
+    if not message_ts:
+        return True
+    key = (str(channel_id or ""), str(message_ts))
+    now = time.monotonic()
+    with _RECENT_REPLY_TRIGGERS_LOCK:
+        while _RECENT_REPLY_TRIGGERS:
+            oldest_key, claimed_at = next(iter(_RECENT_REPLY_TRIGGERS.items()))
+            if now - claimed_at > _REPLY_TRIGGER_TTL_SECONDS:
+                _RECENT_REPLY_TRIGGERS.popitem(last=False)
+            else:
+                break
+        if key in _RECENT_REPLY_TRIGGERS:
+            return False
+        _RECENT_REPLY_TRIGGERS[key] = now
+        while len(_RECENT_REPLY_TRIGGERS) > _REPLY_TRIGGER_CACHE_SIZE:
+            _RECENT_REPLY_TRIGGERS.popitem(last=False)
+    return True
 
 
 def clean_mention_text(text: str) -> str:
@@ -553,6 +599,8 @@ def _queue_ai_reply(
     current_ts: Optional[str],
     bot_user_id: Optional[str],
 ) -> None:
+    if not _claim_reply_trigger(channel_id, current_ts):
+        return
     if not _AI_REPLY_SLOTS.acquire(blocking=False):
         try:
             say(

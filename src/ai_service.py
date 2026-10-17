@@ -204,6 +204,25 @@ def _format_markdown_outside_code(segment: str) -> str:
     return segment
 
 
+_CRINGE_PHRASE_RE = re.compile(
+    r"(?i)\b(?:no\s+cap|big\s+w|solid\s+w|let'?s\s+cook|based|goated|cooked|"
+    r"fr|ngl|lowkey|highkey|clean\s+ship|duck\s+pride|welcome\s+to\s+the\s+pond|"
+    r"pond|crumbs?|quak\w*|honk)\b"
+)
+
+
+def strip_cringe_phrases(text: str) -> str:
+    """Deterministic safety net: remove slang and duck-lore phrases the persona bans."""
+    if not text:
+        return ""
+    cleaned = _CRINGE_PHRASE_RE.sub(" ", text)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
+    cleaned = re.sub(r"([,.!?])(?:\s*[,!?.])+", r"\1", cleaned)
+    cleaned = re.sub(r"^[,!?\s]+", "", cleaned)
+    return cleaned.strip()
+
+
 def clean_ai_output(text: str) -> str:
     """
     Cleans AI output thoroughly without corrupting code blocks:
@@ -245,6 +264,9 @@ def clean_ai_output(text: str) -> str:
         for idx, part in enumerate(parts)
     ]
     text = "".join(formatted_parts).strip()
+
+    # 4b. Deterministically scrub banned slang and duck-lore phrasing.
+    text = strip_cringe_phrases(text)
 
     # 5. Normalize Unicode emojis to Slack shortcodes
     for symbol, shortcode in SLACK_EMOJI_CODES.items():
@@ -447,7 +469,7 @@ def build_system_instructions(knowledge: str = "") -> str:
         "- For account-security questions, distinguish evidence from guesses; a commit author email alone does not prove account access.\n"
         "- Do not invent live facts, member activity, or scores; use local commands for tracked stats.\n"
         "- Never roast, mock, tease, or criticize other members, by name or implication. Keep any dry edge pointed at yourself, at bugs, or at messy code, never at a person.\n"
-        "- Avoid slang and catchphrases (Big W, solid W, let's cook, based, no cap, fire). Keep the voice plain and understated, with only rare, mild flavor."
+        "- Never use slang, catchphrases, puns, or roleplay. Banned examples: Big W, solid W, let's cook, based, no cap, fire, W, L, cooked, goated. Never talk about ponds, bread, crumbs, or duck pride. Keep the voice plain and understated with no flavor bits.\n"
     )
 
     assistance_limits = (
@@ -603,7 +625,7 @@ def _call_gemini(messages: List[Dict[str, str]], system_prompt: str, timeout: fl
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": contents,
-        "generationConfig": {"maxOutputTokens": AI_MAX_OUTPUT_TOKENS, "temperature": 0.7},
+        "generationConfig": {"maxOutputTokens": AI_MAX_OUTPUT_TOKENS, "temperature": 0.4},
     }
     data = _post_ai_json(url, payload, headers, timeout)
     candidates = data.get("candidates") or []
@@ -652,7 +674,7 @@ def _call_openai_compatible(messages: List[Dict[str, str]], timeout: Optional[fl
         "model": model,
         "messages": messages,
         "max_tokens": AI_MAX_OUTPUT_TOKENS,
-        "temperature": 0.7,
+        "temperature": 0.4,
     }
     reasoning_effort = os.getenv("AI_REASONING_EFFORT", "low").strip().lower()
     if reasoning_effort and _supports_reasoning_effort(AI_PROVIDER, model):

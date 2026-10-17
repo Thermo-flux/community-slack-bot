@@ -4,6 +4,7 @@ Validates event routing, bot loop prevention, channel restrictions, and text cle
 """
 
 from unittest.mock import MagicMock, patch
+from collections import OrderedDict
 import json
 import pytest
 import handlers
@@ -14,6 +15,7 @@ import config
 def allow_test_channels(monkeypatch):
     monkeypatch.setattr(handlers, "is_channel_watched", lambda channel_id: channel_id != "C_UNWATCHED")
     monkeypatch.setattr(config, "WATCHED_CHANNELS_OVERRIDE", None, raising=False)
+    monkeypatch.setattr(handlers, "_RECENT_REPLY_TRIGGERS", OrderedDict())
 
 
 def test_clean_mention_text():
@@ -576,11 +578,13 @@ def test_unprompted_opinion_questions_do_not_trigger_a_reply():
     queue.assert_not_called()
 
 
-def test_name_calls_anywhere_in_a_message_are_addressed():
-    """Calling Goose by name mid-sentence still reaches it, but passing mentions do not."""
+def test_name_calls_in_vocative_positions_are_addressed():
+    """Calling Goose by name as a vocative reaches it, but passing mentions do not."""
     assert handlers.is_addressed_to_bot("what do you think, goose?", bot_user_id="U_BOT")
     assert handlers.is_addressed_to_bot("yo goose can you check this", bot_user_id="U_BOT")
-    assert handlers.is_addressed_to_bot("thoughts on this goose", bot_user_id="U_BOT")
+    assert handlers.is_addressed_to_bot("goose can you check this", bot_user_id="U_BOT")
+    assert not handlers.is_addressed_to_bot("thoughts on this goose", bot_user_id="U_BOT")
+    assert not handlers.is_addressed_to_bot("that goose is roasting you back bro", bot_user_id="U_BOT")
     assert not handlers.is_addressed_to_bot("the goose sculpture is huge", bot_user_id="U_BOT")
     assert not handlers.is_addressed_to_bot("I fed the ducks today", bot_user_id="U_BOT")
 
@@ -598,13 +602,41 @@ def test_name_calls_anywhere_in_a_message_are_addressed():
     handlers.register_handlers(app, bot_user_id="U123BOT")
     with patch("handlers._queue_ai_reply") as queue:
         app.events["message"](
-            body={"event": {"channel": "C1", "user": "U1", "text": "thoughts on this goose", "ts": "4.0"}},
+            body={"event": {"channel": "C1", "user": "U1", "text": "goose can you check this", "ts": "4.0"}},
             client=MagicMock(),
             say=MagicMock(),
         )
 
     queue.assert_called_once()
-    assert queue.call_args.kwargs["message"] == "thoughts on this goose"
+    assert queue.call_args.kwargs["message"] == "can you check this"
+
+
+def test_duplicate_deliveries_of_one_message_yield_a_single_reply():
+    """A message delivered as both app_mention and message events must reply only once."""
+    class Slots:
+        def acquire(self, blocking=False):
+            return True
+
+        def release(self):
+            return None
+
+    class DeferredExecutor:
+        def __init__(self):
+            self.jobs = []
+
+        def submit(self, fn, *args, **kwargs):
+            self.jobs.append((fn, args, kwargs))
+
+    executor = DeferredExecutor()
+    with patch("handlers._AI_REPLY_EXECUTOR", executor), \
+         patch("handlers._AI_REPLY_SLOTS", Slots()), \
+         patch("handlers._run_ai_reply") as run:
+        for _ in range(2):
+            handlers._queue_ai_reply(
+                MagicMock(), MagicMock(), "C_DEDUPE", "U1", "hi", None, None, "9000.1", "U_BOT",
+            )
+
+    assert len(executor.jobs) == 1
 
 
 def test_full_ai_queue_replies_immediately_instead_of_silently_dropping_the_mention():
@@ -672,10 +704,10 @@ def test_replies_for_the_same_thread_are_dispatched_in_message_order():
     with patch("handlers._AI_REPLY_EXECUTOR", executor), \
          patch("handlers._AI_REPLY_SLOTS", slots), \
          patch("handlers._run_ai_reply", side_effect=run_job):
-        for text in ("first", "second"):
+        for text, ts in (("first", "2.0"), ("second", "3.0")):
             handlers._queue_ai_reply(
                 MagicMock(), MagicMock(), "C1", "U1", text,
-                "ROOT", "ROOT", "2.0", "U_BOT",
+                "ROOT", "ROOT", ts, "U_BOT",
             )
 
         assert len(executor.jobs) == 1
