@@ -13,6 +13,7 @@ import config
 @pytest.fixture(autouse=True)
 def allow_test_channels(monkeypatch):
     monkeypatch.setattr(handlers, "is_channel_watched", lambda channel_id: channel_id != "C_UNWATCHED")
+    monkeypatch.setattr(config, "WATCHED_CHANNELS_OVERRIDE", None, raising=False)
 
 
 def test_clean_mention_text():
@@ -25,31 +26,43 @@ def test_clean_mention_text():
 def test_bot_loop_prevention():
     """
     Crucial Test: Verifies that messages sent by bots (bot_id or subtype='bot_message')
-    are ignored so bots never trigger infinite loops replying to each other.
+    are ignored by both message and app_mention listeners so bots never trigger infinite loops.
     """
-    mock_app = MagicMock()
-    handlers.register_handlers(mock_app, bot_user_id="U_BOT")
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
 
-    # Find the registered 'message' listener
-    message_handler = None
-    for call in mock_app.event.call_args_list:
-        if call[0][0] == "message":
-            # The decorator is called, let's inspect the wrapped function
-            pass
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
 
-    # Alternatively, test the filtering logic directly
-    body_with_bot_id = {"event": {"bot_id": "B123", "user": "U_OTHER_BOT", "text": "I am a bot"}}
-    body_with_subtype = {"event": {"subtype": "bot_message", "user": "U_OTHER_BOT", "text": "Automated alert"}}
+        def command(self, _name):
+            return lambda fn: fn
 
-    # Verify these would be filtered
-    assert bool(body_with_bot_id["event"].get("bot_id")) is True
-    assert body_with_subtype["event"].get("subtype") == "bot_message"
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U_BOT")
+
+    body_with_bot_id = {"event": {"channel": "C1", "bot_id": "B123", "user": "U_OTHER_BOT", "text": "<@U_BOT> I am a bot"}}
+    body_with_subtype = {"event": {"channel": "C1", "subtype": "bot_message", "user": "U_OTHER_BOT", "text": "<@U_BOT> Automated alert"}}
+    body_from_self = {"event": {"channel": "C1", "user": "U_BOT", "text": "<@U_BOT> self message"}}
+
+    say = MagicMock()
+    client = MagicMock()
+    with patch("handlers._queue_ai_reply") as queue, \
+         patch("handlers._record_private_activity") as record:
+        for payload in (body_with_bot_id, body_with_subtype, body_from_self):
+            app.events["message"](body=payload, client=client, say=say)
+            app.events["app_mention"](body=payload, say=say, client=client)
+
+    queue.assert_not_called()
+    record.assert_not_called()
+    say.assert_not_called()
 
 
 def test_channel_restriction():
     """Verifies that channel filtering respects config settings."""
     with patch("config.OFFICIAL_LOADOUT_CHANNEL_ID", "C_ALLOWED"), \
          patch("config.LOADOUT_DEVELOPMENT_CHANNEL_ID", "C_DEV"), \
+         patch("config.WATCHED_CHANNELS_OVERRIDE", None), \
          patch("config.VERIFIED_CHANNEL_IDS", {"C_ALLOWED", "C_DEV"}):
         assert config.is_channel_watched("C_ALLOWED") is True
         assert config.is_channel_watched("C_DEV") is True
@@ -58,6 +71,7 @@ def test_channel_restriction():
 
     with patch("config.OFFICIAL_LOADOUT_CHANNEL_ID", ""), \
          patch("config.LOADOUT_DEVELOPMENT_CHANNEL_ID", ""), \
+         patch("config.WATCHED_CHANNELS_OVERRIDE", None), \
          patch("config.VERIFIED_CHANNEL_IDS", set()):
         assert config.is_channel_watched("C_ANY") is False
         assert config.is_channel_watched("D123456") is True
@@ -66,6 +80,7 @@ def test_channel_restriction():
 def test_both_channels_require_exact_public_name_verification(monkeypatch):
     monkeypatch.setattr(config, "OFFICIAL_LOADOUT_CHANNEL_ID", "C_LOADOUT")
     monkeypatch.setattr(config, "LOADOUT_DEVELOPMENT_CHANNEL_ID", "C_DEV")
+    monkeypatch.setattr(config, "WATCHED_CHANNELS_OVERRIDE", None)
     monkeypatch.setattr(config, "VERIFIED_CHANNEL_IDS", set())
     monkeypatch.setattr(config, "WATCHED_CHANNELS", [])
 
@@ -89,12 +104,14 @@ def test_both_channels_require_exact_public_name_verification(monkeypatch):
 def test_duplicate_channel_ids_disable_both_public_channel_entries(monkeypatch):
     monkeypatch.setattr(config, "OFFICIAL_LOADOUT_CHANNEL_ID", "C_SAME")
     monkeypatch.setattr(config, "LOADOUT_DEVELOPMENT_CHANNEL_ID", "C_SAME")
+    monkeypatch.setattr(config, "WATCHED_CHANNELS_OVERRIDE", None)
     assert config.get_configured_channels() == []
 
 
 def test_official_channel_verification_fails_closed_for_wrong_or_private_channels():
     with patch("config.OFFICIAL_LOADOUT_CHANNEL_ID", "C_OFFICIAL"), \
          patch("config.LOADOUT_DEVELOPMENT_CHANNEL_ID", "C_DEV"), \
+         patch("config.WATCHED_CHANNELS_OVERRIDE", None), \
          patch("config.VERIFIED_CHANNEL_IDS", set()):
         assert not config.set_official_loadout_channel_verified("C_OFFICIAL", "loadout-development", False)
         assert config.is_channel_watched("C_OFFICIAL") is False
@@ -104,15 +121,47 @@ def test_official_channel_verification_fails_closed_for_wrong_or_private_channel
         assert config.is_channel_watched("C_OFFICIAL") is True
 
 
+def test_watched_channels_override_defines_the_exact_watch_set(monkeypatch):
+    """Explicit WATCHED_CHANNELS entries are authoritative and may be private channels."""
+    monkeypatch.setattr(config, "WATCHED_CHANNELS_OVERRIDE", ["C0C68G3K0AJ"])
+    monkeypatch.setattr(config, "VERIFIED_CHANNEL_IDS", set())
+    monkeypatch.setattr(config, "WATCHED_CHANNELS", [])
+
+    assert config.get_configured_channels() == [("C0C68G3K0AJ", None)]
+    assert not config.is_channel_watched("C0C68G3K0AJ")
+    # Explicitly listed channels are watched even when they are private,
+    # but they are only enabled after a successful verification lookup.
+    assert config.set_watched_channel_verified("C0C68G3K0AJ", "loadout-development", True)
+    assert config.is_channel_watched("C0C68G3K0AJ")
+    assert config.is_channel_watched("D123456")
+    assert not config.is_channel_watched("C_OTHER")
+    assert config.WATCHED_CHANNELS == ["C0C68G3K0AJ"]
+
+    # A failed lookup must still be able to force-disable an explicitly configured channel.
+    config.disable_watched_channel("C0C68G3K0AJ")
+    assert not config.is_channel_watched("C0C68G3K0AJ")
+    assert config.WATCHED_CHANNELS == []
+
+
+def test_parse_watched_channels_rejects_wildcards_and_invalid_ids():
+    assert config._parse_watched_channels("") is None
+    assert config._parse_watched_channels("   ") is None
+    assert config._parse_watched_channels("C123ABC456") == ["C123ABC456"]
+    assert config._parse_watched_channels("C123, C456 C123") == ["C123", "C456"]
+    assert config._parse_watched_channels("*") is None
+    assert config._parse_watched_channels("D123 bad!") is None
+
+
 def test_slack_manifest_enables_one_to_one_dm_events_and_history():
     manifest_path = config.PROJECT_DIR / "config" / "slack_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert "channels:read" in manifest["oauth_config"]["scopes"]["bot"]
     assert "channels:history" in manifest["oauth_config"]["scopes"]["bot"]
+    assert "groups:history" in manifest["oauth_config"]["scopes"]["bot"]
     assert "im:history" in manifest["oauth_config"]["scopes"]["bot"]
-    assert "groups:history" not in manifest["oauth_config"]["scopes"]["bot"]
+    assert "message.channels" in manifest["settings"]["event_subscriptions"]["bot_events"]
+    assert "message.groups" in manifest["settings"]["event_subscriptions"]["bot_events"]
     assert "message.im" in manifest["settings"]["event_subscriptions"]["bot_events"]
-    assert "message.groups" not in manifest["settings"]["event_subscriptions"]["bot_events"]
 
 
 def test_parse_card_request_targets():
@@ -677,10 +726,31 @@ def test_is_addressed_to_bot():
 
 
 def test_clean_bot_addressing():
-    """Verifies stripping of bot names and mention tags."""
+    """Verifies stripping of bot names and mention tags while preserving other user mentions."""
     assert handlers.clean_bot_addressing("hey goose: can you help?") == "can you help?"
     assert handlers.clean_bot_addressing("@gooselee check this out") == "check this out"
     assert handlers.clean_bot_addressing("<@U_BOT> what is the score?", bot_user_id="U_BOT") == "what is the score?"
+    assert handlers.clean_bot_addressing("!level <@U0C7811N0CT>", bot_user_id="U_BOT") == "!level <@U0C7811N0CT>"
+    assert handlers.clean_bot_addressing("<@U_BOT> what did <@U0C7811N0CT> build?", bot_user_id="U_BOT") == "what did <@U0C7811N0CT> build?"
+
+
+def test_parse_card_request_does_not_hijack_normal_sentences_with_substrings():
+    """Ensures words like 'explain' (contains 'xp') or 'level design' are not hijacked as card requests."""
+    assert handlers.parse_card_request_targets(
+        "<@U_BOT> can you explain what <@U0C7811N0CT> built?",
+        caller_id="U_CALLER",
+        bot_user_id="U_BOT",
+    ) is None
+    assert handlers.parse_card_request_targets(
+        "level design is hard to balance",
+        caller_id="U_CALLER",
+        bot_user_id="U_BOT",
+    ) is None
+    assert handlers.parse_card_request_targets(
+        "!level <@U0C7811N0CT>",
+        caller_id="U_CALLER",
+        bot_user_id="U_BOT",
+    ) == ["<@U0C7811N0CT>"]
 
 
 def test_sanitize_context_text():

@@ -124,6 +124,11 @@ def test_clean_ai_output():
     assert ai_service.clean_ai_output(scratchpad) == "Keep up the great work! :rocket:"
     assert "🔥" not in ai_service.clean_ai_output("A small fire 🔥")
 
+    code_block = "Use this:\n```python\n# comment\ndef fn(**kwargs):\n    pass\n```"
+    cleaned_code = ai_service.clean_ai_output(code_block)
+    assert "# comment" in cleaned_code
+    assert "**kwargs" in cleaned_code
+
 
 def test_ai_replies_are_capped_at_configured_character_limit():
     with patch("ai_service.AI_MAX_REPLY_CHARS", 40):

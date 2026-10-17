@@ -2,11 +2,7 @@
 .env
 .env.*
 !.env.example
-voice.env
-voice.env.*
-!voice.env.example
 data/
-backups/
 *.db
 *.db-wal
 *.db-shm
@@ -17,14 +13,13 @@ backups/
 .venv/
 venv/
 tests/
-docs/
-deploy/
-tools/
+deployment/
 __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
 
-# documentation: only the README is useful inside an image
+# documentation: keep README and config/soul.md inside the image
 *.md
 !README.md
+!config/soul.md

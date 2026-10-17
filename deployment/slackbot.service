@@ -1,14 +1,19 @@
 [Unit]
-Description=Community Slack Bot
-After=network.target
+Description=Community Slack Bot (Goose Lee)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/opt/community_slack_bot
-ExecStart=/opt/community_slack_bot/.venv/bin/python /opt/community_slack_bot/run_bot.py
+WorkingDirectory=/opt/community-slack-bot
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=-/opt/community-slack-bot/.env
+ExecStart=/opt/community-slack-bot/.venv/bin/python /opt/community-slack-bot/run_bot.py
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

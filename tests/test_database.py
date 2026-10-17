@@ -136,6 +136,16 @@ def test_user_aliases_and_resolution(temp_db):
     assert uid_none is None
     assert udata_none is None
 
+    # Words starting with U/W must NOT be mistaken for Slack IDs or create ghost rows
+    uid_word, udata_word = database.resolve_user("understand", db_path=temp_db)
+    assert uid_word is None
+    assert udata_word is None
+    assert database.get_user("UNDERSTAND", db_path=temp_db) is None
+
+    # Reject malicious prompt-injection alias strings and protect seeded aliases
+    assert database.register_user_alias("bad\ninjection", "U999", db_path=temp_db) is False
+    assert database.register_user_alias("netic", "U_ATTACKER", db_path=temp_db) is False
+
 
 def test_get_all_users_summary(temp_db):
     """Verifies summary contains member stats and concatenated aliases."""

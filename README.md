@@ -74,6 +74,6 @@ Goose Lee uses the 10 most recent messages from the same conversation for an unt
 
 The Slack manifest enables one-to-one DMs with `message.im` and `im:history`. Reinstall the app after applying manifest scope changes.
 
-Channel replies are enabled only in the configured public `#loadout` and `#loadout-development` channels after Slack confirms each ID resolves to its exact channel name at startup. Set `OFFICIAL_LOADOUT_CHANNEL_ID` or `LOADOUT_DEVELOPMENT_CHANNEL_ID` to override an ID for another workspace. Direct messages remain enabled.
+Channel replies are enabled only in the configured public `#loadout` and `#loadout-development` channels after Slack confirms each ID resolves to its exact channel name at startup. Set `OFFICIAL_LOADOUT_CHANNEL_ID` or `LOADOUT_DEVELOPMENT_CHANNEL_ID` to override an ID for another workspace. Setting `WATCHED_CHANNELS` to a comma-separated list of channel IDs overrides the pair and watches exactly those channels (public or private). Direct messages remain enabled.
 
 For deployment, see `deployment/`, `Dockerfile`, and `docker-compose.yml`. Copy `.env.example` and set the Slack tokens and channel IDs before starting the bot.
