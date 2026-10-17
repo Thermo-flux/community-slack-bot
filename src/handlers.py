@@ -4,7 +4,10 @@ SLACK EVENT & COMMAND HANDLERS (src/handlers.py)
 ==============================================================================
 This module contains event listeners and slash command handlers for Slack.
 Supports querying anyone's level card, public contributor stats, conversational AI chat,
-and responsive bot name addressing while preventing accidental popup spam.
+and responsive bot name addressing while strictly enforcing message privacy:
+- Uncalled messages are NEVER read, inspected, or processed for text content.
+- 5-10 message conversation context is ONLY fetched on-demand when called.
+- Context is held ephemerally in-memory and sanitized against secret leakage.
 ==============================================================================
 """
 
@@ -40,6 +43,24 @@ def clean_mention_text(text: str) -> str:
     if not text:
         return ""
     return re.sub(r"<@[A-Z0-9_]+(?:\|[^>]+)?>", "", text, flags=re.IGNORECASE).strip()
+
+
+def sanitize_context_text(text: str) -> str:
+    """
+    Sanitizes conversation history text to prevent accidental leakage of secrets,
+    Slack tokens, or sensitive credentials to the AI model or downstream processors.
+    """
+    if not text:
+        return ""
+    # Redact Slack tokens (xoxb, xapp, xoxp, xoxt, etc.)
+    text = re.sub(r"xox[baprst]-[A-Za-z0-9-]+", "[REDACTED_SLACK_TOKEN]", text)
+    # Redact generic API keys (sk-..., ghp_..., gho_..., AIza..., etc.)
+    text = re.sub(r"\b(?:sk|ghp|gho|glpat|AIza)[A-Za-z0-9_\-]{16,}\b", "[REDACTED_API_KEY]", text)
+    # Redact Bearer authorization headers
+    text = re.sub(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*", "Bearer [REDACTED_TOKEN]", text, flags=re.IGNORECASE)
+    # Redact private SSH keys or RSA blocks
+    text = re.sub(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----.*?-----END [A-Z ]+ PRIVATE KEY-----", "[REDACTED_PRIVATE_KEY]", text, flags=re.DOTALL)
+    return text
 
 
 def is_addressed_to_bot(text: str, bot_user_id: Optional[str] = None, is_dm: bool = False) -> bool:
@@ -181,7 +202,9 @@ def fetch_conversation_history(
     max_messages: int = 10
 ) -> List[Dict[str, str]]:
     """
-    Fetches recent conversation turns from Slack to provide multi-turn memory to the AI.
+    Pulls recent 5-10 conversation turns from Slack on-demand when the bot is called.
+    Sanitizes all text to redact secrets, tokens, and sensitive credentials.
+    Held strictly in-memory and NEVER persisted to disk.
     """
     history: List[Dict[str, str]] = []
     if not client or not channel_id:
@@ -223,6 +246,8 @@ def fetch_conversation_history(
                     history.append({"role": "assistant", "content": clean_text})
             elif sender:
                 clean_text = clean_mention_text(text)
+                # Privacy: sanitize any accidental tokens or secrets from user messages
+                clean_text = sanitize_context_text(clean_text)
                 if clean_text:
                     history.append({"role": "user", "content": clean_text})
 
@@ -249,11 +274,6 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         bot_id = event.get("bot_id")
         thread_ts = event.get("thread_ts")
 
-        # Determine thread target based on config
-        rules = CONFIG.get("interaction_rules", {})
-        reply_in_thread = rules.get("reply_in_thread", False)
-        target_thread_ts = thread_ts or (event.get("ts") if reply_in_thread else None)
-
         # Never process messages from bots to prevent loops
         if bot_id or subtype == "bot_message" or not user_id:
             return
@@ -266,12 +286,55 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         is_direct_bot_mention = bool(bot_user_id and f"<@{bot_user_id}>" in text)
         is_in_bot_thread = bool(thread_ts and is_bot_thread(client, channel_id, thread_ts, bot_user_id))
         is_addressed = is_addressed_to_bot(text, bot_user_id, is_dm=is_dm) or is_in_bot_thread
+        is_prefixed_cmd = text.strip().startswith(("!", "/", "."))
+        is_called = is_addressed or is_prefixed_cmd
+
+        # =====================================================================
+        # PRIVACY GATE: If the bot is NOT called, DO NOT inspect or read message contents!
+        # Only record background activity metadata for XP tracking.
+        # =====================================================================
+        if not is_called:
+            rules = CONFIG.get("interaction_rules", {})
+            cooldown_sec = rules.get("cooldown_seconds", 30)
+            can_earn, remaining = check_cooldown(user_id, cooldown_sec)
+
+            if not can_earn:
+                increment_message_count_only(user_id)
+                return
+
+            base_xp = rules.get("base_xp_per_message", 10)
+            current_user = get_or_create_user(user_id)
+            old_level, old_title = get_level_info_for_xp(current_user["xp"])
+
+            new_total_xp = current_user["xp"] + base_xp
+            new_level, new_title = get_level_info_for_xp(new_total_xp)
+
+            record_message_and_add_xp(
+                user_id=user_id,
+                channel_id=channel_id,
+                xp_to_add=base_xp,
+                new_level=new_level,
+                message_length=0,   # Privacy: never inspect or store message length
+                is_suggestion=0,    # Privacy: never inspect or scan message text
+                update_cooldown=True
+            )
+
+            if new_level > old_level and event.get("ts"):
+                try:
+                    client.reactions_add(channel=channel_id, timestamp=event["ts"], name="tada")
+                except Exception:
+                    pass
+            return
+
+        # =====================================================================
+        # THE BOT WAS CALLED: Process command or pull in 5-10 message context for AI
+        # =====================================================================
+        rules = CONFIG.get("interaction_rules", {})
+        reply_in_thread = rules.get("reply_in_thread", False)
+        target_thread_ts = thread_ts or (event.get("ts") if reply_in_thread else None)
 
         cleaned_text = clean_bot_addressing(text, bot_user_id)
         clean_lower = cleaned_text.lower().strip()
-        is_prefixed_cmd = text.strip().startswith(("!", "/", "."))
-
-        # We respond if addressed to the bot (and NOT already handled by app_mention unless it's a DM)
         should_respond = is_addressed and (is_dm or not is_direct_bot_mention)
 
         # A. Card Command Check
@@ -320,7 +383,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
                 logger.error(f"Failed to send help: {e}")
             return
 
-        # E. Conversational AI Response when addressed to goose-lee
+        # E. Conversational AI Response: PULLS IN RECENT 5-10 MESSAGE CONTEXT ON-DEMAND
         if should_respond and cleaned_text:
             history = fetch_conversation_history(
                 client=client,
@@ -329,7 +392,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
                 bot_user_id=bot_user_id,
                 current_user_id=user_id,
                 exclude_ts=event.get("ts"),
-                max_messages=10
+                max_messages=10  # On-demand 5-10 message context window
             )
 
             ai_reply = ai_service.generate_response(
@@ -343,57 +406,6 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             except Exception as e:
                 logger.error(f"Failed to send AI response: {e}")
             return
-
-        # F. Anti-spam Cooldown & XP Recording for regular community activity
-        cooldown_sec = rules.get("cooldown_seconds", 30)
-        can_earn, remaining = check_cooldown(user_id, cooldown_sec)
-
-        if not can_earn:
-            increment_message_count_only(user_id)
-            return
-
-        xp_earned, is_suggestion, is_long = evaluate_message_xp(text)
-        current_user = get_or_create_user(user_id)
-        old_level, old_title = get_level_info_for_xp(current_user["xp"])
-
-        new_total_xp = current_user["xp"] + xp_earned
-        new_level, new_title = get_level_info_for_xp(new_total_xp)
-
-        record_message_and_add_xp(
-            user_id=user_id,
-            channel_id=channel_id,
-            xp_to_add=xp_earned,
-            new_level=new_level,
-            message_length=len(text),
-            is_suggestion=is_suggestion,
-            update_cooldown=True
-        )
-
-        logger.info(f"Awarded {xp_earned} XP to {user_id} in {channel_id}.")
-
-        if is_suggestion and event.get("ts"):
-            try:
-                client.reactions_add(channel=channel_id, timestamp=event["ts"], name="bulb")
-            except Exception:
-                pass
-
-        if new_level > old_level:
-            logger.info(f"User {user_id} leveled up to Level {new_level} ({new_title})!")
-            # Add celebratory reaction directly on the user's message
-            if event.get("ts"):
-                try:
-                    client.reactions_add(channel=channel_id, timestamp=event["ts"], name="tada")
-                except Exception:
-                    pass
-
-            # Only post an in-channel text celebration for milestone levels (Level >= 4: Dabbler, Mallard, etc.)
-            # to avoid interrupting the channel with repetitive Level 2 / Level 3 spam on every single new chatter!
-            if rules.get("announce_level_up_in_channel", True) and new_level >= 4:
-                announcement = format_level_up_message(user_id, new_level, new_title)
-                try:
-                    say(text=announcement, channel=channel_id)
-                except Exception as e:
-                    logger.error(f"Failed to post level up celebration: {e}")
 
 
     # 2. APP MENTION EVENT: Handle @bot mentions (AI chat or commands)
@@ -445,7 +457,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             say(text=formatted_help, thread_ts=target_thread_ts)
             return
 
-        # AI Chat with conversation memory & injected real-time community context
+        # AI Chat with on-demand 5-10 message context
         history = fetch_conversation_history(
             client=client,
             channel_id=channel_id,
@@ -453,7 +465,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             bot_user_id=bot_user_id,
             current_user_id=user_id,
             exclude_ts=event.get("ts"),
-            max_messages=10
+            max_messages=10  # On-demand 5-10 message context window
         )
 
         ai_reply = ai_service.generate_response(

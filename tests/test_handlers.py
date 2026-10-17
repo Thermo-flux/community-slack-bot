@@ -143,4 +143,16 @@ def test_clean_bot_addressing():
     assert handlers.clean_bot_addressing("<@U_BOT> what is the score?", bot_user_id="U_BOT") == "what is the score?"
 
 
+def test_sanitize_context_text():
+    """Verifies that secrets and Slack tokens in context are redacted before reaching AI."""
+    sample_text = "Here is my bot token xoxb-123456789-abcdef and API key sk-proj1234567890abcdef1234 and Bearer my_secret_token"
+    sanitized = handlers.sanitize_context_text(sample_text)
+    assert "xoxb-123456789-abcdef" not in sanitized
+    assert "[REDACTED_SLACK_TOKEN]" in sanitized
+    assert "sk-proj1234567890abcdef1234" not in sanitized
+    assert "[REDACTED_API_KEY]" in sanitized
+    assert "Bearer [REDACTED_TOKEN]" in sanitized
+
+
+
 
