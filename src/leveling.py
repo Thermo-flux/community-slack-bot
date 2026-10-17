@@ -16,11 +16,11 @@ def get_level_tiers() -> List[Dict[str, Any]]:
     tiers = CONFIG.get("level_tiers", [])
     if not tiers:
         tiers = [
-            {"level": 1, "min_xp": 0, "title": "🌱 Novice"},
-            {"level": 2, "min_xp": 50, "title": "🌿 Contributor"},
-            {"level": 3, "min_xp": 150, "title": "⭐ Active Thinker"},
-            {"level": 4, "min_xp": 300, "title": "💡 Ideator"},
-            {"level": 5, "min_xp": 550, "title": "🚀 Pillar of Community"}
+            {"level": 1, "min_xp": 0, "title": "Newcomer"},
+            {"level": 2, "min_xp": 50, "title": "Contributor"},
+            {"level": 3, "min_xp": 150, "title": "Regular"},
+            {"level": 4, "min_xp": 300, "title": "Problem Solver"},
+            {"level": 5, "min_xp": 550, "title": "Community Builder"}
         ]
     return sorted(tiers, key=lambda t: t["min_xp"])
 

@@ -9,14 +9,14 @@
     "cooldown_seconds": 30,
 
     "_comment_base_xp": "XP points awarded for any valid message.",
-    "base_xp_per_message": 10,
+    "base_xp_per_message": 5,
 
     "_comment_long_message": "Bonus XP awarded if message is longer than long_message_threshold characters.",
-    "bonus_xp_long_message": 5,
+    "bonus_xp_long_message": 3,
     "long_message_threshold": 80,
 
     "_comment_suggestion": "Bonus XP awarded if message contains suggestion or idea keywords.",
-    "bonus_xp_suggestion": 15,
+    "bonus_xp_suggestion": 5,
     "suggestion_keywords": [
       "suggest",
       "suggestion",
@@ -52,19 +52,19 @@
   },
 
   "level_tiers": [
-    { "level": 1, "min_xp": 0,    "title": "🌱 Novice Explorer" },
-    { "level": 2, "min_xp": 50,   "title": "🌿 Active Contributor" },
-    { "level": 3, "min_xp": 150,  "title": "⭐ Thoughtful Voice" },
-    { "level": 4, "min_xp": 300,  "title": "💡 Idea Champion" },
-    { "level": 5, "min_xp": 550,  "title": "🚀 Pillar of Community" },
-    { "level": 6, "min_xp": 900,  "title": "🔥 Discussion Leader" },
-    { "level": 7, "min_xp": 1400, "title": "👑 Community Legend" },
-    { "level": 8, "min_xp": 2200, "title": "⚡ Grandmaster Builder" },
-    { "level": 9, "min_xp": 3500, "title": "🏆 Mythic Contributor" }
+    { "level": 1, "min_xp": 0,    "title": "Newcomer" },
+    { "level": 2, "min_xp": 50,   "title": "Contributor" },
+    { "level": 3, "min_xp": 150,  "title": "Regular" },
+    { "level": 4, "min_xp": 300,  "title": "Problem Solver" },
+    { "level": 5, "min_xp": 550,  "title": "Community Builder" },
+    { "level": 6, "min_xp": 900,  "title": "Discussion Lead" },
+    { "level": 7, "min_xp": 1400, "title": "Go-to Builder" },
+    { "level": 8, "min_xp": 2200, "title": "Project Lead" },
+    { "level": 9, "min_xp": 3500, "title": "Core Contributor" }
   ],
 
   "templates": {
-    "level_up": "🎉 *LEVEL UP!* Congratulations <@{user_id}>! You just reached *Level {level}: {title}*! Thank you for your awesome contributions to the channel! 🚀✨",
+    "level_up": "*Level {level}: {title}* for <@{user_id}>. Nice work; the XP graph has evidence now.",
     "rank_card": "*Level & Activity Card for <@{user_id}>*\n• *Current Rank:* Level {level} — *{title}*\n• *Total Points (XP):* `{xp} XP`\n• *Progress:* `{progress_bar}` {percent}%\n• *XP to Next Level:* `{xp_needed} XP`\n• *Contributions Tracked:* {message_count} messages",
     "leaderboard_header": "🏆 *Channel Top Contributors Leaderboard* 🏆\nHere are the most active and helpful community members:",
     "leaderboard_row": "*{rank}.* <@{user_id}> — Level {level} (*{title}*) • `{xp} XP`",

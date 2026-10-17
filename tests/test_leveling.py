@@ -11,7 +11,7 @@ def test_level_info_for_xp():
     """Tests that XP correctly maps to configured levels and titles."""
     level, title = leveling.get_level_info_for_xp(0)
     assert level == 1
-    assert "Novice" in title
+    assert title == "Newcomer"
 
     level, title = leveling.get_level_info_for_xp(50)
     assert level == 2
@@ -59,7 +59,7 @@ def test_render_progress_bar():
 def test_evaluate_message_xp_base():
     """Tests standard short message awards base XP."""
     xp, is_sug, is_long = leveling.evaluate_message_xp("Hey team, good morning!")
-    assert xp == 10
+    assert xp == 5
     assert is_sug is False
     assert is_long is False
 
@@ -69,7 +69,7 @@ def test_evaluate_message_xp_suggestion():
     text = "I have a suggestion for improving our channel workflow."
     xp, is_sug, is_long = leveling.evaluate_message_xp(text)
     assert is_sug is True
-    assert xp == 25  # 10 base + 15 suggestion
+    assert xp == 10  # 5 base + 5 suggestion
 
 
 def test_evaluate_message_xp_long_and_suggestion():
@@ -81,7 +81,7 @@ def test_evaluate_message_xp_long_and_suggestion():
     xp, is_sug, is_long = leveling.evaluate_message_xp(text)
     assert is_sug is True
     assert is_long is True
-    assert xp == 30  # 10 base + 5 long + 15 suggestion
+    assert xp == 13  # 5 base + 3 long + 5 suggestion
 
 
 def test_format_rank_card():
@@ -99,9 +99,10 @@ def test_format_rank_card():
 
 def test_format_level_up_message():
     """Tests level-up announcement template."""
-    msg = leveling.format_level_up_message("U_HERO", 3, "⭐ Active Thinker")
+    msg = leveling.format_level_up_message("U_HERO", 3, "Regular")
     assert "<@U_HERO>" in msg
-    assert "Level 3: ⭐ Active Thinker" in msg
+    assert "Level 3: Regular" in msg
+    assert "XP graph has evidence" in msg
 
 
 def test_format_leaderboard():

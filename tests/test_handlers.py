@@ -15,6 +15,13 @@ def test_clean_mention_text():
     assert handlers.clean_mention_text("") == ""
 
 
+def test_is_leaderboard_request():
+    assert handlers.is_leaderboard_request("goose lee show leaderboard")
+    assert handlers.is_leaderboard_request("show me leaderboard")
+    assert handlers.is_leaderboard_request("/leaderboard")
+    assert not handlers.is_leaderboard_request("show my level")
+
+
 def test_bot_loop_prevention():
     """
     Crucial Test: Verifies that messages sent by bots (bot_id or subtype='bot_message')
