@@ -43,33 +43,36 @@
     "frequency": "low",
 
     "_comment_allowed": "Approved emojis the bot is allowed to use in its responses and reactions.",
-    "allowed_emojis": ["🎉", "⭐", "🚀", "💡", "🔥", "✨", "👏", "🏆", "🌱", "🌿"]
+    "allowed_emojis": ["🎉", "⭐", "🚀", "💡", "🔥", "✨", "👏", "🏆", "🦆", "🍞", "🌾", "🐣", "🐥"]
   },
 
   "profile": {
     "_comment_pfp": "Default fallback emoji icon if custom PFP avatar is not set in Slack App settings.",
-    "custom_pfp_emoji": ":robot_face:"
+    "custom_pfp_emoji": ":duck:"
   },
 
   "level_tiers": [
-    { "level": 1, "min_xp": 0,    "title": "🌱 Novice Explorer" },
-    { "level": 2, "min_xp": 50,   "title": "🌿 Active Contributor" },
-    { "level": 3, "min_xp": 150,  "title": "⭐ Thoughtful Voice" },
-    { "level": 4, "min_xp": 300,  "title": "💡 Idea Champion" },
-    { "level": 5, "min_xp": 550,  "title": "🚀 Pillar of Community" },
-    { "level": 6, "min_xp": 900,  "title": "🔥 Discussion Leader" },
-    { "level": 7, "min_xp": 1400, "title": "👑 Community Legend" },
-    { "level": 8, "min_xp": 2200, "title": "⚡ Grandmaster Builder" },
-    { "level": 9, "min_xp": 3500, "title": "🏆 Mythic Contributor" }
+    { "level": 1,  "min_xp": 0,   "title": "🐣 Hatchling" },
+    { "level": 2,  "min_xp": 10,  "title": "🐥 Duckling" },
+    { "level": 3,  "min_xp": 25,  "title": "🦆 Paddler" },
+    { "level": 4,  "min_xp": 50,  "title": "🌾 Dabbler" },
+    { "level": 5,  "min_xp": 100, "title": "🦆 Mallard" },
+    { "level": 6,  "min_xp": 155, "title": "🌊 Diver" },
+    { "level": 7,  "min_xp": 235, "title": "🧭 Pond Scout" },
+    { "level": 8,  "min_xp": 330, "title": "🪶 Flock Leader" },
+    { "level": 9,  "min_xp": 445, "title": "🎖️ Wing Commander" },
+    { "level": 10, "min_xp": 580, "title": "👑 Golden Beak" },
+    { "level": 11, "min_xp": 735, "title": "📜 Pond Elder" },
+    { "level": 12, "min_xp": 890, "title": "✨ Head Duck" }
   ],
 
   "templates": {
-    "level_up": "🎉 *LEVEL UP!* Congratulations <@{user_id}>! You just reached *Level {level}: {title}*! Thank you for your awesome contributions to the channel! 🚀✨",
-    "rank_card": "*Level & Activity Card for <@{user_id}>*\n• *Current Rank:* Level {level} — *{title}*\n• *Total Points (XP):* `{xp} XP`\n• *Progress:* `{progress_bar}` {percent}%\n• *XP to Next Level:* `{xp_needed} XP`\n• *Contributions Tracked:* {message_count} messages",
-    "leaderboard_header": "🏆 *Channel Top Contributors Leaderboard* 🏆\nHere are the most active and helpful community members:",
+    "level_up": "🎉 *LEVEL UP!* Congratulations <@{user_id}>! You just reached *Level {level}: {title}*! Quak! 🦆✨",
+    "rank_card": "*Pond Level Card for <@{user_id}>*\n• *Current Rank:* Level {level} — *{title}*\n• *Total Points (XP):* `{xp} XP`\n• *Progress:* `{progress_bar}` {percent}%\n• *XP to Next Level:* `{xp_needed} XP`\n• *Contributions Tracked:* {message_count} messages",
+    "leaderboard_header": "🏆 *Pond Leaderboard — Top Crumb Collectors* 🏆\nHere are the top active members in the pond:",
     "leaderboard_row": "*{rank}.* <@{user_id}> — Level {level} (*{title}*) • `{xp} XP`",
-    "leaderboard_empty": "No contributions recorded yet. Be the first to start chatting and earn XP! 🚀",
-    "help_message": "*👋 Hey! I'm goose-lee, your resident community bot! 🚀*\n• Type `/level` to see your level, XP, and rank progress (or `/level @user` to check anyone's card!).\n• Type `/leaderboard` to view the top contributors.\n• Mention me `<@{bot_id}>` anytime to brainstorm, ask questions, or chat!\n• *GitHub Repo:* <https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>\n• *How to earn points:* Chat actively, share suggestions, and contribute valuable ideas. There is a {cooldown}s cooldown between points. 💡",
-    "ai_offline_fallback": "Hey <@{user_id}>! 👋 I received your message! My AI reasoning engine is currently in standby mode, but I am actively monitoring this channel and recording your activity points! 🚀"
+    "leaderboard_empty": "No contributions recorded yet. Be the first to start chatting and earn crumbs! 🦆",
+    "help_message": "*👋 Moin! I'm goose-lee (@gooselee), resident duck of `#loadout-development`! 🦆*\n• Type `/level` to see your level, XP, and rank progress (or `/level @user` to check anyone's card!).\n• Type `/leaderboard` to view the top crumb collectors.\n• Mention me `<@{bot_id}>` anytime to brainstorm, ask questions, or chat!\n• *GitHub Repo:* <https://github.com/jeremy341/community-slack-bot|jeremy341/community-slack-bot>\n• *How to earn points:* Chat actively, share suggestions, and contribute valuable ideas. There is a {cooldown}s cooldown between points. Quak! 💡",
+    "ai_offline_fallback": "Hey <@{user_id}>! 👋 I received your message! My AI reasoning engine is currently in standby mode, but I am actively monitoring this channel and recording your activity points! 🦆"
   }
 }

@@ -16,11 +16,18 @@ def get_level_tiers() -> List[Dict[str, Any]]:
     tiers = CONFIG.get("level_tiers", [])
     if not tiers:
         tiers = [
-            {"level": 1, "min_xp": 0, "title": "🌱 Novice"},
-            {"level": 2, "min_xp": 50, "title": "🌿 Contributor"},
-            {"level": 3, "min_xp": 150, "title": "⭐ Active Thinker"},
-            {"level": 4, "min_xp": 300, "title": "💡 Ideator"},
-            {"level": 5, "min_xp": 550, "title": "🚀 Pillar of Community"}
+            {"level": 1, "min_xp": 0, "title": "🐣 Hatchling"},
+            {"level": 2, "min_xp": 10, "title": "🐥 Duckling"},
+            {"level": 3, "min_xp": 25, "title": "🦆 Paddler"},
+            {"level": 4, "min_xp": 50, "title": "🌾 Dabbler"},
+            {"level": 5, "min_xp": 100, "title": "🦆 Mallard"},
+            {"level": 6, "min_xp": 155, "title": "🌊 Diver"},
+            {"level": 7, "min_xp": 235, "title": "🧭 Pond Scout"},
+            {"level": 8, "min_xp": 330, "title": "🪶 Flock Leader"},
+            {"level": 9, "min_xp": 445, "title": "🎖️ Wing Commander"},
+            {"level": 10, "min_xp": 580, "title": "👑 Golden Beak"},
+            {"level": 11, "min_xp": 735, "title": "📜 Pond Elder"},
+            {"level": 12, "min_xp": 890, "title": "✨ Head Duck"}
         ]
     return sorted(tiers, key=lambda t: t["min_xp"])
 

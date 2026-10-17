@@ -98,11 +98,18 @@ def _get_default_config():
             "custom_pfp_emoji": ":robot_face:"
         },
         "level_tiers": [
-            {"level": 1, "min_xp": 0, "title": "🌱 Novice Explorer"},
-            {"level": 2, "min_xp": 50, "title": "🌿 Active Contributor"},
-            {"level": 3, "min_xp": 150, "title": "⭐ Thoughtful Voice"},
-            {"level": 4, "min_xp": 300, "title": "💡 Idea Champion"},
-            {"level": 5, "min_xp": 550, "title": "🚀 Pillar of Community"}
+            {"level": 1, "min_xp": 0, "title": "🐣 Hatchling"},
+            {"level": 2, "min_xp": 10, "title": "🐥 Duckling"},
+            {"level": 3, "min_xp": 25, "title": "🦆 Paddler"},
+            {"level": 4, "min_xp": 50, "title": "🌾 Dabbler"},
+            {"level": 5, "min_xp": 100, "title": "🦆 Mallard"},
+            {"level": 6, "min_xp": 155, "title": "🌊 Diver"},
+            {"level": 7, "min_xp": 235, "title": "🧭 Pond Scout"},
+            {"level": 8, "min_xp": 330, "title": "🪶 Flock Leader"},
+            {"level": 9, "min_xp": 445, "title": "🎖️ Wing Commander"},
+            {"level": 10, "min_xp": 580, "title": "👑 Golden Beak"},
+            {"level": 11, "min_xp": 735, "title": "📜 Pond Elder"},
+            {"level": 12, "min_xp": 890, "title": "✨ Head Duck"}
         ],
         "templates": {
             "level_up": "🎉 *LEVEL UP!* Congratulations <@{user_id}>! You just reached *Level {level}: {title}*! 🚀",

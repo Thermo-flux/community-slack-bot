@@ -11,26 +11,31 @@ def test_level_info_for_xp():
     """Tests that XP correctly maps to configured levels and titles."""
     level, title = leveling.get_level_info_for_xp(0)
     assert level == 1
-    assert "Novice" in title
+    assert "Hatchling" in title
+
+    level, title = leveling.get_level_info_for_xp(10)
+    assert level == 2
+    assert "Duckling" in title
+
+    level, title = leveling.get_level_info_for_xp(25)
+    assert level == 3
+    assert "Paddler" in title
 
     level, title = leveling.get_level_info_for_xp(50)
-    assert level == 2
-    assert "Contributor" in title
-
-    level, title = leveling.get_level_info_for_xp(150)
-    assert level == 3
+    assert level == 4
+    assert "Dabbler" in title
 
     level, title = leveling.get_level_info_for_xp(10000)
-    assert level >= 6
+    assert level >= 12
 
 
 def test_progress_to_next_level():
     """Tests percentage and remaining XP math."""
-    # User at 25 XP (halfway between Level 1 [0 XP] and Level 2 [50 XP])
-    prog = leveling.get_progress_to_next_level(25)
+    # User at 5 XP (halfway between Level 1 [0 XP] and Level 2 [10 XP])
+    prog = leveling.get_progress_to_next_level(5)
     assert prog["level"] == 1
     assert prog["next_level"] == 2
-    assert prog["xp_needed"] == 25
+    assert prog["xp_needed"] == 5
     assert prog["percent"] == 50
     assert prog["is_max_level"] is False
 
@@ -93,7 +98,8 @@ def test_format_rank_card():
     }
     card = leveling.format_rank_card(user_data)
     assert "<@U_TESTER>" in card
-    assert "Level 2" in card
+    assert "Level 4" in card
+    assert "Dabbler" in card
     assert "75 XP" in card
 
 
