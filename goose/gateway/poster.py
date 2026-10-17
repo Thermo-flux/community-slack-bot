@@ -348,11 +348,10 @@ class PostFilter:
         for pattern in W.CLAIM_PATTERNS:
             if re.search(pattern, plain_l):
                 raise _Fail("claim")
-        # weak win words are fine in general chat when the user's own message has a word starting with "win"
-        user_has_win = re.search(r"\bwin\w*", user_l) is not None
-        for word in W.REWARD_WEAK:
-            if _phrase_re(word).search(plain_l):
-                if not (req.get("mode") == "chat" and user_has_win):
+        # weak win words are checked only outside chat mode (claims are already caught by CLAIM_PATTERNS)
+        if req.get("mode") != "chat":
+            for word in W.REWARD_WEAK:
+                if _phrase_re(word).search(plain_l):
                     raise _Fail("reward")
         if _first_word(plain_l, self._program):
             raise _Fail("program")
