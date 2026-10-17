@@ -156,6 +156,47 @@ def _get_default_config() -> Dict[str, Any]:
             ),
             "ai_offline_fallback": "Hi <@{user_id}>. I can't reach my answer service right now. Try again shortly.",
         },
+        "organizer_channel_id": "",
+        "owner_user_id": "",
+        "privacy": {
+            "public_board_size": 3,
+        },
+        "voice": {
+            "enabled": True,
+            "hourly_limit": 120,
+        },
+        "rewards": {
+            "announced": False,
+            "words": [
+                "reward", "rewards", "prize", "prizes", "swag", "giveaway",
+                "payout", "cash", "stipend", "bounty", "paid", "money",
+            ],
+        },
+        "reactions": {
+            "enabled": True,
+            "budget_per_hour": 6,
+            "trigger_words": ["congrats", "congratulations", "gm", "good morning", "nice one"],
+        },
+        "roasts": {
+            "enabled": True,
+            "max_per_day": 3,
+        },
+        "goose_meter": {
+            "enabled": True,
+            "reset_hours": 24,
+        },
+        "distress": {
+            "enabled": True,
+            "reply": (
+                "Hey, I'm just a duck and I can't help with something this heavy, but you matter. "
+                "If you're in danger or thinking about harming yourself, please reach out to a local "
+                "emergency number or a crisis line right now. If you're in the US you can call or text "
+                "988. I've also pinged the organizers so a real human can check in on you."
+            ),
+        },
+        "season": {
+            "end_ts": 0,
+        },
     }
 
 
@@ -377,3 +418,98 @@ def is_channel_watched(channel_id: str) -> bool:
         channel_id in VERIFIED_CHANNEL_IDS
         and channel_id in {configured_id for configured_id, _name in get_configured_channels()}
     )
+
+
+def _bool_setting(env_name: str, default: bool) -> bool:
+    raw = os.getenv(env_name, "").strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    logger.warning("Invalid %s; using the default", env_name)
+    return bool(default)
+
+
+def _user_id_setting(env_name: str, config_name: str = "") -> str:
+    raw = os.getenv(env_name, "").strip().upper()
+    if not raw and config_name:
+        raw = str(CONFIG.get(config_name, "")).strip().upper()
+    if raw and not re.fullmatch(r"[UW][A-Z0-9]{6,}", raw):
+        logger.warning("Invalid %s; ignoring it", env_name)
+        return ""
+    return raw
+
+
+# Organizer reporting targets (weekly Pond Report + all-time results)
+ORGANIZER_CHANNEL_ID = _channel_id_setting("ORGANIZER_CHANNEL_ID", "organizer_channel_id")
+OWNER_USER_ID = _user_id_setting("OWNER_USER_ID", "owner_user_id")
+
+_voice_cfg = CONFIG.get("voice") or {}
+VOICE_ENABLED = _bool_setting("VOICE_ENABLED", bool(_voice_cfg.get("enabled", False)))
+VOICE_HOURLY_LIMIT = _positive_int_setting(
+    "VOICE_HOURLY_LIMIT", int(_voice_cfg.get("hourly_limit", 120) or 120), maximum=100000
+)
+
+REWARDS = CONFIG.get("rewards") or {}
+REACTIONS = CONFIG.get("reactions") or {}
+ROASTS = CONFIG.get("roasts") or {}
+GOOSE_METER = CONFIG.get("goose_meter") or {}
+DISTRESS = CONFIG.get("distress") or {}
+SEASON = CONFIG.get("season") or {}
+PRIVACY = CONFIG.get("privacy") or {}
+PUBLIC_BOARD_SIZE = int(PRIVACY.get("public_board_size", 3) or 3)
+KILL_SWITCH_ENV = _bool_setting("KILL_SWITCH", bool(CONFIG.get("kill_switch", False)))
+
+
+class ConfigValidationError(Exception):
+    """Raised when the merged configuration is structurally invalid."""
+
+
+def validate_config() -> List[str]:
+    """Return a list of fatal configuration problems (empty when valid)."""
+    problems: List[str] = []
+    if not isinstance(CONFIG, dict):
+        return ["Configuration root must be a JSON object."]
+
+    rules = CONFIG.get("interaction_rules")
+    if rules is not None and not isinstance(rules, dict):
+        problems.append("interaction_rules must be an object.")
+
+    for key in ("official_loadout_channel_id", "loadout_development_channel_id",
+                "organizer_channel_id"):
+        value = CONFIG.get(key)
+        if value not in ("", None) and not re.fullmatch(r"C[A-Z0-9]+", str(value)):
+            problems.append(f"{key} must be a Slack channel ID like C01234567.")
+
+    for key in ("owner_user_id",):
+        value = CONFIG.get(key)
+        if value not in ("", None) and not re.fullmatch(r"[UW][A-Z0-9]{6,}", str(value).upper()):
+            problems.append(f"{key} must be a Slack user ID like U01234567.")
+
+    for key in ("privacy", "voice", "rewards", "reactions", "roasts", "goose_meter",
+                "distress", "season"):
+        value = CONFIG.get(key)
+        if value is not None and not isinstance(value, dict):
+            problems.append(f"{key} must be an object.")
+
+    tiers = CONFIG.get("level_tiers")
+    if tiers is not None:
+        if not isinstance(tiers, list) or not tiers:
+            problems.append("level_tiers must be a non-empty list.")
+        else:
+            for tier in tiers:
+                if not isinstance(tier, dict) or "level" not in tier or "min_xp" not in tier:
+                    problems.append("Each level_tiers entry needs 'level' and 'min_xp'.")
+                    break
+
+    return problems
+
+
+def assert_valid_config() -> None:
+    """Raise ConfigValidationError when the configuration would be unsafe to start."""
+    problems = validate_config()
+    if problems:
+        raise ConfigValidationError("; ".join(problems))
+

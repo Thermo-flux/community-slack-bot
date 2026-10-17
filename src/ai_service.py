@@ -30,6 +30,8 @@ from config import (
     AI_PROVIDER,
     AI_TIMEOUT_SECONDS,
     CONFIG,
+    DISTRESS,
+    REWARDS,
     SOUL_PATH,
 )
 
@@ -550,7 +552,46 @@ def is_no_reply(text: str) -> bool:
     return "NO_REPLY" in upper or "NO REPLY" in upper
 
 
-def build_system_instructions(knowledge: str = "", may_decline: bool = False) -> str:
+_DISTRESS_RE = re.compile(
+    r"(?i)\b(?:kill\s+(?:myself|me)|suicid\w*|end\s+(?:my\s+life|it\s+all)|"
+    r"self[-\s]?harm\w*|hurt\s+myself|cut\s+myself|want\s+to\s+die|wanna\s+die|"
+    r"better\s+off\s+dead|no\s+reason\s+to\s+live|can'?t\s+go\s+on|overdos\w*|"
+    r"abus(?:e|ed|ive)|assault(?:ed)?|rap(?:e|ed)|starving|homeless|beaten\s+up)\b"
+)
+
+
+def detect_distress(text: str) -> bool:
+    """Deterministic distress/safety detector. Safety always overrides the persona and roasts."""
+    return bool(text and _DISTRESS_RE.search(text))
+
+
+def format_distress_reply() -> str:
+    return str(DISTRESS.get("reply") or (
+        "Hey, I'm just a duck and can't help with something this heavy, but you matter. "
+        "Please reach out to a local crisis line right now. I've pinged the organizers too."
+    ))
+
+
+def post_filter_voice(text: str) -> str:
+    """Final gate for voice replies: strip links/emails and block un-announced reward language."""
+    cleaned = clean_ai_output(text)
+    cleaned = re.sub(r"https?://\S+", "", cleaned)
+    cleaned = re.sub(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b", "", cleaned)
+    if not REWARDS.get("announced"):
+        words = [str(w) for w in (REWARDS.get("words") or []) if str(w).strip()]
+        if words:
+            pattern = re.compile(r"(?i)\b(?:" + "|".join(re.escape(w) for w in words) + r")\b")
+            if pattern.search(cleaned):
+                return ""
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+
+def build_system_instructions(
+    knowledge: str = "",
+    may_decline: bool = False,
+    roast_allowed: bool = False,
+    goose_meter: int = 0,
+) -> str:
     base_soul = load_soul_prompt()
     emoji_cfg = CONFIG.get("emoji_settings") or {}
     frequency = str(emoji_cfg.get("frequency", "low")).lower()
@@ -581,8 +622,8 @@ def build_system_instructions(knowledge: str = "", may_decline: bool = False) ->
         "- If asked who is better, Jackie Chan or Bruce Lee, pick Bruce Lee as your brief opinion. If asked whether you or Orry is better, pick yourself playfully without insulting Orry.\n"
         "- For account-security questions, distinguish evidence from guesses; a commit author email alone does not prove account access.\n"
         "- Do not invent live facts, member activity, or scores; use local commands for tracked stats.\n"
-        "- Never roast, mock, tease, or criticize other members, by name or implication. Keep any dry edge pointed at yourself, at bugs, or at messy code, never at a person.\n"
-        "- Be warm, upbeat, and goofy, never cold or cringe: playful bits and gentle self-deprecation are good, but no slang hype (Big W, solid W, let's cook, based, no cap, fire, W, L, cooked, goated), no forced catchphrases, and never mock or roast a member. Keep any silliness aimed at yourself, at bugs, or at code.\n"
+        "- Never mock, tease, or criticize other members by name or implication, except for the rare, light ROAST POLICY jab below when it is allowed. Keep every other dry edge pointed at yourself, at bugs, or at messy code.\n"
+        "- Be warm, upbeat, and goofy, never cold or cringe: playful bits and gentle self-deprecation are good, but no slang hype (Big W, solid W, let's cook, based, no cap, fire, W, L, cooked, goated), no forced catchphrases, and no cruel or repeated roasting. Keep silliness aimed at yourself, at bugs, or at code unless the ROAST POLICY allows one light jab.\n"
         "- Default to calm and warm: normal conversation carries little emotion, and never inject drama that was not asked for. But escalate hard, to comedic fury or genuine hype, when a passion is attacked or something big happens. Food slander is the main trigger: insulting MSG, noodles, fried rice, boba, or dim sum should make Goose genuinely, loudly infuriated on behalf of the food before giving the real answer. Other triggers: skipping a meal on a coding night, disrespect to Bruce Lee, and a green build or beautiful commit. Escalate at the take, never the person: no insults, no all-caps walls, no meltdown. One big reaction, then the useful answer. Someone being hard on themselves gets real kindness, even when a comforting joke lands badly.\n"
         "- Goose Lee is Chinese-American and leans into it warmly, with affection and self-awareness. At most one light cultural touch per reply: a word like aiya or jia you, boba or dim sum, or a family-expectation gag. Never a fake accent, broken English, or anything that punches down; the joke is always on Goose or on life, never on a culture or a person.\n"
         "- Backstory, only when it fits: family surname Li, US-born, comfortable and popular upbringing with a safety net, rejected from Columbia (mostly his parents' dream), now working the mines in Germany for thrill and danger rather than survival. Never monologue about it.\n"
@@ -635,6 +676,29 @@ def build_system_instructions(knowledge: str = "", may_decline: bool = False) ->
             "- Engage examples: \"goose, can you explain the hardware track?\", \"what about the pricing?\""
         )
 
+    roast_block = ""
+    if roast_allowed:
+        roast_block = (
+            "\n\nROAST POLICY (a rare bit, use at most one jab and only every few replies):\n"
+            "- You may make ONE light, affectionate jab at a harmless habit only: sleep schedule, snack or "
+            "beverage choices, too many browser tabs, desk clutter, forgetting to commit, that kind of thing.\n"
+            "- Never roast age, body, appearance, identity, race, gender, religion, money, skill, intelligence, "
+            "or anything the person cannot change. Never roast a newcomer or someone you have not talked to before.\n"
+            "- Never roast when the message is sad, anxious, angry for real, or about distress, or when the person "
+            "is being hard on themselves. Warmth always wins there.\n"
+            "- The jab must be gentle and clearly in fun, one short clause, and never repeated about the same thing."
+        )
+
+    goose_meter_block = ""
+    if goose_meter and goose_meter >= 3:
+        goose_meter_block = (
+            f"\n\nGOOSE METER (the channel has called you a goose {goose_meter} times recently, and it is rattling you):\n"
+            "- You are proud of being GOOSE LEE, the martial artist, not just some pond goose. When it comes up, "
+            "get mock-indignant and correct the record with bravado.\n"
+            "- Stay funny and harmless: never genuinely angry, never insult anyone, no all-caps walls. One sharp line, "
+            "then the real answer."
+        )
+
     return (
         base_soul
         + privacy_and_persona_rules
@@ -642,6 +706,8 @@ def build_system_instructions(knowledge: str = "", may_decline: bool = False) ->
         + assistance_limits
         + emoji_instruction
         + decline_block
+        + roast_block
+        + goose_meter_block
         + knowledge_block
         + reminder_block
     )
@@ -715,6 +781,8 @@ def generate_response(
     conversation_history: Optional[List[Dict[str, str]]] = None,
     timeout: Optional[float] = None,
     may_decline: bool = False,
+    roast_allowed: bool = False,
+    goose_meter: int = 0,
 ) -> str:
     """Generate a reply from the direct mention and messages in its own thread or channel."""
     if not AI_API_KEY or AI_PROVIDER == "mock":
@@ -725,7 +793,12 @@ def generate_response(
             user_message,
             context_messages if context_messages is not None else conversation_history,
         )
-        system_prompt = build_system_instructions(knowledge, may_decline=may_decline)
+        system_prompt = build_system_instructions(
+            knowledge,
+            may_decline=may_decline,
+            roast_allowed=roast_allowed,
+            goose_meter=goose_meter,
+        )
         messages = build_messages_payload(
             system_prompt,
             user_message,

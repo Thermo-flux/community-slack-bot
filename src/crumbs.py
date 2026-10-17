@@ -265,7 +265,8 @@ def get_pond_status(user_id: str, db_path=None) -> Dict[str, Any]:
         with _managed_connection(db_path) as conn:
             get_or_create_user(user_id, db_path)
             row = conn.execute(
-                "SELECT opted_in, level_floor FROM users WHERE user_id = ?", (user_id,)
+                "SELECT opted_in, level_floor, privacy_show, quiet, resting FROM users WHERE user_id = ?",
+                (user_id,),
             ).fetchone()
     floor = int(row["level_floor"]) if row and row["level_floor"] else 1
     derived = level_for_crumbs(breakdown["crumbs"], breakdown["has_star"])
@@ -275,6 +276,9 @@ def get_pond_status(user_id: str, db_path=None) -> Dict[str, Any]:
     return {
         "user_id": user_id,
         "opted_in": bool(row and row["opted_in"]),
+        "privacy_show": bool(row and row["privacy_show"]),
+        "quiet": bool(row and row["quiet"]),
+        "resting": bool(row and row["resting"]),
         "crumbs": breakdown["crumbs"],
         "level": level,
         "title": title_for_level(level) or "",
@@ -302,7 +306,8 @@ def set_level_floor(user_id: str, level: int, db_path=None) -> None:
                 )
 
 
-def get_pond_leaderboard(limit: int = 10, db_path=None) -> List[Dict[str, Any]]:
+def get_pond_leaderboard(limit: int = 10, db_path=None, public: bool = True) -> List[Dict[str, Any]]:
+    """Lifetime standings. Public boards are privacy-filtered and capped; organizer boards are not."""
     with _DB_LOCK:
         with _managed_connection(db_path) as conn:
             cur = conn.execute(
@@ -316,7 +321,58 @@ def get_pond_leaderboard(limit: int = 10, db_path=None) -> List[Dict[str, Any]]:
         if status["crumbs"] > 0:
             entries.append(status)
     entries.sort(key=lambda e: (e["crumbs"], e["level"]), reverse=True)
+    if public:
+        from config import PUBLIC_BOARD_SIZE
+        entries = [e for e in entries if e.get("privacy_show")][: max(1, PUBLIC_BOARD_SIZE)]
     return entries[:limit]
+
+
+def get_weekly_leaderboard(week_key: str, limit: int = 10, db_path=None) -> List[Dict[str, Any]]:
+    """Standings for a single week, ranked by that week's crumbs (star-gate ignored)."""
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            cur = conn.execute(
+                "SELECT user_id FROM users WHERE opted_in = 1 AND user_id != ?",
+                (BOT_USER_ID,),
+            )
+            user_ids = [r["user_id"] for r in cur.fetchall()]
+    entries = []
+    for uid in user_ids:
+        status = get_pond_status(uid, db_path)
+        week = next((w for w in status["weekly"] if w["week"] == week_key), None)
+        crumbs = float(week["crumbs"]) if week else 0.0
+        if crumbs > 0:
+            entry = dict(status)
+            entry["week_crumbs"] = crumbs
+            entries.append(entry)
+    entries.sort(key=lambda e: e["week_crumbs"], reverse=True)
+    return entries[:limit]
+
+
+def get_roster(limit: int = 50, db_path=None) -> List[Dict[str, Any]]:
+    """All opted-in members with their live status (organizer view)."""
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            cur = conn.execute(
+                "SELECT user_id FROM users WHERE opted_in = 1 AND user_id != ?",
+                (BOT_USER_ID,),
+            )
+            user_ids = [r["user_id"] for r in cur.fetchall()]
+    entries = [get_pond_status(uid, db_path) for uid in user_ids]
+    entries.sort(key=lambda e: (e["level"], e["crumbs"]), reverse=True)
+    return entries[:limit]
+
+
+def snapshot_week(week_key: Optional[str] = None, db_path=None) -> int:
+    """Persist a lifetime snapshot of every opted-in member for the given week."""
+    from database import save_snapshot
+    week = week_key or week_key_now()
+    entries = get_roster(limit=10_000, db_path=db_path)
+    return save_snapshot(week, entries, db_path)
+
+
+def week_key_now() -> str:
+    return week_key(time.time())
 
 
 def format_pond_card(status: Dict[str, Any], mention: Optional[str] = None) -> str:
@@ -403,3 +459,77 @@ def record_qualified_message(
     if after["level"] > before["level"]:
         return {"before": before, "after": after, "delta": after["crumbs"] - before["crumbs"]}
     return None
+
+
+# ---------------------------------------------------------------------------
+# Member preferences (privacy, quiet, rest, opt-out)
+# ---------------------------------------------------------------------------
+
+def _set_user_flag(user_id: str, column: str, value: int, db_path=None) -> None:
+    if column not in ("privacy_show", "quiet", "resting"):
+        raise ValueError("unknown user flag")
+    now = time.time()
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            get_or_create_user(user_id, db_path)
+            with conn:
+                conn.execute(
+                    f"UPDATE users SET {column} = ?, updated_at = ? WHERE user_id = ?",
+                    (1 if value else 0, now, user_id),
+                )
+
+
+def set_privacy_show(user_id: str, show: bool, db_path=None) -> None:
+    _set_user_flag(user_id, "privacy_show", bool(show), db_path)
+
+
+def set_quiet(user_id: str, quiet: bool, db_path=None) -> None:
+    _set_user_flag(user_id, "quiet", bool(quiet), db_path)
+
+
+def set_resting(user_id: str, resting: bool, db_path=None) -> None:
+    _set_user_flag(user_id, "resting", bool(resting), db_path)
+
+
+def set_opted_out(user_id: str, db_path=None) -> None:
+    """Leave the pond: stop scoring but keep the existing ledger intact."""
+    now = time.time()
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE users SET opted_in = 0, updated_at = ? WHERE user_id = ?",
+                    (now, user_id),
+                )
+
+
+def is_quiet(user_id: str, db_path=None) -> bool:
+    return get_pond_status(user_id, db_path)["quiet"]
+
+
+def is_resting(user_id: str, db_path=None) -> bool:
+    return get_pond_status(user_id, db_path)["resting"]
+
+
+def format_all_time(entries: List[Dict[str, Any]], limit: int = 3) -> str:
+    if not entries:
+        return "No crumbs on the board yet. Say `goose join`, then chat in #loadout to start."
+    out = ["*All-time Pond standings*"]
+    for rank, entry in enumerate(entries[:limit], start=1):
+        out.append(
+            f"{rank}. <@{entry['user_id']}> - PL.{entry['level']} "
+            f"{entry['title'] or ''} - {entry['crumbs']:g} crumbs"
+        )
+    return "\n".join(out)
+
+
+def format_weekly_report(week_key_value: str, entries: List[Dict[str, Any]]) -> str:
+    if not entries:
+        return f"*Pond Report - {week_key_value}*\nNo qualifying activity this week."
+    out = [f"*Pond Report - {week_key_value}*"]
+    for rank, entry in enumerate(entries, start=1):
+        out.append(
+            f"{rank}. <@{entry['user_id']}> - {entry.get('week_crumbs', 0):g} crumbs this week "
+            f"(PL.{entry['level']} {entry['title'] or ''})"
+        )
+    return "\n".join(out)

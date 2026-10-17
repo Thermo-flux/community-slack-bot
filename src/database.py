@@ -49,7 +49,7 @@ def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
 @contextmanager
 def _managed_connection(db_path: str = DB_PATH) -> Iterator[sqlite3.Connection]:
     """Reuses the current thread's active connection for nested calls, closing once at the top level."""
-    resolved = os.path.abspath(db_path)
+    resolved = os.path.abspath(db_path or DB_PATH)
     active: Dict[str, Tuple[sqlite3.Connection, int]] = getattr(_THREAD_STATE, "active", None)
     if active is None:
         active = {}
@@ -82,6 +82,10 @@ def _ensure_user_columns(conn) -> None:
         "level_floor": "INTEGER NOT NULL DEFAULT 1",
         "last_scored_ts": "REAL NOT NULL DEFAULT 0.0",
         "last_scored_text": "TEXT NOT NULL DEFAULT ''",
+        "privacy_show": "INTEGER NOT NULL DEFAULT 0",
+        "quiet": "INTEGER NOT NULL DEFAULT 0",
+        "resting": "INTEGER NOT NULL DEFAULT 0",
+        "last_roast_ts": "REAL NOT NULL DEFAULT 0.0",
     }
     for name, decl in wanted.items():
         if name not in existing:
@@ -139,6 +143,75 @@ def init_db(db_path: str = DB_PATH) -> None:
                         voided INTEGER NOT NULL DEFAULT 0,
                         void_reason TEXT NOT NULL DEFAULT '',
                         created_at REAL NOT NULL DEFAULT 0.0
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS bot_state (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL DEFAULT '',
+                        updated_at REAL NOT NULL DEFAULT 0.0
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS channel_state (
+                        channel_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        value REAL NOT NULL DEFAULT 0.0,
+                        updated_at REAL NOT NULL DEFAULT 0.0,
+                        PRIMARY KEY (channel_id, name)
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS pond_reports (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        kind TEXT NOT NULL DEFAULT 'week',
+                        week_key TEXT NOT NULL DEFAULT '',
+                        channel_id TEXT NOT NULL DEFAULT '',
+                        message_ts TEXT NOT NULL DEFAULT '',
+                        payload TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        created_at REAL NOT NULL DEFAULT 0.0,
+                        updated_at REAL NOT NULL DEFAULT 0.0
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS appeals (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id TEXT NOT NULL,
+                        ledger_event_id INTEGER NOT NULL DEFAULT 0,
+                        reason TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'open',
+                        note TEXT NOT NULL DEFAULT '',
+                        created_at REAL NOT NULL DEFAULT 0.0,
+                        updated_at REAL NOT NULL DEFAULT 0.0
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS audit_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        actor TEXT NOT NULL DEFAULT '',
+                        action TEXT NOT NULL DEFAULT '',
+                        target TEXT NOT NULL DEFAULT '',
+                        detail TEXT NOT NULL DEFAULT '',
+                        created_at REAL NOT NULL DEFAULT 0.0
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS crumbs_snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        week_key TEXT NOT NULL DEFAULT '',
+                        user_id TEXT NOT NULL,
+                        crumbs REAL NOT NULL DEFAULT 0.0,
+                        level INTEGER NOT NULL DEFAULT 1,
+                        created_at REAL NOT NULL DEFAULT 0.0
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS voice_usage (
+                        user_id TEXT NOT NULL,
+                        hour_key TEXT NOT NULL,
+                        count INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (user_id, hour_key)
                     );
                 """)
                 _ensure_user_columns(conn)
@@ -578,3 +651,310 @@ def get_all_users_summary(limit: int = 25, db_path: str = DB_PATH) -> List[Dict[
                 (limit,),
             )
             return [dict(row) for row in cursor.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Bot state, counters, reports, appeals, audit, snapshots, voice quota
+# ---------------------------------------------------------------------------
+
+def get_state(key: str, default: str = "", db_path: str = DB_PATH) -> str:
+    try:
+        with _DB_LOCK:
+            with _managed_connection(db_path) as conn:
+                row = conn.execute("SELECT value FROM bot_state WHERE key = ?", (key,)).fetchone()
+                return row["value"] if row else default
+    except sqlite3.OperationalError:
+        return default
+
+
+def set_state(key: str, value: str, db_path: str = DB_PATH) -> None:
+    try:
+        with _DB_LOCK:
+            with _managed_connection(db_path) as conn:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO bot_state (key, value, updated_at) VALUES (?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                        """,
+                        (key, str(value), time.time()),
+                    )
+    except sqlite3.OperationalError as exc:
+        logger.warning("Could not persist state '%s' (%s)", key, type(exc).__name__)
+
+
+def get_flag(key: str, default: bool = False, db_path: str = DB_PATH) -> bool:
+    raw = get_state(key, "1" if default else "0", db_path)
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def set_flag(key: str, value: bool, db_path: str = DB_PATH) -> None:
+    set_state(key, "1" if value else "0", db_path)
+
+
+def get_all_state(db_path: str = DB_PATH) -> Dict[str, str]:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            rows = conn.execute("SELECT key, value FROM bot_state").fetchall()
+            return {r["key"]: r["value"] for r in rows}
+
+
+def increment_channel_counter(
+    channel_id: str, name: str, amount: float = 1.0, db_path: str = DB_PATH
+) -> float:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO channel_state (channel_id, name, value, updated_at) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(channel_id, name) DO UPDATE SET
+                        value = channel_state.value + excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (channel_id, name, float(amount), time.time()),
+                )
+            row = conn.execute(
+                "SELECT value FROM channel_state WHERE channel_id = ? AND name = ?",
+                (channel_id, name),
+            ).fetchone()
+            return float(row["value"]) if row else 0.0
+
+
+def set_channel_counter(channel_id: str, name: str, value: float, db_path: str = DB_PATH) -> None:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO channel_state (channel_id, name, value, updated_at) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(channel_id, name) DO UPDATE SET
+                        value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (channel_id, name, float(value), time.time()),
+                )
+
+
+def get_channel_counter(channel_id: str, name: str, db_path: str = DB_PATH) -> float:
+    try:
+        with _DB_LOCK:
+            with _managed_connection(db_path) as conn:
+                row = conn.execute(
+                    "SELECT value FROM channel_state WHERE channel_id = ? AND name = ?",
+                    (channel_id, name),
+                ).fetchone()
+                return float(row["value"]) if row else 0.0
+    except sqlite3.OperationalError:
+        return 0.0
+
+
+def touch_channel_counter(
+    channel_id: str, name: str, amount: float = 1.0, reset_hours: float = 24.0,
+    db_path: str = DB_PATH,
+) -> float:
+    """Increment a counter, resetting it first when the last touch is older than reset_hours."""
+    now = time.time()
+    stale_after = max(0.0, float(reset_hours)) * 3600.0
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT value, updated_at FROM channel_state WHERE channel_id = ? AND name = ?",
+                (channel_id, name),
+            ).fetchone()
+            value = float(row["value"]) if row else 0.0
+            updated = float(row["updated_at"]) if row else 0.0
+            if stale_after and updated and (now - updated) > stale_after:
+                value = 0.0
+            value += float(amount)
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO channel_state (channel_id, name, value, updated_at) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(channel_id, name) DO UPDATE SET
+                        value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (channel_id, name, value, now),
+                )
+            return value
+
+
+def add_audit(
+    actor: str, action: str, target: str = "", detail: str = "", db_path: str = DB_PATH
+) -> int:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            with conn:
+                cur = conn.execute(
+                    "INSERT INTO audit_log (actor, action, target, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (actor or "", action or "", target or "", detail or "", time.time()),
+                )
+                return int(cur.lastrowid)
+
+
+def get_audit(limit: int = 10, db_path: str = DB_PATH) -> List[Dict[str, Any]]:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+
+def add_appeal(
+    user_id: str, ledger_event_id: int, reason: str = "", db_path: str = DB_PATH
+) -> int:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            with conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO appeals (user_id, ledger_event_id, reason, status, created_at, updated_at)
+                    VALUES (?, ?, ?, 'open', ?, ?)
+                    """,
+                    (user_id, int(ledger_event_id), reason or "", time.time(), time.time()),
+                )
+                return int(cur.lastrowid)
+
+
+def get_appeals(status: str = "open", db_path: str = DB_PATH) -> List[Dict[str, Any]]:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM appeals WHERE status = ? ORDER BY id", (status,)
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM appeals ORDER BY id").fetchall()
+            return [dict(r) for r in rows]
+
+
+def resolve_appeal(
+    appeal_id: int, status: str = "resolved", note: str = "", db_path: str = DB_PATH
+) -> Optional[Dict[str, Any]]:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            row = conn.execute("SELECT * FROM appeals WHERE id = ?", (appeal_id,)).fetchone()
+            if not row:
+                return None
+            with conn:
+                conn.execute(
+                    "UPDATE appeals SET status = ?, note = ?, updated_at = ? WHERE id = ?",
+                    (status, note or "", time.time(), appeal_id),
+                )
+            return dict(row)
+
+
+def create_report(
+    kind: str,
+    week_key: str,
+    payload_json: str,
+    channel_id: str = "",
+    db_path: str = DB_PATH,
+) -> int:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            with conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO pond_reports (kind, week_key, channel_id, payload, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'pending', ?, ?)
+                    """,
+                    (kind, week_key, channel_id, payload_json, time.time(), time.time()),
+                )
+                return int(cur.lastrowid)
+
+
+def get_reports(status: str = "pending", db_path: str = DB_PATH) -> List[Dict[str, Any]]:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM pond_reports WHERE status = ? ORDER BY id", (status,)
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM pond_reports ORDER BY id").fetchall()
+            return [dict(r) for r in rows]
+
+
+def get_report(report_id: int, db_path: str = DB_PATH) -> Optional[Dict[str, Any]]:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            row = conn.execute("SELECT * FROM pond_reports WHERE id = ?", (report_id,)).fetchone()
+            return dict(row) if row else None
+
+
+def set_report_status(
+    report_id: int, status: str, message_ts: str = "", db_path: str = DB_PATH
+) -> None:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE pond_reports SET status = ?, message_ts = ?, updated_at = ? WHERE id = ?",
+                    (status, message_ts or "", time.time(), report_id),
+                )
+
+
+def save_snapshot(week_key: str, entries: List[Dict[str, Any]], db_path: str = DB_PATH) -> int:
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            with conn:
+                for entry in entries:
+                    conn.execute(
+                        """
+                        INSERT INTO crumbs_snapshots (week_key, user_id, crumbs, level, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (week_key, entry["user_id"], float(entry.get("crumbs", 0.0)),
+                         int(entry.get("level", 1)), time.time()),
+                    )
+                return len(entries)
+
+
+def consume_voice_quota(
+    user_id: str, hour_key: str, limit: int, db_path: str = DB_PATH
+) -> bool:
+    """Increment the per-person hourly voice counter; return True when still under the limit."""
+    if limit <= 0:
+        return False
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT count FROM voice_usage WHERE user_id = ? AND hour_key = ?",
+                (user_id, hour_key),
+            ).fetchone()
+            current = int(row["count"]) if row else 0
+            if current >= limit:
+                return False
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO voice_usage (user_id, hour_key, count) VALUES (?, ?, 1)
+                    ON CONFLICT(user_id, hour_key) DO UPDATE SET count = voice_usage.count + 1
+                    """,
+                    (user_id, hour_key),
+                )
+            return True
+
+
+def backup_database(db_path: str = DB_PATH, backup_dir: str = "") -> Optional[str]:
+    """Copy the SQLite database to a timestamped file using the online backup API."""
+    resolved = os.path.abspath(db_path)
+    if not os.path.exists(resolved):
+        return None
+    target_dir = backup_dir or os.path.join(os.path.dirname(resolved), "backups")
+    os.makedirs(target_dir, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    dest = os.path.join(target_dir, f"{os.path.basename(resolved)}.{stamp}.bak")
+    with _DB_LOCK:
+        source = sqlite3.connect(resolved)
+        try:
+            destination = sqlite3.connect(dest)
+            try:
+                with destination:
+                    source.backup(destination)
+            finally:
+                destination.close()
+        finally:
+            source.close()
+    return dest

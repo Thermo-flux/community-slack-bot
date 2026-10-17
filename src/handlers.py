@@ -25,19 +25,43 @@ from config import (
     AI_REPLY_WORKERS,
     AI_TIMEOUT_SECONDS,
     CONFIG,
+    DISTRESS,
+    GOOSE_METER,
     OFFICIAL_LOADOUT_CHANNEL_ID,
+    ORGANIZER_CHANNEL_ID,
     ORGANIZER_USER_IDS,
+    OWNER_USER_ID,
+    REACTIONS,
+    REWARDS,
+    ROASTS,
+    SEASON,
+    VOICE_ENABLED,
+    VOICE_HOURLY_LIMIT,
     is_channel_watched,
 )
 from database import (
     _DB_LOCK,
     _managed_connection,
+    add_appeal,
+    add_audit,
+    backup_database,
     check_cooldown,
+    consume_voice_quota,
+    create_report,
+    get_appeals,
+    get_channel_counter,
+    get_flag,
     get_leaderboard,
     get_or_create_user,
+    get_reports,
+    get_state,
+    resolve_appeal,
     increment_message_count_only,
     record_message_and_add_xp,
     resolve_user,
+    set_flag,
+    set_state,
+    touch_channel_counter,
 )
 from leveling import (
     evaluate_message_xp,
@@ -355,8 +379,11 @@ def _is_organizer(user_id: Optional[str]) -> bool:
 
 POND_HELP_TEXT = (
     "Pond commands: `goose join` to start earning crumbs, `goose me` for your private card, "
-    "`goose leaderboard` for the standings. Organizers: `goose star @person`, "
-    "`goose bigstar @person`, `goose revoke <id> [reason]`."
+    "`goose top` / `goose leaderboard` for the boards, `goose show` / `goose hide` for public privacy, "
+    "`goose quiet on/off`, `goose leave` to opt out, `goose report <text>`, `goose appeal <id> [reason]`, "
+    "`goose season`. Organizers: `goose star|bigstar @person`, `goose revoke <id>`, `goose roster`, "
+    "`goose results`, `goose reports`, `goose resolve <appeal id>`, `goose pause|resume`, `goose freeze|unfreeze`, "
+    "`goose voice on|off|status`, `goose set-end <unix ts|off>`, `goose status`."
 )
 
 
@@ -374,7 +401,12 @@ def parse_pond_command(text: str) -> Optional[tuple]:
     if not parts:
         return None
     sub = parts[0]
-    if sub in ("join", "me", "star", "bigstar", "revoke", "help", "pond"):
+    if sub in (
+        "join", "leave", "me", "top", "all", "help", "pond", "show", "hide",
+        "quiet", "report", "appeal", "star", "bigstar", "revoke", "roster",
+        "results", "reports", "resolve", "pause", "resume", "status",
+        "freeze", "unfreeze", "voice", "leaderboard", "season", "set-end",
+    ):
         return (sub, parts[1:])
     return None
 
@@ -420,6 +452,12 @@ def _handle_pond_command(
         _post_private(client, say, channel_id, user_id, lead + "\n" + crumbs.format_pond_card(status), thread_ts)
         return True
 
+    if sub == "leave":
+        crumbs.set_opted_out(user_id)
+        _post_private(client, say, channel_id, user_id,
+                      "You're out of the pond. Your crumbs stay saved; say `goose join` to come back.", thread_ts)
+        return True
+
     if sub == "me":
         target_id = _resolve_target_identifier(args)
         if target_id and target_id != user_id:
@@ -432,6 +470,57 @@ def _handle_pond_command(
             return True
         _post_private(client, say, channel_id, user_id,
                       crumbs.format_pond_card(crumbs.get_pond_status(user_id)), thread_ts)
+        return True
+
+    if sub in ("top", "all", "leaderboard"):
+        if _is_organizer(user_id):
+            board = crumbs.format_pond_leaderboard(crumbs.get_pond_leaderboard(limit=25, public=False))
+        else:
+            board = crumbs.format_pond_leaderboard(crumbs.get_pond_leaderboard(public=True))
+        _post_private(client, say, channel_id, user_id, board, thread_ts)
+        return True
+
+    if sub in ("show", "hide"):
+        show = sub == "show"
+        crumbs.set_privacy_show(user_id, show)
+        note = ("You're on the public boards now." if show
+                else "You're hidden from the public boards now.")
+        _post_private(client, say, channel_id, user_id, note, thread_ts)
+        return True
+
+    if sub == "quiet":
+        current = crumbs.is_quiet(user_id)
+        wanted = args[0].lower() if args else ("off" if current else "on")
+        if wanted not in ("on", "off"):
+            _post_private(client, say, channel_id, user_id,
+                          "Usage: `goose quiet on` or `goose quiet off`.", thread_ts)
+            return True
+        crumbs.set_quiet(user_id, wanted == "on")
+        _post_private(client, say, channel_id, user_id,
+                      f"Quiet mode is now {wanted}. " +
+                      ("No more reactions or roast bits aimed at you." if wanted == "on"
+                       else "Back to normal."), thread_ts)
+        return True
+
+    if sub == "report":
+        message = " ".join(args).strip()
+        if not message:
+            _post_private(client, say, channel_id, user_id, "Usage: `goose report <what happened>`", thread_ts)
+            return True
+        _alert_organizers(client, f":memo: Report from <@{user_id}>: {message}")
+        _post_private(client, say, channel_id, user_id, "Thanks - I passed that to the organizers.", thread_ts)
+        return True
+
+    if sub == "appeal":
+        if not args or not args[0].lstrip("#").isdigit():
+            _post_private(client, say, channel_id, user_id,
+                          "Usage: `goose appeal <ledger id> [reason]`", thread_ts)
+            return True
+        event_id = int(args[0].lstrip("#"))
+        appeal_id = add_appeal(user_id, event_id, " ".join(args[1:]).strip())
+        _alert_organizers(client, f":scales: Appeal #{appeal_id} from <@{user_id}> about ledger entry #{event_id}.")
+        _post_private(client, say, channel_id, user_id,
+                      f"Appeal #{appeal_id} logged for entry #{event_id}. An organizer will take a look.", thread_ts)
         return True
 
     if sub in ("star", "bigstar"):
@@ -447,12 +536,16 @@ def _handle_pond_command(
         amount = crumbs.STAR_CRUMBS if sub == "star" else crumbs.BIGSTAR_CRUMBS
         reason = " ".join(args[1:]).strip()
         before = crumbs.get_pond_status(target_id)
-        crumbs.add_ledger_event(target_id, kind, amount=amount, ref=f"by {user_id}: {reason}", source_ts=time.time())
+        event_id = crumbs.add_ledger_event(
+            target_id, kind, amount=amount, ref=f"by {user_id}: {reason}", source_ts=time.time()
+        )
         after = crumbs.get_pond_status(target_id)
+        add_audit(user_id, kind, target=target_id, detail=f"ledger #{event_id}: {reason}")
         if after["level"] > before["level"]:
             _post_private(client, say, channel_id, target_id, crumbs.level_up_message(after), thread_ts)
         _post_private(client, say, channel_id, user_id,
-                      f"{kind.title()} logged for <@{target_id}> - now PL.{after['level']} {after['title']}.", thread_ts)
+                      f"{kind.title()} logged for <@{target_id}> (ledger #{event_id}) - "
+                      f"now PL.{after['level']} {after['title']}.", thread_ts)
         return True
 
     if sub == "revoke":
@@ -472,10 +565,111 @@ def _handle_pond_command(
             return True
         affected = row["user_id"]
         after = crumbs.get_pond_status(affected)
+        add_audit(user_id, "revoke", target=affected, detail=f"ledger #{event_id}: {reason}")
         _post_private(client, say, channel_id, affected,
                       crumbs.DEMOTE_LINE.format(level=after["level"], title=after["title"] or ""), thread_ts)
         _post_private(client, say, channel_id, user_id,
                       f"Revoked entry #{event_id}. <@{affected}> is now PL.{after['level']} {after['title']}.", thread_ts)
+        return True
+
+    if sub == "roster":
+        if not _is_organizer(user_id):
+            _post_private(client, say, channel_id, user_id, "Only organizers can view the roster.", thread_ts)
+            return True
+        roster = crumbs.get_roster(limit=50)
+        if not roster:
+            _post_private(client, say, channel_id, user_id, "Nobody has opted in yet.", thread_ts)
+            return True
+        lines = [f"{i}. <@{e['user_id']}> - PL.{e['level']} {e['title'] or ''} ({e['crumbs']:g})"
+                 for i, e in enumerate(roster, 1)]
+        _post_private(client, say, channel_id, user_id, "*Pond roster*\n" + "\n".join(lines), thread_ts)
+        return True
+
+    if sub == "results":
+        board = crumbs.format_all_time(crumbs.get_pond_leaderboard(limit=3, public=False))
+        _post_private(client, say, channel_id, user_id, board + "\n" + _season_line() + "\n" + _status_line(), thread_ts)
+        return True
+
+    if sub in ("season", "set-end"):
+        if sub == "set-end":
+            if not _is_organizer(user_id):
+                _post_private(client, say, channel_id, user_id, "Only organizers can set the season.", thread_ts)
+                return True
+            if not args:
+                _post_private(client, say, channel_id, user_id, "Usage: `goose set-end <unix timestamp|off>`", thread_ts)
+                return True
+            value = args[0].lower()
+            if value in ("off", "none", "clear", "0"):
+                set_state("season_end_ts", "0")
+            elif args[0].isdigit():
+                set_state("season_end_ts", args[0])
+            else:
+                _post_private(client, say, channel_id, user_id, "Give me a Unix timestamp or `off`.", thread_ts)
+                return True
+        _post_private(client, say, channel_id, user_id, _season_line(), thread_ts)
+        return True
+
+    if sub == "reports":
+        if not _is_organizer(user_id):
+            _post_private(client, say, channel_id, user_id, "Only organizers can view reports.", thread_ts)
+            return True
+        appeals = get_appeals("open")
+        pending = get_reports("pending")
+        lines = ["*Open items*"]
+        lines.append(f"- Appeals: {len(appeals)}")
+        for a in appeals[:10]:
+            lines.append(f"  #{a['id']} <@{a['user_id']}> entry #{a['ledger_event_id']}: {a['reason'] or '(no reason)'}")
+        lines.append(f"- Pending reports: {len(pending)}")
+        _post_private(client, say, channel_id, user_id, "\n".join(lines), thread_ts)
+        return True
+
+    if sub == "resolve":
+        if not _is_organizer(user_id):
+            _post_private(client, say, channel_id, user_id, "Only organizers can resolve items.", thread_ts)
+            return True
+        if not args or not args[0].lstrip("#").isdigit():
+            _post_private(client, say, channel_id, user_id, "Usage: `goose resolve <appeal id> [note]`", thread_ts)
+            return True
+        appeal_id = int(args[0].lstrip("#"))
+        note = " ".join(args[1:]).strip()
+        row = resolve_appeal(appeal_id, "resolved", note)
+        if not row:
+            _post_private(client, say, channel_id, user_id, f"No appeal #{appeal_id} found.", thread_ts)
+            return True
+        add_audit(user_id, "resolve", target=row["user_id"], detail=f"appeal #{appeal_id}: {note}")
+        _post_private(client, say, channel_id, row["user_id"],
+                      f":scales: Your appeal #{appeal_id} was reviewed by an organizer. {note}", thread_ts)
+        _post_private(client, say, channel_id, user_id, f"Appeal #{appeal_id} marked resolved.", thread_ts)
+        return True
+
+    if sub in ("pause", "resume"):
+        if not _is_organizer(user_id):
+            _post_private(client, say, channel_id, user_id, "Only organizers can control the bot.", thread_ts)
+            return True
+        _set_paused(sub == "pause", user_id)
+        _post_private(client, say, channel_id, user_id, _status_line(), thread_ts)
+        return True
+
+    if sub in ("freeze", "unfreeze"):
+        if not _is_organizer(user_id):
+            _post_private(client, say, channel_id, user_id, "Only organizers can control scoring.", thread_ts)
+            return True
+        _set_frozen(sub == "freeze", user_id)
+        _post_private(client, say, channel_id, user_id, _status_line(), thread_ts)
+        return True
+
+    if sub == "status":
+        _post_private(client, say, channel_id, user_id, _status_line(), thread_ts)
+        return True
+
+    if sub == "voice":
+        if not _is_organizer(user_id):
+            _post_private(client, say, channel_id, user_id, "Only organizers can toggle the voice.", thread_ts)
+            return True
+        arg = args[0].lower() if args else "status"
+        if arg in ("on", "off"):
+            _set_voice(arg == "on", user_id)
+        _post_private(client, say, channel_id, user_id, _status_line(), thread_ts)
         return True
 
     return False
@@ -483,6 +677,8 @@ def _handle_pond_command(
 
 def _score_loadout_activity(user_id: str, channel_id: str, event, client, text: str, rules) -> None:
     """Score a qualified message in the official #loadout channel for opted-in members."""
+    if _is_paused() or _is_frozen():
+        return
     if channel_id != OFFICIAL_LOADOUT_CHANNEL_ID:
         return
     if not crumbs.is_opted_in(user_id):
@@ -710,6 +906,14 @@ def _run_ai_reply(
     queue_key,
 ) -> None:
     try:
+        # Voice gate: no chat when muted, and a per-person hourly cap keeps a burst safe.
+        if not _voice_enabled():
+            return
+        hour_key = time.strftime("%Y-%m-%dT%H", time.gmtime())
+        if user_id and not consume_voice_quota(user_id, hour_key, VOICE_HOURLY_LIMIT):
+            logger.info("Voice hourly cap reached for a member; skipping reply.")
+            return
+
         placeholder_ts = (
             "" if require_decision else _post_ai_placeholder(client, channel_id, thread_ts, queue_key)
         )
@@ -722,6 +926,7 @@ def _run_ai_reply(
                 context_messages = fetch_mentioned_channel_context(
                     client, channel_id, current_ts, bot_user_id
                 )
+            roast_allowed = (not require_decision) and _roast_budget_ok(user_id)
             reply = ai_service.generate_response(
                 user_id=user_id,
                 user_message=sanitize_context_text(user_message) or "Hello!",
@@ -729,6 +934,8 @@ def _run_ai_reply(
                 context_messages=context_messages,
                 timeout=AI_TIMEOUT_SECONDS,
                 may_decline=require_decision,
+                roast_allowed=roast_allowed,
+                goose_meter=_goose_meter_value(channel_id),
             )
             if require_decision and ai_service.is_no_reply(reply):
                 return
@@ -739,6 +946,7 @@ def _run_ai_reply(
                 return
             reply = "I could not complete that reply. Please try again."
 
+        reply = ai_service.post_filter_voice(reply) or reply
         if placeholder_ts:
             _deliver_ai_reply(client, channel_id, thread_ts, placeholder_ts, reply, queue_key)
         else:
@@ -843,8 +1051,247 @@ def _safe_say(say, **kwargs) -> None:
         logger.error("Failed to send Slack message (%s)", type(exc).__name__)
 
 
+# ---------------------------------------------------------------------------
+# Bot state: kill switch (pause) vs freeze (scoring only), cached and persisted
+# ---------------------------------------------------------------------------
+
+_STATE_LOCK = threading.Lock()
+_STATE_CACHE: Dict[str, bool] = {}
+
+
+def _refresh_state_cache() -> Dict[str, bool]:
+    with _STATE_LOCK:
+        _STATE_CACHE["paused"] = get_flag("paused", False)
+        _STATE_CACHE["frozen"] = get_flag("frozen", False)
+        _STATE_CACHE["voice"] = get_flag("voice_enabled", VOICE_ENABLED)
+        return dict(_STATE_CACHE)
+
+
+def _state_value(key: str, default: bool) -> bool:
+    with _STATE_LOCK:
+        if key in _STATE_CACHE:
+            return _STATE_CACHE[key]
+    refreshed = _refresh_state_cache()
+    return refreshed.get(key, default)
+
+
+def _is_paused() -> bool:
+    return _state_value("paused", False)
+
+
+def _is_frozen() -> bool:
+    return _state_value("frozen", False)
+
+
+def _voice_enabled() -> bool:
+    return _state_value("voice", VOICE_ENABLED)
+
+
+def _set_state(key: str, value: bool, action: str, actor: str = "") -> None:
+    set_flag(key, value)
+    with _STATE_LOCK:
+        _STATE_CACHE[key] = bool(value)
+    add_audit(actor, action, detail=("on" if value else "off"))
+
+
+def _set_paused(value: bool, actor: str = "") -> None:
+    _set_state("paused", value, "pause" if value else "resume", actor)
+
+
+def _set_frozen(value: bool, actor: str = "") -> None:
+    _set_state("frozen", value, "freeze" if value else "unfreeze", actor)
+
+
+def _set_voice(value: bool, actor: str = "") -> None:
+    _set_state("voice_enabled", value, "voice-on" if value else "voice-off", actor)
+
+
+def _status_line() -> str:
+    return (
+        f"Status - paused: {'on' if _is_paused() else 'off'} | "
+        f"frozen (scoring): {'on' if _is_frozen() else 'off'} | "
+        f"voice: {'on' if _voice_enabled() else 'off'}"
+    )
+
+
+def _season_line() -> str:
+    try:
+        end = float(get_state("season_end_ts", str(SEASON.get("end_ts") or 0)) or 0)
+    except (TypeError, ValueError):
+        end = 0.0
+    if end <= 0:
+        return "Season: open-ended."
+    return "Season ends " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(end)) + "."
+
+
+def _control_sub(text: str) -> Optional[str]:
+    """Return the Pond control sub-command in text, if it is a global control command."""
+    parsed = parse_pond_command(text)
+    if parsed and parsed[0] in ("pause", "resume", "status", "freeze", "unfreeze", "voice", "help"):
+        return parsed[0]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Distress, goose meter, roasts, reactions
+# ---------------------------------------------------------------------------
+
+_GOOSE_METER_WORD_RE = re.compile(r"\bgoose\b", re.IGNORECASE)
+_REACTION_AT_BOT_RE = re.compile(r"<@[A-Z0-9]+>", re.IGNORECASE)
+
+
+def _distress_reply_and_alert(client, say, channel_id: str, user_id: str, thread_ts) -> None:
+    """Plain safety reply plus an organizer alert; never routed through the persona."""
+    text = ai_service.format_distress_reply()
+    if client is not None:
+        _post_private(client, say, channel_id, user_id, text, thread_ts)
+    else:
+        _safe_say(say, text=text, channel=channel_id, thread_ts=thread_ts)
+    alert = f":rotating_light: A member may need a real check-in (in <#{channel_id}>). {_status_line()}"
+    _alert_organizers(client, alert)
+
+
+def _alert_organizers(client, text: str) -> None:
+    if not client or not ORGANIZER_CHANNEL_ID:
+        logger.warning("Organizer alert (no channel configured): %s", text)
+        return
+    try:
+        client.chat_postMessage(channel=ORGANIZER_CHANNEL_ID, text=text, parse="none")
+    except Exception as exc:
+        logger.error("Could not post organizer alert (%s)", type(exc).__name__)
+
+
+def _bump_goose_meter(channel_id: str, text: str) -> int:
+    """Persisted, match-gated counter of how often a channel calls Goose a goose."""
+    if not (GOOSE_METER.get("enabled", True)) or not channel_id:
+        return 0
+    if not _GOOSE_METER_WORD_RE.search(text or ""):
+        return 0
+    try:
+        value = touch_channel_counter(
+            channel_id, "goose_meter", 1.0, float(GOOSE_METER.get("reset_hours", 24) or 24)
+        )
+        return int(value)
+    except Exception as exc:
+        logger.warning("Goose meter update failed (%s)", type(exc).__name__)
+        return 0
+
+
+def _goose_meter_value(channel_id: str) -> int:
+    try:
+        return int(get_channel_counter(channel_id, "goose_meter"))
+    except Exception:
+        return 0
+
+
+def _roast_budget_ok(user_id: str, event=None) -> bool:
+    """Roasts are rare: gated by daily budget and limited to known, non-distressed members."""
+    if not ROASTS.get("enabled", True):
+        return False
+    if not user_id:
+        return False
+    try:
+        status = crumbs.get_pond_status(user_id)
+        if not status.get("opted_in"):
+            return False
+        if status.get("quiet"):
+            return False
+    except Exception:
+        return False
+    day = time.strftime("%Y-%m-%d", time.localtime())
+    key = f"roasts:{day}"
+    try:
+        used = int(get_state(key, "0"))
+    except Exception:
+        used = 0
+    if used >= int(ROASTS.get("max_per_day", 3) or 3):
+        return False
+    set_state(key, str(used + 1))
+    return True
+
+
+def _react_to_message(client, channel_id: str, text: str, author_id: str, message_ts: str) -> None:
+    """Add a light reaction to noteworthy messages, within a per-channel hourly budget."""
+    if not client or not (REACTIONS.get("enabled", True)):
+        return
+    if not channel_id or not message_ts or not author_id:
+        return
+    try:
+        if crumbs.is_quiet(author_id):
+            return
+    except Exception:
+        pass
+    words = [str(w).lower() for w in (REACTIONS.get("trigger_words") or [])]
+    lower = (text or "").lower()
+    matched = any(re.search(rf"\b{re.escape(w)}\b", lower) for w in words if w)
+    at_bot = bool(re.search(rf"<@{re.escape(_bot_user_id_global or '')}>", text or "", re.IGNORECASE)) if _bot_user_id_global else False
+    if not matched and not at_bot:
+        return
+    budget = int(REACTIONS.get("budget_per_hour", 6) or 6)
+    try:
+        used = touch_channel_counter(channel_id, "reactions_hour", 1.0, 1.0)
+    except Exception:
+        return
+    if used > budget:
+        return
+    emoji = ":duck:"
+    try:
+        client.reactions_add(channel=channel_id, timestamp=message_ts, name=emoji.strip(":"))
+    except Exception as exc:
+        logger.debug("Could not add reaction (%s)", type(exc).__name__)
+
+
+_bot_user_id_global: Optional[str] = None
+
+
+def run_scheduled_maintenance(client, force: bool = False) -> None:
+    """Daily maintenance: on Monday post the weekly Pond Report, snapshot, and back up the DB.
+
+    Idempotent per ISO week (tracked in bot_state) and skipped while paused or frozen, so a
+    restart or repeated tick cannot double-post.
+    """
+    if _is_paused() or _is_frozen():
+        return
+    if not force and time.localtime().tm_wday != 0:
+        return
+    week = crumbs.week_key_now()
+    if get_state("last_weekly_report", "") == week:
+        return
+    try:
+        entries = crumbs.get_weekly_leaderboard(week, limit=10)
+    except Exception as exc:
+        logger.error("Weekly report query failed (%s)", type(exc).__name__)
+        return
+    if ORGANIZER_CHANNEL_ID and client is not None:
+        try:
+            client.chat_postMessage(
+                channel=ORGANIZER_CHANNEL_ID,
+                text=(f"Monday check-in for <#{OFFICIAL_LOADOUT_CHANNEL_ID}>:\n"
+                      + crumbs.format_weekly_report(week, entries)),
+                parse="none",
+            )
+        except Exception as exc:
+            logger.error("Could not post the weekly report (%s)", type(exc).__name__)
+    else:
+        logger.info("Weekly report ready for %s but no organizer channel is configured.", week)
+    try:
+        crumbs.snapshot_week(week)
+    except Exception as exc:
+        logger.warning("Weekly snapshot failed (%s)", type(exc).__name__)
+    try:
+        backup_database()
+    except Exception as exc:
+        logger.warning("Database backup failed (%s)", type(exc).__name__)
+    set_state("last_weekly_report", week)
+
+
+
 def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
     """Registers all Slack Bolt event listeners and slash commands."""
+    global _bot_user_id_global
+    _bot_user_id_global = bot_user_id
+    _refresh_state_cache()
+
 
     # 1. MESSAGE EVENT: Track activity and support in-chat command triggers
     @app.event("message")
@@ -867,6 +1314,16 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         # ALWAYS reply in a thread: continue the existing thread, or start one on the message.
         target_thread_ts = event.get("thread_ts") or event.get("ts")
 
+        # Global kill switch: when paused, only organizers may run control commands.
+        if _is_paused():
+            control = _control_sub(clean_bot_addressing(text, bot_user_id).lower())
+            if not (control and _is_organizer(user_id)):
+                return
+
+        # Goose meter + light reactions for channel activity (persisted, match-gated, budgeted).
+        _bump_goose_meter(channel_id, text)
+        _react_to_message(client, channel_id, text, user_id, event.get("ts") or "")
+
         is_dm = bool(channel_id and channel_id.startswith("D")) or event.get("channel_type") == "im"
         is_direct_bot_mention = bool(
             bot_user_id
@@ -884,6 +1341,15 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         is_addressed = is_named or is_thread_followup
         is_prefixed_cmd = bool(_COMMAND_PREFIX_RE.match(text))
         is_called = is_addressed or is_prefixed_cmd
+
+        # Distress takes priority over the persona: plain safety reply + organizer alert.
+        if (
+            DISTRESS.get("enabled", True)
+            and ai_service.detect_distress(text)
+            and (is_dm or is_addressed)
+        ):
+            _distress_reply_and_alert(client, say, channel_id, user_id, target_thread_ts)
+            return
 
         if not is_called:
             _score_loadout_activity(user_id, channel_id, event, client, text, rules)
@@ -979,6 +1445,20 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         cleaned_text = sanitize_context_text(clean_bot_addressing(raw_text, bot_user_id))
         clean_lower = cleaned_text.lower()
 
+        # Global kill switch: when paused, only organizers may run control commands.
+        if _is_paused():
+            control = _control_sub(clean_lower)
+            if not (control and _is_organizer(user_id)):
+                return
+
+        _bump_goose_meter(channel_id, raw_text)
+        _react_to_message(client, channel_id, raw_text, user_id, event.get("ts") or "")
+
+        # Distress takes priority over the persona: plain safety reply + organizer alert.
+        if DISTRESS.get("enabled", True) and ai_service.detect_distress(raw_text or cleaned_text):
+            _distress_reply_and_alert(client, say, channel_id, user_id, target_thread_ts)
+            return
+
         pond_cmd = parse_pond_command(clean_lower)
         if pond_cmd is not None:
             if _handle_pond_command(pond_cmd[0], pond_cmd[1], client, say, channel_id, user_id, target_thread_ts):
@@ -1050,6 +1530,8 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         if not channel_id or not author or not reactor or not message_ts:
             return
         if channel_id != OFFICIAL_LOADOUT_CHANNEL_ID:
+            return
+        if _is_paused() or _is_frozen():
             return
         if reactor == author or (bot_user_id and reactor == bot_user_id):
             return

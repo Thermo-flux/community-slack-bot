@@ -46,6 +46,49 @@
     "_comment_pfp": "Default fallback emoji icon if custom PFP avatar is not set in Slack App settings.",
     "custom_pfp_emoji": ":duck:"
   },
+  "_comment_targets": "Organizer channel receives the weekly Pond Report and alerts; owner_user_id confirms all-time results.",
+  "organizer_channel_id": "",
+  "owner_user_id": "",
+  "privacy": {
+    "_comment": "Public boards show at most this many members, and only those who ran 'show'.",
+    "public_board_size": 3
+  },
+  "voice": {
+    "_comment": "LLM chat is on by default so the bot keeps talking; hourly_limit is per person per hour. Set enabled false to mute the voice.",
+    "enabled": true,
+    "hourly_limit": 120
+  },
+  "rewards": {
+    "_comment": "While announced is false, the runtime voice filter blocks these words from bot replies.",
+    "announced": false,
+    "words": ["reward", "rewards", "prize", "prizes", "swag", "giveaway", "payout", "cash", "stipend", "bounty", "paid", "money"]
+  },
+  "reactions": {
+    "_comment": "Budget is per channel per hour; quiet members never get bot reactions.",
+    "enabled": true,
+    "budget_per_hour": 6,
+    "trigger_words": ["congrats", "congratulations", "gm", "good morning", "nice one"]
+  },
+  "roasts": {
+    "_comment": "Rare, light roasts on harmless habits only. Never on distress or newcomers.",
+    "enabled": true,
+    "max_per_day": 3
+  },
+  "goose_meter": {
+    "_comment": "Channel counter that rises when people call Goose a goose.",
+    "enabled": true,
+    "reset_hours": 24
+  },
+  "distress": {
+    "_comment": "Plain safety reply plus an organizer alert on sad or unsafe messages.",
+    "enabled": true,
+    "reply": "Hey, I'm just a duck and I can't help with something this heavy, but you matter. If you're in danger or thinking about harming yourself, please reach out to a local emergency number or a crisis line right now. If you're in the US you can call or text 988. I've also pinged the organizers so a real human can check in on you."
+  },
+  "season": {
+    "_comment": "Season end as a Unix timestamp (0 = open-ended). Set with 'goose set-end'.",
+    "end_ts": 0
+  },
+  "kill_switch": false,
   "level_tiers": [
     {
       "level": 1,

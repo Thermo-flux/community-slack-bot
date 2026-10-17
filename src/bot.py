@@ -7,6 +7,8 @@ MAIN SLACK BOT ENTRY POINT (src/bot.py)
 import logging
 import signal
 import sys
+import threading
+import time
 
 try:
     if hasattr(sys.stdout, "reconfigure"):
@@ -23,16 +25,18 @@ from config import (
     AI_MODEL,
     AI_PROVIDER,
     CONFIG,
+    ConfigValidationError,
     DB_PATH,
     SLACK_APP_TOKEN,
     SLACK_BOT_TOKEN,
     WATCHED_CHANNELS,
+    assert_valid_config,
     disable_watched_channel,
     get_configured_channels,
     set_watched_channel_verified,
 )
 from database import init_db
-from handlers import register_handlers
+from handlers import register_handlers, run_scheduled_maintenance
 
 logger = logging.getLogger("CommunityBot")
 
@@ -105,6 +109,16 @@ def main() -> None:
     if not check_tokens():
         sys.exit(1)
 
+    try:
+        assert_valid_config()
+    except ConfigValidationError as e:
+        print("\n" + "=" * 70, flush=True)
+        print("❌ INVALID CONFIGURATION - refusing to start", flush=True)
+        print(f"  • {e}", flush=True)
+        print("Fix config/config.json, then restart.", flush=True)
+        print("=" * 70 + "\n", flush=True)
+        sys.exit(1)
+
     logger.info("Initializing SQLite database...")
     try:
         init_db(DB_PATH)
@@ -158,6 +172,16 @@ def main() -> None:
             )
 
     register_handlers(app, bot_user_id=bot_user_id)
+
+    def _scheduler_loop() -> None:
+        while True:
+            try:
+                run_scheduled_maintenance(app.client)
+            except Exception as exc:
+                logger.warning("Scheduled maintenance error (%s)", type(exc).__name__)
+            time.sleep(3600)
+
+    threading.Thread(target=_scheduler_loop, name="goose-scheduler", daemon=True).start()
 
     bot_display_name = CONFIG.get("bot_name") or "goose-lee"
     print_banner(bot_display_name, bot_user_id)
