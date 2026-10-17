@@ -85,10 +85,10 @@ def test_bread_only_near_duck(vibes, clock):
     assert react(vibes, "bread one two three four five six seven eight duck", user="U3") == "duck"
 
 
-def test_duck_word_and_name_word_fire_duck(vibes, clock):
+def test_duck_word_fires_but_name_word_is_not_a_word_trigger(vibes, clock):
     assert react(vibes, "quack quack", user="U1") == "duck"
     assert react(vibes, "look at this duck", user="U2") == "duck"
-    assert react(vibes, "goose-lee said hi", user="U3") == "duck"
+    assert react(vibes, "goose-lee said hi", user="U3") is None
 
 
 def test_one_reaction_per_message_uses_the_first_match(vibes, clock):

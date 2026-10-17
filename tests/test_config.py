@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import math
 import os
 
 import pytest
@@ -30,6 +31,41 @@ def test_real_config_loads_and_keeps_the_safe_defaults():
     assert len(cfg.levels.titles) == len(cfg.levels.thresholds)
     assert cfg.voice.enabled is False, "the voice must ship switched off"
     assert cfg.rewards.announced is False, "no reward wording until the owner approves"
+
+
+def test_voice_defaults_and_yaml_use_responsive_limits_without_shortening_replies():
+    defaults = Config().voice
+    configured = load_config(REAL).voice
+    for voice in (defaults, configured):
+        assert voice.timeout_s == 30.0
+        assert voice.queue_timeout_s == 5.0
+        assert voice.reply_max_chars == 800
+        assert voice.elaborate_max_chars == 1200
+        assert voice.max_tokens == 350
+        assert voice.elaborate_max_tokens == 600
+        assert voice.person_gap_s == 0
+        assert voice.breaker_open_s == 15
+        assert voice.junk_off_s == 30
+
+
+@pytest.mark.parametrize("field,value", [
+    ("timeout_s", 0), ("timeout_s", -1), ("timeout_s", math.inf), ("timeout_s", math.nan),
+    ("queue_timeout_s", 0), ("queue_timeout_s", -1),
+    ("queue_timeout_s", math.inf), ("queue_timeout_s", math.nan),
+    ("concurrency", 0), ("queue_size", -1), ("person_gap_s", -1),
+    ("breaker_failures", 0), ("breaker_window_s", 0), ("breaker_open_s", 0),
+    ("junk_window", 0), ("junk_ratio", -0.1), ("junk_ratio", 1.1),
+    ("junk_ratio", math.inf), ("junk_ratio", math.nan), ("junk_off_s", 0),
+])
+def test_invalid_voice_limits_fail_closed(field, value):
+    with pytest.raises(ConfigError, match="voice\\."):
+        config_from_dict({"voice": {field: value}})
+
+
+def test_voice_can_disable_queue_and_fast_followups_remain_allowed():
+    voice = config_from_dict({"voice": {"queue_size": 0, "person_gap_s": 0}}).voice
+    assert voice.queue_size == 0
+    assert voice.person_gap_s == 0
 
 
 def test_defaults_validate():

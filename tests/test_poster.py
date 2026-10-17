@@ -13,7 +13,7 @@ import pytest
 from goose.config import default_config
 from goose.gateway.poster import (APPROVED_TIMEOUT_JOKE, PostFilter, escape_text, finalize, has_forbidden_markup,
                                   render_canned)
-from goose.types import Action, VoiceJob, VoiceResult
+from goose.types import Action, FilterResult, VoiceJob, VoiceResult
 
 REQ_ID = "req-1"
 CARD = {
@@ -227,30 +227,40 @@ def test_step3_plain_text_passes(pf):
     assert reason_of(pf, reply("Quak, quak.")) == "ok"
 
 
-# ----- filter step 4: emoji allowlist, at most two ---------------------------------------------------------------------
+# ----- filter step 4: emoji allowlist ----------------------------------------------------------------------------------
 
 def test_step4_allowlisted_emoji_passes(pf):
     assert reason_of(pf, reply("Quak :duck: :tada:")) == "ok"
 
 
-def test_step4_star_is_never_allowed(pf):
-    assert reason_of(pf, reply("Great work :star:")) == "emoji"
+def test_step4_allowlisted_star_passes(pf):
+    assert reason_of(pf, reply("Great work :star:")) == "ok"
 
 
-def test_step4_more_than_two_emoji_rejects(pf):
-    assert reason_of(pf, reply("Quak :duck: :tada: :wave:")) == "emoji"
+def test_step4_six_allowlisted_emoji_pass(pf):
+    assert reason_of(pf, reply("Quak :duck: :tada: :wave: :eyes: :bread: :feather:")) == "ok"
 
 
-def test_step4_unicode_emoji_rejects(pf):
-    assert reason_of(pf, reply("Quak \U0001F986")) == "emoji"
+def test_step4_unicode_emoji_normalizes_to_allowlisted_shortcode(pf):
+    result = pf.check(reply("Quak \U0001F986"), request())
+    assert result.ok and result.text == "Quak :duck:"
+
+
+def test_step4_surrogate_pair_emoji_normalizes_without_rejecting(pf):
+    result = pf.check(reply("Quak \ud83e\udd86"), request())
+    assert result.ok and result.text == "Quak :duck:"
+
+
+def test_step4_seven_allowlisted_emoji_reject(pf):
+    assert reason_of(pf, reply("Quak :duck: :tada: :wave: :eyes: :bread: :feather: :rocket:")) == "emoji"
 
 
 def test_step4_reaction_counts_toward_the_limit(pf):
-    assert reason_of(pf, reply("Quak :duck: :tada:", reaction="duck")) == "emoji"
+    assert reason_of(pf, reply("Quak :duck: :tada: :wave: :eyes: :bread: :rocket:", reaction="duck")) == "emoji"
 
 
 def test_step4_reaction_outside_allowlist_rejects(pf):
-    assert reason_of(pf, reply("Quak.", reaction="star")) == "emoji"
+    assert reason_of(pf, reply("Quak.", reaction="not_allowlisted")) == "emoji"
 
 
 def test_step4_allowed_reaction_is_returned(pf):
@@ -286,16 +296,20 @@ def test_step5_length_is_counted_after_expansion(pf):
     assert reason_of(pf, reply(text), req, names={"you": "Alexander"}) == "length"
 
 
-def test_step5_three_sentences_reject(pf):
-    assert reason_of(pf, reply("Quak. Quak. Quak.")) == "sentences"
+def test_step5_three_sentences_pass(pf):
+    assert reason_of(pf, reply("Quak. Quak. Quak.")) == "ok"
 
 
 def test_step5_two_sentences_pass(pf):
     assert reason_of(pf, reply("Quak. Quak quak.")) == "ok"
 
 
-def test_step5_code_and_backticks_reject(pf):
-    assert reason_of(pf, reply("Try `print(1)`.")) == "code"
+def test_step5_nine_sentences_reject(pf):
+    assert reason_of(pf, reply("Quak. Quak. Quak. Quak. Quak. Quak. Quak. Quak. Quak.")) == "sentences"
+
+
+def test_step5_inline_code_and_backticks_pass(pf):
+    assert reason_of(pf, reply("Try `print(1)`.")) == "ok"
 
 
 # ----- filter step 6: number grounding (only with a stat word) --------------------------------------------------------
@@ -351,8 +365,8 @@ def test_step7_weak_win_word_rejected_in_event_mode(pf):
     assert reason_of(pf, reply("Bruce Lee wins, quak."), req, user_text="who wins?") == "reward"
 
 
-def test_step7_weak_win_word_rejected_when_user_did_not_use_it(pf):
-    assert reason_of(pf, reply("Bruce Lee won, quak."), user_text="who is Bruce Lee?") == "reward"
+def test_step7_weak_win_word_allowed_in_general_chat(pf):
+    assert reason_of(pf, reply("Bruce Lee won, quak."), user_text="who is Bruce Lee?") == "ok"
 
 
 def test_step7_weak_win_word_allowed_when_user_has_any_win_word(pf):
@@ -389,10 +403,18 @@ def test_step7_generic_program_words_pass_in_general_chat(pf):
     assert reason_of(pf, resp, user_text="how loud is a rocket launch?") == "ok"
 
 
+def test_step7_ordinary_loadout_development_channel_mention_passes(pf):
+    assert reason_of(pf, reply("The loadout-development channel came up, quak.")) == "ok"
+
+
 def test_step7_program_question_never_gets_a_spoken_answer(pf):
     # defense in depth: the input gate should have redirected, but if it slipped through the filter still refuses
     resp = reply("It launches on 2026-10-19, quak.")
     assert reason_of(pf, resp, user_text="When does LOADOUT launch?") == "program"
+
+
+def test_step7_actual_loadout_launch_answer_is_still_rejected(pf):
+    assert reason_of(pf, reply("When does LOADOUT launch?"), user_text="tell me a joke") == "program"
 
 
 def test_general_chat_about_a_famous_person_passes(pf):
@@ -464,7 +486,9 @@ def test_step6_top_three_removed_from_stat_words_but_week_still_grounds_numbers(
 # ----- filter step 9: roast lint ---------------------------------------------------------------------------------------
 
 def test_step9_roast_flag_rejects_when_not_allowed(pf):
-    assert reason_of(pf, reply("Your jokes are slow, quak.", flags={"roasted": True})) == "roast"
+    resp = reply("Your jokes are slow, quak.", flags={"roasted": True})
+    assert reason_of(pf, resp) == "ok"
+    assert resp["flags"]["roasted"] is False
 
 
 def test_step9_roast_allowed_on_a_harmless_topic_passes(pf):
@@ -551,7 +575,15 @@ def test_roast_word_in_a_different_sentence_from_the_name_passes(pf):
 # ----- filter step 12: German only through placeholders ----------------------------------------------------------------
 
 def test_step12_german_words_outside_placeholders_reject(pf):
-    assert reason_of(pf, reply("Ich bin eine Ente.")) == "german"
+    assert reason_of(pf, reply("Ich bin eine Ente.")) == "ok"
+
+
+def test_step12_three_german_words_outside_placeholders_reject(pf):
+    assert reason_of(pf, reply("Das ist eine Ente.")) == "german"
+
+
+def test_step12_common_english_overlap_does_not_reject(pf):
+    assert reason_of(pf, reply("The duck is here, quak.")) == "ok"
 
 
 def test_step12_german_inside_placeholder_passes(pf):
@@ -569,11 +601,15 @@ def test_step12_german_placeholder_rejected_when_not_allowed(pf):
 # ----- filter step 13: flag truth --------------------------------------------------------------------------------------
 
 def test_step13_uses_german_true_without_placeholder_rejects(pf):
-    assert reason_of(pf, reply("Quak.", flags={"uses_german": True})) == "flags"
+    resp = reply("Quak.", flags={"uses_german": True})
+    assert reason_of(pf, resp) == "ok"
+    assert resp["flags"]["uses_german"] is False
 
 
 def test_step13_placeholder_without_uses_german_rejects(pf):
-    assert reason_of(pf, reply("Quak {{de:quak}}.", flags={"uses_german": False})) == "flags"
+    resp = reply("Quak {{de:quak}}.", flags={"uses_german": False})
+    assert reason_of(pf, resp) == "ok"
+    assert resp["flags"]["uses_german"] is True
 
 
 def test_step13_matching_flag_passes(pf):
@@ -633,7 +669,7 @@ def test_finalize_success_posts_in_thread_with_reaction(pf):
 
 def test_finalize_no_reaction_when_filter_drops_it(pf):
     # a reply whose reaction is not allowlisted is rejected: the canned line goes out and no reaction is added
-    actions = finalize(job(), ok(reply("Quak.", reaction="star")), pf, FakeLines())
+    actions = finalize(job(), ok(reply("Quak.", reaction="not_allowlisted")), pf, FakeLines())
     assert [a.kind for a in actions] == ["post"]
     assert actions[0].text == "Quak Quak fallback &amp; more"
 
@@ -678,7 +714,13 @@ def test_finalize_filter_rejection_on_ephemeral_stays_private(pf):
 
 
 def test_finalize_silent_posts_nothing(pf):
-    assert finalize(job(), ok(reply("", action="silent")), pf, FakeLines()) == []
+    actions = finalize(job(thinking_ts="3.0"), ok(reply("", action="silent")), pf, FakeLines())
+    assert [a.kind for a in actions] == ["update"]
+    assert actions[0].message_ts == "3.0" and actions[0].text == "Quak Quak fallback &amp; more"
+
+
+def test_finalize_event_silent_remains_silent(pf):
+    assert finalize(job(kind="event", mode="event"), ok(reply("", action="silent")), pf, FakeLines()) == []
 
 
 def test_finalize_redirect_posts_the_canned_line(pf):
@@ -694,6 +736,35 @@ def test_finalize_recent_duplicate_posts_the_fallback(pf):
 
 def test_finalize_no_fallback_text_posts_nothing(pf):
     assert finalize(job(fallback=""), VoiceResult(ok=False, reason="timeout"), pf, FakeLines()) == []
+
+
+def test_finalize_empty_fallback_resolves_addressed_thinking_message(pf):
+    actions = finalize(job(fallback="", thinking_ts="3.0"), VoiceResult(ok=False, reason="timeout"), pf, FakeLines())
+    assert [a.kind for a in actions] == ["update"]
+    assert actions[0].message_ts == "3.0" and actions[0].text
+
+
+def test_finalize_filter_is_not_repeated_when_result_is_supplied():
+    class NoCheck:
+        def check(self, *args, **kwargs):
+            raise AssertionError("filter should not run again")
+
+    actions = finalize(job(), ok(reply("Quak.")), NoCheck(), FakeLines(),
+                       checked_result=FilterResult(ok=True, text="Quak."))
+    assert [a.kind for a in actions] == ["post"]
+
+
+def test_finalize_invalid_result_resolves_addressed_thinking_message(pf):
+    actions = finalize(job(fallback="", thinking_ts="3.0"), "broken", pf, FakeLines())
+    assert [a.kind for a in actions] == ["update"]
+    assert actions[0].message_ts == "3.0" and actions[0].text
+
+
+def test_finalize_unrenderable_fallback_resolves_addressed_thinking_message(pf):
+    actions = finalize(job(fallback="Quak {de:missing}", thinking_ts="3.0"),
+                       VoiceResult(ok=False, reason="timeout"), pf, FakeLines())
+    assert [a.kind for a in actions] == ["update"]
+    assert actions[0].message_ts == "3.0" and actions[0].text
 
 
 def test_finalize_mention_token_survives_escaping(pf):

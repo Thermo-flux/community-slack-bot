@@ -134,20 +134,21 @@ def mentions_goose(text: str) -> bool:
 
 
 def is_calling_goose(text: str) -> bool:
-    """True when someone is calling Goose by name or talking to Goose without a Slack @ mention."""
+    """True when someone is addressing Goose by name or talking to Goose without a Slack @ mention.
+
+    A bare goose word counts as address only at the start of the message; incidental references stay ambient.
+    """
     if mentions_name(text):
         return True
     vis = _visible(text).strip()
     if not vis:
         return False
     patterns = [
-        r"\b(?:hey|hi|yo|hello|sup|okay|ok)\s+goose\b",
-        r"\bgoose\s*[,:?!]",
-        r"^\s*goose\b",
-        r"\bgoose\s*\?*$",
-        r"\b(?:what do you think|thoughts|opinion)\s*,?\s*goose\b",
-        r"\btell me\s*,?\s*goose\b",
-        r"\b(?:duck|goose)\s*,\s*",
+        r"^\s*(?:hey|hi|yo|hello|sup|okay|ok)\s+goose(?:\b|(?=[,:?!]))",
+        r"^\s*goose(?:\s*[,:?!]|\s|$)",
+        r"^\s*(?:what do you think|thoughts|opinion)\s*,?\s*goose\b",
+        r"^\s*tell me\s*,?\s*goose\b",
+        r"^\s*(?:duck|goose)\s*,\s*",
     ]
     for pat in patterns:
         if re.search(pat, vis, re.I):

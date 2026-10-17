@@ -113,6 +113,15 @@ def test_mentions_goose_is_a_bare_word_only():
     assert not rules.mentions_goose("https://example.com/goose")
 
 
+def test_is_calling_goose_accepts_address_forms_but_not_incidental_mentions():
+    assert rules.is_calling_goose("hey goose, how do we write this?")
+    assert rules.is_calling_goose("goose help me with this")
+    assert rules.is_calling_goose("goose-lee, how do we write this?")
+    assert not rules.is_calling_goose("a goose stole my bread")
+    assert not rules.is_calling_goose("the goose was near the pond")
+    assert not rules.is_calling_goose("you are a goose")
+
+
 def test_is_explain_request_positive_cases():
     assert rules.is_explain_request("what does that mean?")
     assert rules.is_explain_request("what does it mean")

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
+import threading
 
 import pytest
 
@@ -116,11 +117,19 @@ def test_the_window_rolls_after_an_hour(config, db, clock):
 
 
 def test_five_second_gap_between_messages(config, db, clock):
+    config.voice.person_gap_s = 5
     c = _client(config, db, clock, Fake(_ok("x")))
     c.record_person("U1", clock.now())
     clock.advance(2)
     assert c.allow_person("U1", clock.now()) == (False, "gap")
     clock.advance(3)
+    assert c.allow_person("U1", clock.now()) == (True, "")
+
+
+def test_default_zero_gap_allows_consecutive_messages(config, db, clock):
+    assert config.voice.person_gap_s == 0
+    c = _client(config, db, clock, Fake(_ok("x")))
+    c.record_person("U1", clock.now())
     assert c.allow_person("U1", clock.now()) == (True, "")
 
 
@@ -162,6 +171,39 @@ def test_runtime_switch_overrides_config_and_survives_a_new_client(config, db, c
     assert _client(config, db, clock, Fake()).enabled() is True
     c.set_enabled(False)
     assert c.enabled() is False
+
+
+def test_enabled_database_reads_do_not_hold_voice_lock(config, db, clock):
+    c = _client(config, db, clock, Echo())
+    readers = threading.Barrier(2)
+    lock_owned = []
+    results = []
+    errors = []
+    original_enabled = c.enabled
+
+    def synchronized_enabled():
+        lock_owned.append(c._lock._is_owned())
+        readers.wait(timeout=2)
+        return original_enabled()
+
+    c.enabled = synchronized_enabled
+
+    def check_available():
+        try:
+            results.append(c.available(clock.now()))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=check_available), threading.Thread(target=check_available)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert lock_owned == [False, False]
+    assert results == [(True, ""), (True, "")]
 
 
 def test_call_succeeds_and_strips_usage(config, db, clock):
@@ -235,7 +277,7 @@ def test_network_error_is_handled_without_raising(config, db, clock):
     assert result.ok is False and result.reason == "network"
 
 
-def test_late_replies_are_dropped(config, db, clock):
+def test_transport_complete_response_is_not_discarded_for_reported_latency(config, db, clock):
     mono = Mono()
     post = Fake(_ok("r-1"))
 
@@ -246,7 +288,7 @@ def test_late_replies_are_dropped(config, db, clock):
     c = _client(config, db, clock, post)
     c._monotonic = mono
     result = c.call(_req("r-1"))
-    assert result.ok is False and result.reason == "timeout"
+    assert result.ok is True
 
 
 def test_http_errors_map_to_reasons(config, db, clock):
@@ -341,6 +383,36 @@ def test_concurrency_slots_are_released_after_each_call(config, db, clock):
     for i, rid in enumerate(["a", "b", "c", "d"]):
         c.call(_req(rid))
     assert c.status(clock.now())["inflight"] == 0
+
+
+def test_queue_wait_uses_queue_timeout_and_releases_half_open_probe(config, db, clock):
+    config.voice.timeout_s = 30
+    config.voice.queue_timeout_s = 0.25
+    c = _client(config, db, clock, Fake(_ok("probe")))
+    c._breaker = "open"
+    c._opened_at = clock.now()
+    clock.advance(config.voice.breaker_open_s)
+
+    class RefusingSemaphore:
+        def __init__(self):
+            self.timeout = None
+
+        def acquire(self, timeout=None):
+            self.timeout = timeout
+            return False
+
+        def release(self):
+            raise AssertionError("release after refused acquire")
+
+    semaphore = RefusingSemaphore()
+    c._semaphore = semaphore
+
+    result = c.call(_req("probe"))
+
+    assert result.ok is False and result.reason == "queue_full"
+    assert semaphore.timeout == 0.25
+    assert c._probe_inflight is False
+    assert c.available(clock.now()) == (True, "")
 
 
 # ----- junk breaker --------------------------------------------------------------------------------------------

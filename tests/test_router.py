@@ -20,10 +20,11 @@ BOT = "UBOT"
 class FakeVoiceClient:
     """Enough of goose.gateway.voice_client.VoiceClient for the router."""
 
-    def __init__(self, enabled=True, allow=True, available=True):
+    def __init__(self, enabled=True, allow=True, available=True, deny_reason="limit"):
         self._enabled = enabled
         self.allow = allow
         self.avail = available
+        self.deny_reason = deny_reason
         self.recorded = []
 
     def enabled(self):
@@ -33,7 +34,7 @@ class FakeVoiceClient:
         return (self.avail, "" if self.avail else "breaker_open")
 
     def allow_person(self, user_id, now):
-        return (True, "") if self.allow else (False, "limit")
+        return (True, "") if self.allow else (False, self.deny_reason)
 
     def record_person(self, user_id, now):
         self.recorded.append(user_id)
@@ -231,6 +232,45 @@ def test_goose_gag_one_person_gets_duck_reaction_and_small_heat(ctx, ev, clock):
     assert 0.0 < ctx.mood.heat(clock.now()) < 3.0
 
 
+def test_explicit_goose_gag_still_works_with_four_words(ctx, ev, clock):
+    join(ctx, "U1")
+    res = route(ctx, ev(text="<@UBOT> you are a goose", user="U1", bot_mentioned=True, mentions=[BOT]))
+    assert "duck" in [a.emoji for a in res.actions if a.kind == "reaction"]
+    assert ctx.mood.heat(clock.now()) > 0.0
+
+
+@pytest.mark.parametrize("text", [
+    "hey goose, how do we write this?",
+    "goose help me write this",
+    "goose-lee, how do we write this?",
+])
+def test_explicit_goose_address_with_a_question_is_chat_not_the_gag(make_ctx, ev, text):
+    voice = FakeVoiceClient()
+    ctx = make_ctx(voice=voice)
+    join(ctx, "U1")
+    res = route(ctx, ev(text=text, user="U1"))
+    assert len(res.jobs) == 1 and res.jobs[0].mode == "chat"
+    assert ctx.mood.heat(ctx.clock.now()) == 0.0
+
+
+def test_incidental_goose_word_stays_ambient(make_ctx, ev):
+    voice = FakeVoiceClient()
+    ctx = make_ctx(voice=voice)
+    join(ctx, "U1")
+    res = route(ctx, ev(text="a goose stole my bread", user="U1"))
+    assert res.jobs == []
+    assert ctx.mood.heat(ctx.clock.now()) == 0.0
+
+
+def test_voice_person_gap_returns_a_short_canned_reply(make_ctx, ev):
+    voice = FakeVoiceClient(allow=False, deny_reason="gap")
+    ctx = make_ctx(voice=voice)
+    join(ctx, "U1")
+    res = route(ctx, ev(text="<@UBOT> quick follow up", user="U1", bot_mentioned=True, mentions=[BOT]))
+    assert res.jobs == []
+    assert "post" in kinds(res)
+
+
 def test_goose_gag_four_people_raise_the_heat(ctx, ev, clock):
     join(ctx, "U1", "U2", "U3", "U4")
     for uid in ("U1", "U2", "U3", "U4"):
@@ -247,16 +287,16 @@ def test_goose_call_naming_another_person_adds_no_heat(ctx, ev, clock):
 
 # ------------------------------------------------------------ gates for addressed messages
 
-def test_ping_by_joined_user_reacts_and_queues_a_voice_job(make_ctx, ev):
+def test_ping_by_joined_user_queues_a_voice_job_without_an_auto_reaction(make_ctx, ev):
     voice = FakeVoiceClient()
     ctx = make_ctx(voice=voice)
     join(ctx, "U1")
     res = route(ctx, ev(text="<@UBOT> what is a duck anyway", user="U1", bot_mentioned=True, mentions=[BOT]))
-    assert "duck" in [a.emoji for a in res.actions if a.kind == "reaction"]
+    assert "duck" not in [a.emoji for a in res.actions if a.kind == "reaction"]
     assert len(res.jobs) == 1
     job = res.jobs[0]
     assert job.kind == "addressed" and job.mode == "chat"
-    assert job.request["v"] == 1 and job.request["persona"]["max_chars"] == 300
+    assert job.request["v"] == 1 and job.request["persona"]["max_chars"] == ctx.config.voice.reply_max_chars
     assert "card" in job.request and "input" in job.request
     text = job.request["input"]["message"]["text"]
     assert "UBOT" not in text and "someone" in text

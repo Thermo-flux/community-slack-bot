@@ -14,6 +14,7 @@ import json
 import os
 import random
 import re
+import threading
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import pytest
@@ -71,13 +72,26 @@ GAG_MOMENTS = {
 # ------------------------------------------------------------------------------------------------ fakes
 
 class FakeSlack:
-    """Stands in for slack_sdk's WebClient. Records every call; returns nothing."""
+    """Slack-shaped fake with message timestamps and mutable posted message state."""
 
     def __init__(self) -> None:
         self.calls: List[Tuple[str, Dict[str, Any]]] = []
+        self._next_ts = 0
+        self.messages: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
-    def chat_postMessage(self, **kwargs: Any) -> None:
-        self.calls.append(("chat_postMessage", kwargs))
+    def chat_postMessage(self, **kwargs: Any) -> Dict[str, Any]:
+        self._next_ts += 1
+        ts = "%.6f" % (START + self._next_ts / 1000)
+        self.calls.append(("chat_postMessage", dict(kwargs, _fake_ts=ts)))
+        self.messages[(str(kwargs.get("channel") or ""), ts)] = dict(kwargs, ts=ts)
+        return {"ok": True, "ts": ts}
+
+    def chat_update(self, **kwargs: Any) -> Dict[str, Any]:
+        self.calls.append(("chat_update", kwargs))
+        key = (str(kwargs.get("channel") or ""), str(kwargs.get("ts") or ""))
+        current = self.messages.setdefault(key, {})
+        current.update(kwargs)
+        return {"ok": True, "ts": key[1]}
 
     def chat_postEphemeral(self, **kwargs: Any) -> None:
         self.calls.append(("chat_postEphemeral", kwargs))
@@ -264,7 +278,21 @@ class World:
 
 
 def posted(calls: Sequence[Tuple[str, Dict[str, Any]]], channel: str = CHANNEL) -> List[str]:
-    return [kw["text"] for name, kw in calls if name == "chat_postMessage" and kw.get("channel") == channel]
+    messages: Dict[str, str] = {}
+    order: List[str] = []
+    for name, kw in calls:
+        if kw.get("channel") != channel:
+            continue
+        if name == "chat_postMessage":
+            ts = str(kw.get("_fake_ts") or "call-%d" % len(order))
+            if ts not in messages:
+                order.append(ts)
+            messages[ts] = str(kw.get("text") or "")
+        elif name == "chat_update":
+            ts = str(kw.get("ts") or "")
+            if ts in messages:
+                messages[ts] = str(kw.get("text") or "")
+    return [messages[ts] for ts in order]
 
 
 def ephemerals(calls: Sequence[Tuple[str, Dict[str, Any]]]) -> List[Tuple[str, str]]:
@@ -446,6 +474,60 @@ def test_addressed_message_gets_one_canned_reply_when_voice_is_off_or_failing(tm
         assert len(w.http.requests) == 1               # tried once, no retry
 
 
+def test_slow_voice_call_does_not_hold_database_lock_and_updates_one_visible_message(tmp_path):
+    w = World(tmp_path, voice=True)
+    w.join("USLOW")
+    provider_started = threading.Event()
+    release_provider = threading.Event()
+    quick_command_done = threading.Event()
+    errors: List[BaseException] = []
+
+    def slow_answer(body):
+        provider_started.set()
+        if not release_provider.wait(timeout=5):
+            raise TimeoutError("test provider was not released")
+        return speak("Short answer: yes.")(body)
+
+    w.http.answer = slow_answer
+
+    def send_addressed_message():
+        try:
+            w.post_message("USLOW", "<@UBOT> is the pond open today")
+        except BaseException as exc:
+            errors.append(exc)
+
+    def run_quick_command():
+        try:
+            w.command("join", "UQUICK")
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            quick_command_done.set()
+
+    provider_thread = threading.Thread(target=send_addressed_message)
+    command_thread = None
+    try:
+        provider_thread.start()
+        assert provider_started.wait(timeout=3), "voice provider was not reached"
+        command_thread = threading.Thread(target=run_quick_command)
+        command_thread.start()
+        assert quick_command_done.wait(timeout=3), "quick database command waited on the provider I/O"
+        assert not release_provider.is_set()
+    finally:
+        release_provider.set()
+        provider_thread.join(timeout=5)
+        if command_thread is not None:
+            command_thread.join(timeout=5)
+
+    assert not provider_thread.is_alive()
+    assert command_thread is not None and not command_thread.is_alive()
+    assert errors == []
+    assert w.said() == ["Short answer: yes."]
+    assert sum(name == "chat_postMessage" for name, _ in w.slack.calls) == 1
+    assert sum(name == "chat_update" for name, _ in w.slack.calls) == 1
+    assert list(w.slack.messages.values())[0]["text"] == "Short answer: yes."
+
+
 # ============================================================================================== scenario 4
 
 def test_message_limit_is_per_hour_then_one_canned_line(tmp_path):
@@ -593,7 +675,8 @@ def test_quiet_person_gets_no_reaction_and_no_roast(tmp_path):
     assert reactions(w.since(mark)) == []
     mark = w.mark()
     w.post_message("UCONTROL", "<@UBOT> is the pond loud today")
-    assert reactions(w.since(mark)) == ["duck"]        # the control shows the reaction path works
+    assert reactions(w.since(mark)) == []
+    assert w.said(mark)[0] in w.canned("ack")           # control still receives the addressed acknowledgement
 
     mark = w.mark()
     w.post_message("UQUIET", "wow!!!!! lol lol lol this pond is great")

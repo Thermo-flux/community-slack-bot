@@ -54,7 +54,9 @@ The voice (the LLM answers) stays **off** until all of these are done:
 - the owner's approval.
 
 There is **no spend cap** in the bot, by design. Set a spending limit in the LLM provider's console before you
-switch the voice on. The bot limits each person to 12 addressed messages per hour and keeps replies short.
+switch the voice on. The bot allows up to 200 addressed messages per person per hour, has no per-person cooldown,
+and keeps replies short. Provider and gateway deadlines, queue expiry, and circuit-breaker timings are listed in
+`docs/RUNBOOK.md`.
 
 ## Safety notes
 

@@ -46,12 +46,21 @@ voice:
   secret_env: VOICE_SHARED_SECRET
   model: ""
   messages_per_person_per_hour: 200  # the message limit. There is deliberately no spend cap
-  person_gap_s: 5
+  person_gap_s: 0
   reply_max_chars: 800
   elaborate_max_chars: 1200
   max_tokens: 350
   elaborate_max_tokens: 600
-  timeout_s: 45.0
+  timeout_s: 30.0
+  queue_timeout_s: 5.0
+  concurrency: 2
+  queue_size: 5
+  breaker_failures: 3
+  breaker_window_s: 300
+  breaker_open_s: 15
+  junk_window: 50
+  junk_ratio: 0.2
+  junk_off_s: 30
   # alert_tokens_per_day: 200000  # optional heads-up to the organizer channel, never stops anything
 
 rewards:

@@ -81,6 +81,7 @@ INSULT_RE = re.compile(r"\byou\b[^.!?]{0,20}?\b(?:" + "|".join(ANIMAL_WORDS) + r
 # The one approved goose-gag timeout joke (docs/APPENDIX_VOICE.md, T1). Only this exact text may carry a threat word.
 # The line bank has no way to list lines by moment, so the approved text is held here.
 APPROVED_TIMEOUT_JOKE = "One more goose and this duck puts itself in timeout. Nobody else is in trouble."
+SAFE_FAILURE_LINE = "Sorry, I couldn't answer that just now."
 
 NUMBER_WORDS = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
@@ -212,18 +213,18 @@ class PostFilter:
         strict JSON shape (v, request_id match, allowed keys: v request_id action text reaction flags);
         action handling (silent -> ok with empty text; redirect/decline -> caller posts canned);
         placeholders only of kinds {{you}} {{top1}} {{top2}} {{top3}} {{de:<id>}} with approved ids;
-        forbidden markup; emoji allowlist (wordlists.VOICE_EMOJI_ALLOWLIST, max 2, in text and `reaction`);
-        length (request persona.max_chars, default 300) and at most two sentences, no code or backticks;
+        forbidden markup; emoji allowlist (wordlists.VOICE_EMOJI_ALLOWLIST, max 6, in text and `reaction`);
+        length (request persona.max_chars, default 800) and at most eight sentences; inline code is permitted;
         number grounding when a STAT word is present (request['card'] numbers only) - ordinary numbers are fine in
         general chat when no stat word is present;
-        reward/program lint (strong reward words always while rewards unannounced; weak win words only allowed in
-        chat mode when user_text contains them; CLAIM_PATTERNS always rejected; PROGRAM_WORDS_OUT; URLs);
+        reward/program lint (strong reward words always while rewards unannounced; weak win words are ordinary in chat;
+        CLAIM_PATTERNS always rejected; PROGRAM_WORDS_OUT; URLs);
         rank lint (rank/place/top/#n needs flags.mentions_rank true and a private reply);
         roast lint (flags.roasted must be false unless persona.roast_allowed);
         threat lint (THREAT_WORDS rejected unless the exact goose joke);
         banned idioms and profanity;
         German only via placeholders (any GERMAN_STOPWORDS word outside a placeholder rejects);
-        flag truth (uses_german must equal placeholder presence);
+        flag truth (uses_german is normalized to placeholder presence);
         no identical text posted in the same channel in the last 24 hours (`recent_texts`, from the caller);
         the distress check runs again on the final text.
         On success: FilterResult(ok=True, text=<escaped, placeholders expanded>, reaction=<allowlisted or ''>, de_ids=[...]).
@@ -353,7 +354,11 @@ class PostFilter:
             for word in W.REWARD_WEAK:
                 if _phrase_re(word).search(plain_l):
                     raise _Fail("reward")
-        if _first_word(plain_l, self._program):
+        program_text = plain_l
+        if req.get("mode") == "chat":
+            # Hyphens are word boundaries for the general matcher, but this channel name is ordinary chat.
+            program_text = re.sub(r"(?<!\w)loadout-development(?!\w)", " ", program_text)
+        if _first_word(program_text, self._program):
             raise _Fail("program")
         if req.get("mode") != "chat" and _first_word(plain_l, EXTRA_PROGRAM_WORDS):
             raise _Fail("program")
@@ -441,27 +446,38 @@ class PostFilter:
 
 
 def finalize(job: VoiceJob, result: VoiceResult, post_filter: PostFilter, lines: LineBank,
-             names: Optional[Dict[str, str]] = None, recent_texts: Optional[List[str]] = None) -> List[Action]:
+             names: Optional[Dict[str, str]] = None, recent_texts: Optional[List[str]] = None,
+             checked_result: Optional[FilterResult] = None) -> List[Action]:
     """Turn a finished voice job into Slack actions. Voice ok and filter ok -> a post (thread_ts from the job, or an
     ephemeral action when job.ephemeral) plus an optional reaction action. Anything else -> the job's canned
-    fallback, expanded and escaped, posted the same way. action 'silent' -> []. Never raises."""
+    fallback, expanded and escaped, posted the same way. A supplied `checked_result` avoids repeating a filter check.
+    Event silence stays silent; an addressed thinking placeholder is always resolved. Never raises."""
     try:
-        return _finalize(job, result, post_filter, lines, names, recent_texts)
+        return _finalize(job, result, post_filter, lines, names, recent_texts, checked_result)
     except Exception:
-        log.warning("poster: finalize failed, nothing posted")
+        log.warning("poster: finalize failed")
+        if _needs_resolution(job):
+            try:
+                return _deliver(job, SAFE_FAILURE_LINE, "")
+            except Exception:
+                pass
         return []
 
 
 def _finalize(job: VoiceJob, result: Optional[VoiceResult], post_filter: PostFilter, lines: LineBank,
-              names: Optional[Dict[str, str]], recent_texts: Optional[List[str]]) -> List[Action]:
+              names: Optional[Dict[str, str]], recent_texts: Optional[List[str]],
+              checked_result: Optional[FilterResult]) -> List[Action]:
     request = job.request if isinstance(job.request, dict) else {}
     if result is None or not result.ok or not isinstance(result.response, dict):
         return _fallback(job, lines, (result.reason if result is not None else "") or "voice")
-    fr = post_filter.check(result.response, request, user_text=_user_text(request), names=names,
-                           private=bool(job.ephemeral), recent_texts=recent_texts)
+    fr = checked_result if isinstance(checked_result, FilterResult) else post_filter.check(
+        result.response, request, user_text=_user_text(request), names=names,
+        private=bool(job.ephemeral), recent_texts=recent_texts)
     if not fr.ok:
         return _fallback(job, lines, fr.reason)
     if result.response.get("action") == "silent":
+        if _needs_resolution(job):
+            return _fallback(job, lines, "silent")
         return []
     return _deliver(job, fr.text, fr.reaction)
 
@@ -469,11 +485,20 @@ def _finalize(job: VoiceJob, result: Optional[VoiceResult], post_filter: PostFil
 def _fallback(job: VoiceJob, lines: LineBank, reason: str) -> List[Action]:
     log.info("poster: canned fallback (%s)", reason)
     if not job.fallback:
-        return []
-    text = render_canned(job.fallback, lines)
+        return _deliver(job, SAFE_FAILURE_LINE, "") if _needs_resolution(job) else []
+    try:
+        text = render_canned(job.fallback, lines)
+    except Exception:
+        log.warning("poster: canned fallback could not be rendered")
+        return _deliver(job, SAFE_FAILURE_LINE, "") if _needs_resolution(job) else []
     if not text.strip():
-        return []
+        return _deliver(job, SAFE_FAILURE_LINE, "") if _needs_resolution(job) else []
     return _deliver(job, text, "")
+
+
+def _needs_resolution(job: VoiceJob) -> bool:
+    """An addressed thinking message must be replaced even when its fallback is missing or broken."""
+    return bool(getattr(job, "kind", "") == "addressed" and getattr(job, "thinking_ts", ""))
 
 
 def _deliver(job: VoiceJob, text: str, reaction: str) -> List[Action]:

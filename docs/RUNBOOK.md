@@ -38,8 +38,23 @@ systemctl daemon-reload && systemctl enable --now goose
 | `VOICE_PORT` | `voice.env` | Voice listen port (default 8081) |
 | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_MODEL_ALLOWLIST` | `voice.env` | Provider settings. The model must be on the allowlist |
 | `LLM_API_FORMAT`, `LLM_CACHE` | `voice.env` | `openai` (default; OpenAI and most other providers) or `anthropic`. Caching is on by default and only changes billed input cost |
+| `LLM_TIMEOUT_S` | `voice.env` | Provider request deadline, 20 seconds by default |
+| `LLM_REASONING_EFFORT`, `LLM_REASONING_MAX_TOKENS` | `voice.env` | Optional OpenAI compatible reasoning effort and reasoning headroom. Headroom defaults to 4096 tokens |
 
 The gateway refuses to start if a token is missing or has the wrong prefix.
+
+The provider deadline is 20 seconds by default. The gateway allows 30 seconds for a voice request and drops queued
+jobs after 5 seconds, so provider timeouts normally finish before the gateway deadline. In `config/goose.yaml`,
+`voice.messages_per_person_per_hour` defaults to 200 and `voice.person_gap_s` defaults to 0. The failure breaker
+opens after 3 failures within 5 minutes and stays open for 15 seconds. The junk breaker disables voice for 30 seconds
+when more than 20 percent of a sample of at least 10 responses are junk, using a rolling window of up to 50 responses.
+These timers are seconds unless the table says otherwise.
+
+Default generation budgets are 350 tokens for ordinary requests and 600 for elaborate requests. The enforced visible
+text caps are 800 and 1200 characters respectively. When an OpenAI compatible reasoning effort is enabled,
+`LLM_REASONING_MAX_TOKENS=4096` supplies completion headroom for internal reasoning. Known Grok model ids `grok-4.5`,
+`grok-4.6`, `grok-4.7`, and their `x-ai/` forms default to low reasoning effort. `LLM_REASONING_EFFORT` can override
+that with a supported effort. For other models, leaving it unset preserves the provider's existing behavior.
 
 ## Rotating tokens (manual)
 

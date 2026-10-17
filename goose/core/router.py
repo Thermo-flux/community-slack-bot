@@ -14,7 +14,7 @@ from goose.core.card import build_card
 from goose.core.commands_member import index_of, row_user_id
 from goose.core.context import AppContext
 from goose.core.rules import (
-    extract_user_ids, is_calling_goose, is_elaborate_request, is_explain_request, is_near_duplicate, mentions_goose,
+    extract_user_ids, is_calling_goose, is_elaborate_request, is_explain_request, is_near_duplicate,
     normalize_text, qualify_message, simhash,
 )
 from goose.core.safety import is_distress, is_program_question, is_sad, safety_reply
@@ -71,9 +71,8 @@ class Router:
              Users.set_last_channel;
            - goose gag: duck addressed + core.rules.mentions_goose + no other person named -> Mood.register ->
              reaction and a canned anger line (LineBank.canned_for_stage) per MoodResult;
-           - ping/name: Vibes.classify_addressing -> 'orry' stays silent; 'ping' adds the :duck: reaction and, if
-             the sender is not over the message limit, either a VoiceJob (voice enabled) or a canned ack
-             (moment 'ack'); 'name' -> Vibes.name_reaction;
+           - ping/name: Vibes.classify_addressing -> 'orry' stays silent; addressed messages queue a VoiceJob or a
+             canned response when voice is unavailable, consent is missing, or a configured per-person gap applies;
            - thread reply to a duck message with German + rules.is_explain_request -> ExplainService.explanation as
              a thread post;
            - word-trigger reaction (Vibes.reaction_for) when not addressed;
@@ -338,6 +337,8 @@ class Router:
             return False
         clean = normalize_text(text).strip().lower()
         tokens = clean.split()
+        if re.fullmatch(r"(?:youre|you are) a goose", clean):
+            return True
         if len(tokens) <= 3 and any(t in ("goose", "geese") for t in tokens):
             if any(t in ("hey", "hi", "yo", "hello", "what", "how", "why", "who", "can", "could", "tell", "help") for t in tokens):
                 return False
@@ -382,6 +383,8 @@ class Router:
         if not allowed:
             if why == "limit" and self._limit_line_allowed(ev.user, now):
                 res.actions.append(self._post(ev, self._line("limit_reached")))
+            elif why == "gap":
+                res.actions.append(self._post(ev, self._line("ack" if ping else "chat_fallback")))
             return
         res.jobs.append(self._voice_job(ev, now, text, in_thread, flags, sad=sad))
         ctx.voice_client.record_person(ev.user, now)

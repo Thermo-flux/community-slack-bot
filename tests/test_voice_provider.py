@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+import goose.voice.provider as provider_module
 from goose.voice.provider import Provider, ProviderError
 
 KEY = "sk-test-KEY-123456789"
@@ -59,6 +60,35 @@ def test_from_env_reads_the_settings_and_the_allowlist():
     assert p.model == "model-b"
     assert p.allowlist == ["model-a", "model-b"]
     assert p.base_url == "https://llm.example/v1"
+
+
+def test_from_env_configures_a_finite_positive_provider_timeout():
+    env = {"LLM_API_KEY": KEY, "LLM_MODEL": "model-a", "LLM_MODEL_ALLOWLIST": "model-a",
+           "LLM_TIMEOUT_S": "17.5"}
+    assert Provider.from_env(env).request_timeout_s == 17.5
+    assert Provider.from_env({k: v for k, v in env.items() if k != "LLM_TIMEOUT_S"}).request_timeout_s == 20.0
+    for timeout in ("0", "-1", "nan", "inf", "not-a-number"):
+        with pytest.raises(ProviderError, match="bad_timeout"):
+            Provider.from_env(dict(env, LLM_TIMEOUT_S=timeout))
+
+
+def test_reasoning_token_headroom_is_configurable_and_validated():
+    env = {"LLM_API_KEY": KEY, "LLM_MODEL": "x-ai/grok-4.7", "LLM_MODEL_ALLOWLIST": "x-ai/grok-4.7",
+           "LLM_REASONING_MAX_TOKENS": "512"}
+    assert Provider.from_env(env).reasoning_max_tokens == 512
+    assert Provider.from_env({k: v for k, v in env.items() if k != "LLM_REASONING_MAX_TOKENS"}).reasoning_max_tokens == 4096
+    for budget in ("0", "-1", "nan", "inf", "not-a-number", "1.5"):
+        with pytest.raises(ProviderError, match="bad_reasoning_max_tokens"):
+            Provider.from_env(dict(env, LLM_REASONING_MAX_TOKENS=budget))
+
+
+def test_complete_uses_configured_timeout_unless_overridden():
+    rec = Recorder(result=(200, _ok_body("hello")))
+    p = Provider("https://llm.example/v1", KEY, "model-a", ["model-a"], http_post=rec,
+                 request_timeout_s=12.0)
+    p.complete(MESSAGES, max_tokens=10)
+    p.complete(MESSAGES, max_tokens=10, timeout=3.0)
+    assert [call["timeout"] for call in rec.calls] == [12.0, 3.0]
 
 
 def test_from_env_without_allowlist_refuses_to_start():
@@ -121,7 +151,26 @@ def test_missing_content_is_bad_json():
     assert info.value.args[0] == "bad_json"
     with pytest.raises(ProviderError) as info:
         _provider(Recorder(result=(200, {"choices": [{"message": {"content": None}}]}))).complete(MESSAGES, max_tokens=10)
-    assert info.value.args[0] == "bad_json"
+    assert info.value.args[0] == "empty_response"
+
+
+def test_openai_missing_content_field_is_bad_json():
+    with pytest.raises(ProviderError, match="bad_json"):
+        _provider(Recorder(result=(200, {"choices": [{"message": {}}]}))).complete(MESSAGES, max_tokens=10)
+
+
+def test_openai_empty_and_reasoning_only_content_is_never_returned():
+    for message in ({"content": ""}, {"content": "  "},
+                    {"content": None, "reasoning_content": "private reasoning"}):
+        with pytest.raises(ProviderError, match="empty_response"):
+            _provider(Recorder(result=(200, {"choices": [{"message": message}]}))).complete(MESSAGES, max_tokens=10)
+
+
+def test_openai_length_finish_reason_is_reported_as_truncated():
+    body = {"choices": [{"message": {"content": '{"action":', "reasoning_content": "hidden"},
+                        "finish_reason": "length"}]}
+    with pytest.raises(ProviderError, match="truncated"):
+        _provider(Recorder(result=(200, body))).complete(MESSAGES, max_tokens=10)
 
 
 def test_missing_usage_counts_as_zero_tokens():
@@ -268,11 +317,161 @@ def test_openai_format_without_cache_details_counts_zero_cached():
     assert u.cached_in == 0
 
 
-def test_anthropic_response_without_a_text_block_is_bad_json():
+def test_anthropic_response_without_a_text_block_is_empty():
     cap = Capture({"content": [{"type": "tool_use"}], "usage": {}})
     p = Provider("https://api.anthropic.com/v1", "k", "m", ["m"], http_post=cap, api_format="anthropic")
-    with pytest.raises(ProviderError, match="bad_json"):
+    with pytest.raises(ProviderError, match="empty_response"):
         p.complete_usage(MSGS, max_tokens=10, parts=PARTS)
+
+
+def test_anthropic_max_tokens_stop_reason_is_reported_as_truncated():
+    body = _anthropic_body()
+    body["stop_reason"] = "max_tokens"
+    p = Provider("https://api.anthropic.com/v1", "k", "m", ["m"], http_post=Capture(body),
+                 api_format="anthropic")
+    with pytest.raises(ProviderError, match="truncated"):
+        p.complete_usage(MSGS, max_tokens=10, parts=PARTS)
+
+
+def test_reasoning_effort_is_opt_in_and_uses_openai_reasoning_payload():
+    default = Capture({"choices": [{"message": {"content": "ok"}}]})
+    _provider(default).complete(MESSAGES, max_tokens=25)
+    assert default.sent["max_tokens"] == 25
+    assert default.sent["temperature"] == 0.8
+    assert "reasoning_effort" not in default.sent
+
+    env = {"LLM_API_KEY": KEY, "LLM_MODEL": "model-a", "LLM_MODEL_ALLOWLIST": "model-a",
+           "LLM_REASONING_EFFORT": "low"}
+    cap = Capture({"choices": [{"message": {"content": "ok"}}]})
+    p = Provider.from_env(dict(env, LLM_BASE_URL="https://llm.example/v1"))
+    p._post = cap
+    p.complete(MESSAGES, max_tokens=25)
+    assert cap.sent["reasoning_effort"] == "low"
+    assert cap.sent["max_completion_tokens"] == 4096
+    assert "max_tokens" not in cap.sent
+    assert "temperature" not in cap.sent
+
+
+@pytest.mark.parametrize("model", ["grok-4.5", "grok-4.6", "grok-4.7",
+                                    "x-ai/grok-4.5", "x-ai/grok-4.6", "x-ai/grok-4.7"])
+def test_known_grok_model_ids_default_to_low_reasoning_effort(model):
+    cap = Capture({"choices": [{"message": {"content": "ok"}}]})
+    p = Provider.from_env({"LLM_API_KEY": KEY, "LLM_MODEL": model, "LLM_MODEL_ALLOWLIST": model})
+    p._post = cap
+    p.complete(MESSAGES, max_tokens=350)
+    assert cap.sent["reasoning_effort"] == "low"
+    assert cap.sent["max_completion_tokens"] == 4096
+    assert "max_tokens" not in cap.sent
+
+
+def test_explicit_grok_reasoning_effort_overrides_the_low_default():
+    cap = Capture({"choices": [{"message": {"content": "ok"}}]})
+    p = Provider.from_env({"LLM_API_KEY": KEY, "LLM_MODEL": "x-ai/grok-4.7",
+                           "LLM_MODEL_ALLOWLIST": "x-ai/grok-4.7", "LLM_REASONING_EFFORT": "high",
+                           "LLM_REASONING_MAX_TOKENS": "700"})
+    p._post = cap
+    p.complete(MESSAGES, max_tokens=350)
+    assert cap.sent["reasoning_effort"] == "high"
+    assert cap.sent["max_completion_tokens"] == 700
+    p.complete(MESSAGES, max_tokens=800)
+    assert cap.sent["max_completion_tokens"] == 800
+
+
+@pytest.mark.parametrize("model", ["grok-4.7-latest", "x-ai/grok-4.7:free", "other/grok-4.7"])
+def test_non_exact_grok_like_ids_keep_generic_payload(model):
+    cap = Capture({"choices": [{"message": {"content": "ok"}}]})
+    p = Provider.from_env({"LLM_API_KEY": KEY, "LLM_MODEL": model, "LLM_MODEL_ALLOWLIST": model})
+    p._post = cap
+    p.complete(MESSAGES, max_tokens=350)
+    assert "reasoning_effort" not in cap.sent
+    assert cap.sent["max_tokens"] == 350
+    assert cap.sent["temperature"] == 0.8
+
+
+def test_none_effort_does_not_apply_reasoning_headroom():
+    cap = Capture({"choices": [{"message": {"content": "ok"}}]})
+    p = Provider.from_env({"LLM_API_KEY": KEY, "LLM_MODEL": "openai/o4-mini", "LLM_MODEL_ALLOWLIST": "openai/o4-mini",
+                           "LLM_REASONING_EFFORT": "none", "LLM_REASONING_MAX_TOKENS": "4096"})
+    p._post = cap
+    p.complete(MESSAGES, max_tokens=350)
+    assert cap.sent["max_completion_tokens"] == 350
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal"])
+def test_known_grok_rejects_unsupported_reasoning_efforts(effort):
+    env = {"LLM_API_KEY": KEY, "LLM_MODEL": "x-ai/grok-4.7", "LLM_MODEL_ALLOWLIST": "x-ai/grok-4.7",
+           "LLM_REASONING_EFFORT": effort}
+    with pytest.raises(ProviderError, match="bad_reasoning_effort"):
+        Provider.from_env(env)
+
+
+def test_generic_openai_compatible_model_accepts_minimal_reasoning_effort():
+    cap = Capture({"choices": [{"message": {"content": "ok"}}]})
+    p = Provider.from_env({"LLM_API_KEY": KEY, "LLM_MODEL": "model-a", "LLM_MODEL_ALLOWLIST": "model-a",
+                           "LLM_REASONING_EFFORT": "minimal"})
+    p._post = cap
+    p.complete(MESSAGES, max_tokens=350)
+    assert cap.sent["reasoning_effort"] == "minimal"
+
+
+def test_reasoning_effort_is_refused_for_anthropic_wire_format():
+    env = {"LLM_API_FORMAT": "anthropic", "LLM_API_KEY": KEY, "LLM_MODEL": "model-a",
+           "LLM_MODEL_ALLOWLIST": "model-a", "LLM_REASONING_EFFORT": "low"}
+    with pytest.raises(ProviderError, match="bad_reasoning_effort"):
+        Provider.from_env(env)
+
+
+class _FakeSocket:
+    def __init__(self):
+        self.timeout = None
+        self.timeouts = []
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+        self.timeouts.append(timeout)
+
+
+class _FakeResponse:
+    status = 200
+
+    def __init__(self, read1):
+        self.fp = type("FP", (), {"raw": type("Raw", (), {"_sock": _FakeSocket()})()})()
+        self._read1 = read1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read1(self, size):
+        return self._read1(size, self.fp.raw._sock)
+
+
+def test_default_post_uses_one_deadline_for_the_response_body(monkeypatch):
+    now = [0.0]
+
+    def read1(_size, sock):
+        if sock.timeout <= 0.05:
+            raise socket.timeout()
+        now[0] += 0.06
+        return b"x"
+
+    response = _FakeResponse(read1)
+    monkeypatch.setattr(provider_module.urllib.request, "urlopen", lambda _req, timeout: response)
+    monkeypatch.setattr(provider_module.time, "monotonic", lambda: now[0])
+    p = _provider()
+    with pytest.raises(ProviderError, match="timeout"):
+        p.complete(MESSAGES, max_tokens=10, timeout=0.1)
+    assert response.fp.raw._sock.timeouts == [0.1, pytest.approx(0.04)]
+
+
+def test_default_post_caps_response_body_bytes(monkeypatch):
+    response = _FakeResponse(lambda size, _sock: b"12345"[:size])
+    monkeypatch.setattr(provider_module.urllib.request, "urlopen", lambda _req, timeout: response)
+    monkeypatch.setattr(provider_module, "MAX_RESPONSE_BYTES", 4)
+    with pytest.raises(ProviderError, match="response_too_large"):
+        _provider().complete(MESSAGES, max_tokens=10, timeout=1.0)
 
 
 def test_unknown_format_is_refused():

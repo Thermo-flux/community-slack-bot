@@ -8,7 +8,6 @@ import json
 import os
 import sys
 import types
-
 import pytest
 
 from goose.config import default_config
@@ -25,9 +24,18 @@ REAL_LINES = os.path.join(ROOT, "config", "lines.yaml")
 class FakeClient:
     def __init__(self):
         self.calls = []
+        self._next_ts = 1
 
     def chat_postMessage(self, **kwargs):
         self.calls.append(("chat_postMessage", kwargs))
+        self._next_ts += 1
+        return {"ts": "%d.0" % self._next_ts}
+
+    def chat_update(self, **kwargs):
+        self.calls.append(("chat_update", kwargs))
+
+    def chat_delete(self, **kwargs):
+        self.calls.append(("chat_delete", kwargs))
 
     def chat_postEphemeral(self, **kwargs):
         self.calls.append(("chat_postEphemeral", kwargs))
@@ -195,11 +203,11 @@ def test_message_envelope_is_normalized_and_routed_with_its_event_id():
     assert ev.event_id == "EvX"
 
 
-def test_bot_own_message_still_reaches_the_router_flagged_as_bot():
+def test_bot_message_is_ignored_before_the_router():
     router = FakeRouter()
     handlers = app.build_handlers(_ctx(), router, FakeClient())
     handlers["message"](_envelope(dict(MESSAGE, bot_id="B1")))
-    assert router.events[0].is_bot is True
+    assert router.events == []
 
 
 def test_channel_join_is_dropped_before_the_router():
@@ -364,9 +372,11 @@ LINES_OK = {"v": 1, "request_id": "r1", "action": "speak", "text": "Quack to you
             "flags": {"roasted": False, "mentions_rank": False, "uses_german": False, "numbers_used": []}}
 
 
-def _real_ctx(voice=None, db=None):
+def _real_ctx(voice=None, db=None, queue_timeout_s=5.0):
     """A context with the real line bank and a real database, for jobs that go through PostFilter."""
-    return types.SimpleNamespace(bot_user_id="UBOT", organizer_channel="CORG", config=default_config(),
+    config = default_config()
+    config.voice.queue_timeout_s = queue_timeout_s
+    return types.SimpleNamespace(bot_user_id="UBOT", organizer_channel="CORG", config=config,
                                  voice_client=voice, lines=LineBank.from_file(REAL_LINES),
                                  db=db if db is not None else Database(":memory:"),
                                  clock=types.SimpleNamespace(now=lambda: 1_760_000_000.0))
@@ -398,22 +408,80 @@ def test_resumed_voice_job_posts_again():
     assert client.calls and client.calls[0][1]["text"] == "Quack to you."
 
 
-def test_job_older_than_six_seconds_posts_the_fallback_without_a_voice_call():
+def test_voice_filter_result_is_reused_and_successful_update_text_is_remembered(monkeypatch):
+    real_filter = app.PostFilter
+    checks = []
+
+    class SpyPostFilter(real_filter):
+        def check(self, *args, **kwargs):
+            checks.append(kwargs.copy())
+            return super().check(*args, **kwargs)
+
+    monkeypatch.setattr(app, "PostFilter", SpyPostFilter)
+    ctx = _real_ctx(FakeVoice(response=LINES_OK))
+    job = _job()
+    job.thinking_ts = "2.0"
+    client = FakeClient()
+
+    app.run_voice_job(ctx, client, job)
+
+    assert len(checks) == 1
+    assert checks[0]["private"] is False
+    assert [call[0] for call in client.calls] == ["chat_update"]
+    assert app._recent_texts(ctx, job.channel) == ["Quack to you."]
+
+
+def test_ephemeral_voice_filter_receives_private_delivery(monkeypatch):
+    real_filter = app.PostFilter
+    checks = []
+
+    class SpyPostFilter(real_filter):
+        def check(self, *args, **kwargs):
+            checks.append(kwargs.copy())
+            return super().check(*args, **kwargs)
+
+    monkeypatch.setattr(app, "PostFilter", SpyPostFilter)
+    ctx = _real_ctx(FakeVoice(response=LINES_OK))
+    job = _job()
+    job.ephemeral = True
+
+    app.run_voice_job(ctx, FakeClient(), job)
+
+    assert len(checks) == 1
+    assert checks[0]["private"] is True
+
+
+def test_voice_job_that_returns_after_pause_does_not_post():
+    db = Database(":memory:")
+
+    class PausingVoice(FakeVoice):
+        def call(self, request, user_id=""):
+            db.set_setting("paused", "1")
+            return VoiceResult(ok=True, response=self.response)
+
+    client = FakeClient()
+    job = _job()
+    job.thinking_ts = "2.0"
+    app.run_voice_job(_real_ctx(PausingVoice(response=LINES_OK), db), client, job)
+    assert client.calls == [("chat_delete", {"channel": job.channel, "ts": job.thinking_ts})]
+
+
+def test_job_older_than_queue_timeout_posts_the_fallback_without_a_voice_call():
     voice = FakeVoice(response=LINES_OK)
     client = FakeClient()
     job = _job(fallback="Quack.")
     job.created_ts = 100.0
-    app.run_voice_job(_real_ctx(voice), client, job, now_fn=lambda: 106.5)
+    app.run_voice_job(_real_ctx(voice), client, job, now_fn=lambda: 105.5)
     assert voice.requests == []
     assert [c[1]["text"] for c in client.calls] == ["Quack."]
 
 
-def test_job_exactly_six_seconds_old_still_calls_the_voice():
+def test_job_exactly_at_queue_timeout_still_calls_the_voice():
     voice = FakeVoice(response=LINES_OK)
     client = FakeClient()
     job = _job()
     job.created_ts = 100.0
-    app.run_voice_job(_real_ctx(voice), client, job, now_fn=lambda: 106.0)
+    app.run_voice_job(_real_ctx(voice), client, job, now_fn=lambda: 105.0)
     assert len(voice.requests) == 1
     assert client.calls[0][1]["text"] == "Quack to you."
 
@@ -431,10 +499,93 @@ def test_handlers_stamp_the_admission_time_and_expire_stale_jobs():
     assert len(deferred) == 1
     fn, args = deferred[0]
     assert args[2].created_ts == 100.0, "args are (ctx, client, job, clock, admission)"
-    now["t"] = 107.0
+    now["t"] = 105.5
     fn(*args)
     assert voice.requests == []
-    assert [c[1]["text"] for c in client.calls] == ["Quack."]
+    assert any(c[0] == "chat_update" and c[1]["text"] == "Quack." for c in client.calls)
+
+
+def test_queue_age_starts_after_the_thinking_message_is_sent():
+    now = {"t": 100.0}
+    voice = FakeVoice(response=LINES_OK)
+
+    class SlowThinkingClient(FakeClient):
+        def chat_postMessage(self, **kwargs):
+            response = super().chat_postMessage(**kwargs)
+            now["t"] += 6.0
+            return response
+
+    client = SlowThinkingClient()
+    deferred = []
+    handlers = app.build_handlers(_real_ctx(voice), FakeRouter(Result(jobs=[_job()])), client,
+                                  voice_submit=lambda fn, *args: deferred.append((fn, args)),
+                                  now_fn=lambda: now["t"])
+    handlers["message"](_envelope(MESSAGE))
+    fn, args = deferred[0]
+    assert args[2].created_ts == 106.0
+    fn(*args)
+    assert len(voice.requests) == 1
+
+
+class SlackResponseLike:
+    """The Slack SDK response exposes mapping methods without inheriting dict or Mapping."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+    def __iter__(self):
+        return iter(self.data)
+
+    def __len__(self):
+        return len(self.data)
+
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+
+def test_thinking_placeholder_ts_is_read_from_mapping_response():
+    class ThinkingClient(FakeClient):
+        def chat_postMessage(self, **kwargs):
+            self.calls.append(("chat_postMessage", kwargs))
+            return SlackResponseLike({"ts": "2.0"})
+
+    deferred = []
+    client = ThinkingClient()
+    handlers = app.build_handlers(_real_ctx(None), FakeRouter(Result(jobs=[_job()])), client,
+                                 voice_submit=lambda fn, *args: deferred.append((fn, args)))
+    handlers["message"](_envelope(MESSAGE))
+    assert deferred[0][1][2].thinking_ts == "2.0"
+
+
+def test_voice_exception_resolves_thinking_placeholder_with_fallback():
+    class BrokenVoice(FakeVoice):
+        def call(self, request, user_id=""):
+            raise RuntimeError("provider details stay private")
+
+    job = _job(fallback="Quack.")
+    job.thinking_ts = "2.0"
+    client = FakeClient()
+    app.run_voice_job(_real_ctx(BrokenVoice()), client, job)
+    assert any(call[0] in ("chat_postMessage", "chat_update") and call[1]["text"] == "Quack."
+               for call in client.calls)
+
+
+def test_voice_submit_failure_resolves_placeholder():
+    client = FakeClient()
+    job = _job(fallback="Quack.")
+
+    def reject_submit(*args):
+        raise RuntimeError("executor is shutting down")
+
+    handlers = app.build_handlers(_real_ctx(None), FakeRouter(Result(jobs=[job])), client,
+                                 voice_submit=reject_submit)
+    # The failed submission is handled inside admit after its placeholder is posted.
+    handlers["message"](_envelope(MESSAGE))
+    assert any(call[0] == "chat_update" and call[1]["text"] == "Quack."
+               for call in client.calls)
 
 
 class EchoVoice(FakeVoice):
@@ -457,11 +608,13 @@ def test_eighth_pending_voice_job_is_refused_with_the_default_settings():
                                   now_fn=lambda: 50.0)
     handlers["message"](_envelope(MESSAGE))
     assert len(deferred) == 7
-    assert [c[1]["text"] for c in client.calls] == ["Quack."], "the 8th job posts its canned line immediately"
+    initial_posts = [c[1]["text"] for c in client.calls if c[0] == "chat_postMessage"]
+    assert initial_posts == ["_Thinking... :duck:_"] * 7 + ["Quack."], \
+        "seven admitted jobs show a placeholder and the refused job gets its canned line"
     for fn, args in deferred:
         fn(*args)
     assert len(voice.requests) == 7
-    assert len(client.calls) == 8
+    assert len([c for c in client.calls if c[0] == "chat_update"]) == 7
 
 
 def test_admission_slots_are_released_when_a_job_fails():
@@ -597,7 +750,7 @@ def test_reaction_on_a_thread_reply_sets_the_thread_and_parent_author():
         history=[{"ts": "2.0", "thread_ts": "1.0", "user": "U2"}],
         replies=[{"ts": "1.0", "user": "UPARENT"}])
     event = Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts="2.0", item_user="U2",
-                  reaction="duck")
+                  reaction="white_check_mark")
     app.ThreadLookup(client).enrich(event)
     assert client.calls[0] == ("conversations_history",
                                {"channel": "C1", "latest": "2.0", "inclusive": True, "limit": 1})
@@ -607,7 +760,8 @@ def test_reaction_on_a_thread_reply_sets_the_thread_and_parent_author():
 
 def test_reaction_on_a_plain_message_or_a_mismatched_history_changes_nothing():
     plain = ThreadClient(history=[{"ts": "2.0", "thread_ts": "2.0"}])
-    event = Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts="2.0")
+    event = Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts="2.0",
+                  reaction="white_check_mark")
     app.ThreadLookup(plain).enrich(event)
     assert event.thread_ts == "" and len(plain.calls) == 1
 
@@ -621,13 +775,42 @@ def test_thread_lookups_are_cached_and_the_cache_is_bounded():
     client = ThreadClient(history=[{"ts": "2.0", "thread_ts": "1.0"}], replies=[{"ts": "1.0", "user": "UP"}])
     lookup = app.ThreadLookup(client)
     for _ in range(2):
-        lookup.enrich(Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts="2.0"))
+        lookup.enrich(Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts="2.0",
+                            reaction="white_check_mark"))
     assert [c[0] for c in client.calls].count("conversations_history") == 1
 
     small = app.ThreadLookup(ThreadClient(history=[{"ts": "9.0", "thread_ts": ""}]), max_entries=2)
     for ts in ("7.0", "8.0", "9.0"):
-        small.enrich(Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts=ts))
+        small.enrich(Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts=ts,
+                           reaction="white_check_mark"))
     assert len(small._cache) == 2
+
+
+def test_non_helper_reactions_skip_thread_history_lookup():
+    client = ThreadClient(history=[{"ts": "2.0", "thread_ts": "1.0"}])
+    lookup = app.ThreadLookup(client)
+    for reaction in ("duck", "question"):
+        lookup.enrich(Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts="2.0",
+                            reaction=reaction))
+    assert client.calls == []
+    lookup.enrich(Event(kind="reaction_added", ts=5.0, channel="C1", user="U3", message_ts="2.0",
+                        reaction="white_check_mark"))
+    assert [call[0] for call in client.calls].count("conversations_history") == 1
+
+
+def test_repeated_thread_messages_use_fresh_event_context_without_refetching():
+    client = ThreadClient(replies=[{"ts": "1.0", "user": "UP", "text": "parent"},
+                                  {"ts": "2.0", "user": "U1", "text": "first reply"}])
+    lookup = app.ThreadLookup(client, bot_user_id="UBOT")
+    first = Event(kind="message", ts=2.0, channel="C1", user="U1", message_ts="2.0", thread_ts="1.0",
+                  text="first reply")
+    lookup.enrich(first)
+    second = Event(kind="message", ts=3.0, channel="C1", user="U2", message_ts="3.0", thread_ts="1.0",
+                   text="second reply")
+    lookup.enrich(second)
+    assert [call[0] for call in client.calls] == ["conversations_replies"]
+    assert second.thread_parent_user == "UP"
+    assert second.thread_excerpt == ["parent", "first reply"]
 
 
 def test_handlers_fill_thread_fields_before_the_router_sees_the_event():
@@ -640,6 +823,16 @@ def test_handlers_fill_thread_fields_before_the_router_sees_the_event():
     handlers["message"](body)
     assert router.events[0].thread_parent_user == "UP"
     assert router.events[0].thread_excerpt == ["parent"]
+
+
+def test_own_bot_thread_message_is_ignored_before_slack_history_lookup():
+    client = ThreadClient(replies=[{"ts": "1.0", "user": "UP", "text": "parent"}])
+    router = FakeRouter()
+    handlers = app.build_handlers(_ctx(), router, client)
+    handlers["message"](_envelope({"type": "message", "channel": "C1", "user": "UBOT", "ts": "2.0",
+                                   "thread_ts": "1.0", "text": "our own reply"}))
+    assert client.calls == []
+    assert router.events == []
 
 
 # ------------------------------------------------------------------------------------------------- official channel

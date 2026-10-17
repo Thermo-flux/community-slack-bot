@@ -243,6 +243,10 @@ def _run_action(client: Any, action: Action, default_channel: str) -> None:
                 thread_ts=action.thread_ts or None,
                 parse="none", link_names=False, unfurl_links=False, unfurl_media=False,
             )
+            try:
+                client.chat_delete(channel=channel, ts=action.message_ts)
+            except Exception as cleanup_exc:
+                log.warning("thinking placeholder cleanup failed: %s", _error_code(cleanup_exc))
     else:
         raise ValueError("unknown_kind")
 

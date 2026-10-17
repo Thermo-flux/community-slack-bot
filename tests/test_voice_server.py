@@ -28,6 +28,7 @@ class FakeProvider:
     """Stands in for the provider. `reply` is the model text; `error` makes complete() raise."""
 
     model = "fake-model"
+    request_timeout_s = 20.0
 
     def __init__(self, reply=None, error=None):
         self.reply = reply
@@ -123,8 +124,7 @@ def test_output_shape_is_strict():
         dict(GOOD_OUTPUT, extra="nope"),
         {k: v for k, v in GOOD_OUTPUT.items() if k != "text"},
         dict(GOOD_OUTPUT, action="explode"),
-        dict(GOOD_OUTPUT, reaction="star"),
-        dict(GOOD_OUTPUT, reaction="white_check_mark"),
+        dict(GOOD_OUTPUT, reaction="not_an_approved_reaction"),
         dict(GOOD_OUTPUT, flags={"roasted": "yes", "mentions_rank": False, "uses_german": False, "numbers_used": []}),
         dict(GOOD_OUTPUT, flags={"roasted": False, "unknown": True}),
         dict(GOOD_OUTPUT, flags={"numbers_used": "7"}),
@@ -217,8 +217,18 @@ def test_the_prompt_and_the_user_text_reach_the_provider_redacted():
     messages, max_tokens, timeout = provider.seen[0]
     joined = "\n".join(m["content"] for m in messages)
     assert "U12345678" not in joined
-    assert max_tokens == 100
-    assert timeout == 4.0
+    assert max_tokens == 350
+    assert timeout == provider.request_timeout_s
+
+
+def test_request_uses_provider_configured_timeout():
+    provider = FakeProvider(reply=_text(GOOD_OUTPUT))
+    provider.request_timeout_s = 13.5
+
+    status, _ = handle_request(_request(), provider)
+
+    assert status == 200
+    assert provider.seen[0][1:] == (350, 13.5)
 
 
 # ----- HTTP ----------------------------------------------------------------------------------------------------
@@ -260,6 +270,33 @@ def test_health_reports_ok_and_model_without_secrets(running):
         payload = json.loads(resp.read().decode("utf-8"))
     assert payload == {"ok": True, "model": "fake-model"}
     assert SECRET not in json.dumps(payload)
+
+
+@pytest.mark.parametrize("disconnect", [BrokenPipeError, ConnectionResetError])
+def test_send_ignores_disconnected_client_and_server_stays_usable(disconnect):
+    server = make_server("127.0.0.1", 0, FakeProvider(reply=_text(GOOD_OUTPUT)), SECRET,
+                         clock=lambda: NOW[0])
+    handler = server.RequestHandlerClass.__new__(server.RequestHandlerClass)
+
+    class ClosedSocket:
+        def write(self, data):
+            raise disconnect("client closed")
+
+    handler.send_response = lambda status: None
+    handler.send_header = lambda name, value: None
+    handler.end_headers = lambda: None
+    handler.wfile = ClosedSocket()
+    handler._send(200, {"ok": True})
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/health" % server.server_address[1], timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert payload == {"ok": True, "model": "fake-model"}
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_post_without_or_with_wrong_secret_is_401(running):

@@ -29,6 +29,12 @@ class FakeClient:
     def chat_postMessage(self, **kwargs):
         return self._call("chat_postMessage", **kwargs)
 
+    def chat_update(self, **kwargs):
+        return self._call("chat_update", **kwargs)
+
+    def chat_delete(self, **kwargs):
+        return self._call("chat_delete", **kwargs)
+
     def chat_postEphemeral(self, **kwargs):
         return self._call("chat_postEphemeral", **kwargs)
 
@@ -269,3 +275,46 @@ def test_a_raising_post_is_sent_exactly_once_and_never_retried(caplog):
     assert [c[0] for c in client.calls].count("chat_postMessage") == 1
     assert len(client.calls) == 1
     assert "internal_error" in caplog.text
+
+
+def test_update_fallback_deletes_thinking_placeholder_after_final_post_succeeds():
+    client = FakeClient(fail={"chat_update": FakeSlackError("message_not_found")})
+    action = Action(kind="update", channel="C1", text="final answer", message_ts="1.2", thread_ts="1.1")
+
+    errors = slack_io.execute(client, [action], "")
+
+    assert errors == []
+    assert [name for name, _ in client.calls] == ["chat_update", "chat_postMessage", "chat_delete"]
+    assert client.calls[0][1]["ts"] == "1.2"
+    assert client.calls[1][1]["text"] == "final answer"
+    assert client.calls[1][1]["thread_ts"] == "1.1"
+    assert client.calls[2][1] == {"channel": "C1", "ts": "1.2"}
+
+
+def test_update_fallback_does_not_delete_placeholder_when_final_post_fails():
+    client = FakeClient(fail={
+        "chat_update": FakeSlackError("message_not_found"),
+        "chat_postMessage": FakeSlackError("channel_not_found"),
+    })
+    action = Action(kind="update", channel="C1", text="final answer", message_ts="1.2")
+
+    errors = slack_io.execute(client, [action], "")
+
+    assert errors == ["channel_not_found"]
+    assert [name for name, _ in client.calls] == ["chat_update", "chat_postMessage"]
+
+
+def test_update_fallback_cleanup_failure_does_not_expose_exception_text(caplog):
+    client = FakeClient(fail={
+        "chat_update": FakeSlackError("message_not_found"),
+        "chat_delete": FakeSlackError("cleanup_secret"),
+    })
+    action = Action(kind="update", channel="C1", text="final answer", message_ts="1.2")
+
+    with caplog.at_level("WARNING"):
+        errors = slack_io.execute(client, [action], "")
+
+    assert errors == []
+    assert [name for name, _ in client.calls] == ["chat_update", "chat_postMessage", "chat_delete"]
+    assert "cleanup_secret" in caplog.text
+    assert "slack error" not in caplog.text

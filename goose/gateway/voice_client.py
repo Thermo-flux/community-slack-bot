@@ -144,9 +144,9 @@ class VoiceClient:
         index = max(0, int(math.ceil(0.95 * len(values))) - 1)
         return values[index]
 
-    def _check_locked(self, now: float, kind: str) -> Tuple[bool, str, bool]:
-        """(ok, reason, is_probe). Caller holds the lock. Pure apart from reading the kill switch."""
-        if not self.enabled():
+    def _check_locked(self, now: float, kind: str, enabled: bool) -> Tuple[bool, str, bool]:
+        """(ok, reason, is_probe). Caller holds the lock; enabled was read before taking it."""
+        if not enabled:
             return False, "disabled", False
         if now < self._junk_off_until:
             return False, "junk_off", False
@@ -169,23 +169,24 @@ class VoiceClient:
     def available(self, now: float, kind: str = "addressed") -> Tuple[bool, str]:
         """(True, "") or (False, reason) with reason in disabled | breaker_open | junk_off | queue_full.
         Slow mode returns (True, "slow") for addressed use and (False, "slow") for kind "event"."""
+        enabled = self.enabled()
         with self._lock:
-            ok, reason, _probe = self._check_locked(now, kind)
+            ok, reason, _probe = self._check_locked(now, kind, enabled)
         return ok, reason
 
     # ----- the call ----------------------------------------------------------------------------------------------
 
     def call(self, request: Dict[str, Any], user_id: str = "") -> VoiceResult:
-        """POST the request to {voice.url}/v1/voice with config.voice.timeout_s, no retries. Enforces the queue
-        (concurrency 2, queue 5), breaker (3 failures in 5 minutes -> open 15 minutes, then one probe), junk breaker,
-        slow mode (events become canned; addressed still tries). Writes voice_usage. Never raises: returns
-        VoiceResult(ok=False, reason=...) on any problem. Late replies are dropped."""
+        """POST to {voice.url}/v1/voice with config.voice.timeout_s and no retries. Enforces configured queue,
+        breaker, junk cooloff and slow-mode behavior. Writes voice_usage and never raises into a worker. A successful
+        response is returned even when measured latency exceeds the transport timeout value."""
         if not isinstance(request, dict):
             return VoiceResult(ok=False, reason="bad_request")
         now = self._clock.now()
         kind = str(request.get("kind") or "addressed")
+        enabled = self.enabled()
         with self._lock:
-            ok, reason, probe = self._check_locked(now, kind)
+            ok, reason, probe = self._check_locked(now, kind, enabled)
             if not ok:
                 return VoiceResult(ok=False, reason=reason)
             if probe:
@@ -193,7 +194,8 @@ class VoiceClient:
                 self._breaker = "half_open"
             self._active += 1
         try:
-            if not self._semaphore.acquire(timeout=float(self._config.voice.timeout_s)):
+            queue_timeout = float(getattr(self._config.voice, "queue_timeout_s", 5.0))
+            if not self._semaphore.acquire(timeout=queue_timeout):
                 return VoiceResult(ok=False, reason="queue_full")
             try:
                 return self._attempt(request, user_id, kind, probe)
@@ -228,9 +230,6 @@ class VoiceClient:
         except Exception as exc:  # classified by kind only; the message is never logged
             error = "timeout" if _is_timeout(exc) else "network"
         latency = max(0.0, self._monotonic() - started)
-        if not error and latency > float(voice.timeout_s):
-            error = "timeout"   # a late reply is dropped
-
         response: Optional[Dict[str, Any]] = None
         action = ""
         junk = False

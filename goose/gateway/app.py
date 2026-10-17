@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from goose import __version__
 from goose.core.db import Database
 from goose.gateway import slack_io
-from goose.gateway.poster import PostFilter, finalize
+from goose.gateway.poster import FilterResult, PostFilter, finalize
 from goose.types import Event, Result, VoiceJob, VoiceResult
 
 log = logging.getLogger("goose.app")
@@ -89,7 +89,8 @@ def verify_official_channel(client: Any, channel_id: str, expected_name: str = O
     try:
         info = client.conversations_info(channel=channel_id)["channel"]
         name = str(info.get("name") or "")
-        return name in (expected_name, "loadout", "loadout-development")
+        return (name in (expected_name, "loadout", "loadout-development")
+                and info.get("is_private") is False)
     except Exception as exc:
         log.error("official channel check failed: %s", slack_io._error_code(exc))
         return False
@@ -141,6 +142,13 @@ def _messages(resp: Any) -> List[Dict[str, Any]]:
     return [m for m in raw if isinstance(m, dict)]
 
 
+def _message_time(message: Dict[str, str]) -> float:
+    try:
+        return float(message.get("ts") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class ThreadLookup:
     """Fills thread_parent_user and thread_excerpt for thread replies, and resolves reactions on thread replies.
     Any Slack error leaves the fields empty and is logged by error code only. Results are cached (oldest dropped)."""
@@ -150,6 +158,7 @@ class ThreadLookup:
         self._bot_user_id = bot_user_id
         self._max = max(1, int(max_entries))
         self._cache: "OrderedDict[Tuple[str, str, str], str]" = OrderedDict()
+        self._thread_cache: "OrderedDict[Tuple[str, str], Tuple[str, bool, List[Dict[str, str]]]]" = OrderedDict()
         self._lock = threading.Lock()
 
     def _get(self, key: Tuple[str, str, str]) -> Optional[str]:
@@ -162,31 +171,92 @@ class ThreadLookup:
             while len(self._cache) > self._max:
                 self._cache.popitem(last=False)
 
+    def _get_thread(self, key: Tuple[str, str]) -> Optional[Tuple[str, bool, List[Dict[str, str]]]]:
+        with self._lock:
+            state = self._thread_cache.get(key)
+            if state is None:
+                return None
+            self._thread_cache.move_to_end(key)
+            return state[0], state[1], [dict(item) for item in state[2]]
+
+    def _put_thread(self, key: Tuple[str, str], state: Tuple[str, bool, List[Dict[str, str]]]) -> None:
+        with self._lock:
+            self._thread_cache[key] = state
+            self._thread_cache.move_to_end(key)
+            while len(self._thread_cache) > self._max:
+                self._thread_cache.popitem(last=False)
+
+    def _append_cached_event(self, event: Event) -> Optional[Tuple[str, bool, List[Dict[str, str]]]]:
+        key = (event.channel, event.thread_ts)
+        with self._lock:
+            state = self._thread_cache.get(key)
+            if state is None:
+                return None
+            parent, has_bot, messages = state
+            messages = [dict(item) for item in messages]
+            self._append_thread_event(messages, event)
+            has_bot = has_bot or bool(self._bot_user_id and event.user == self._bot_user_id)
+            updated = (parent, has_bot, messages)
+            self._thread_cache[key] = updated
+            self._thread_cache.move_to_end(key)
+            return parent, has_bot, [dict(item) for item in messages]
+
+    @staticmethod
+    def _append_thread_event(messages: List[Dict[str, str]], event: Event) -> None:
+        ts = str(event.message_ts or "")
+        if ts and any(item.get("ts") == ts for item in messages):
+            return
+        messages.append({"ts": ts, "user": str(event.user or ""), "text": str(event.text or "")})
+        messages.sort(key=_message_time)
+        # Keep the parent plus the latest six replies, enough for the configured voice context.
+        if len(messages) > THREAD_EXCERPT_MAX + 1:
+            del messages[1:len(messages) - THREAD_EXCERPT_MAX]
+
+    def observe(self, event: Event) -> None:
+        """Update known thread context from a message event without making a Slack request."""
+        if event.kind in ("message_changed", "message_deleted"):
+            key_ts = event.thread_ts or event.message_ts
+            with self._lock:
+                self._thread_cache.pop((event.channel, key_ts), None)
+            return
+        if event.kind != "message" or not event.thread_ts:
+            return
+        self._append_cached_event(event)
+
     def enrich(self, event: Event) -> None:
         try:
             if event.kind == "message" and event.thread_ts:
                 self._message(event)
-            elif event.kind == "reaction_added" and event.message_ts:
+            elif event.kind in ("message_changed", "message_deleted"):
+                self.observe(event)
+            elif (event.kind == "reaction_added" and event.reaction == "white_check_mark"
+                  and event.message_ts):
                 self._reaction(event)
         except Exception as exc:
             log.warning("thread lookup failed: %s", slack_io._error_code(exc))
 
     def _message(self, event: Event) -> None:
-        messages = _messages(self._client.conversations_replies(channel=event.channel, ts=event.thread_ts, limit=7))
-        if not messages:
-            return
-        parent_user = str(messages[0].get("user") or "")
-        texts = [str(m.get("text") or "") for m in messages if str(m.get("ts") or "") != event.message_ts]
-        texts = [t for t in texts if t]
+        key = (event.channel, event.thread_ts)
+        state = self._append_cached_event(event)
+        if state is None:
+            raw = _messages(self._client.conversations_replies(channel=event.channel, ts=event.thread_ts, limit=7))
+            if not raw:
+                return
+            parent_user = str(raw[0].get("user") or "")
+            messages = [{"ts": str(m.get("ts") or ""), "user": str(m.get("user") or ""),
+                         "text": str(m.get("text") or "")}
+                        for m in raw]
+            has_bot = bool(self._bot_user_id) and any(m["user"] == self._bot_user_id for m in messages)
+            self._append_thread_event(messages, event)
+            state = (parent_user, has_bot, messages)
+            self._put_thread(key, state)
+        else:
+            parent_user, has_bot, messages = state
+        texts = [m["text"] for m in messages if m["ts"] != event.message_ts and m["text"]]
         self._put(("parent", event.channel, event.thread_ts), parent_user)
         event.thread_parent_user = parent_user
         event.thread_excerpt = texts[-THREAD_EXCERPT_MAX:]
-        bot_id = self._bot_user_id
-        if bot_id:
-            event.thread_has_bot = any(
-                str(m.get("user") or "") == bot_id or bool(m.get("bot_id"))
-                for m in messages
-            )
+        event.thread_has_bot = has_bot
 
     def _reaction(self, event: Event) -> None:
         key = ("thread", event.channel, event.message_ts)
@@ -278,12 +348,22 @@ def _remember_post(ctx: Any, channel: str, text: str) -> None:
 def run_voice_job(ctx: Any, client: Any, job: VoiceJob, now_fn: Optional[Callable[[], float]] = None,
                   admission: Optional[VoiceAdmission] = None) -> None:
     """Call the voice, post-filter, then post (or the canned fallback). Never raises. Posts nothing while paused.
-    A job admitted more than STALE_JOB_S ago skips the voice and posts the fallback. `now_fn` is the monotonic clock
-    (injected in tests). `admission` is released when the job ends, also after an exception."""
+    A job waiting longer than `voice.queue_timeout_s` skips the voice and posts the fallback. `now_fn` is the
+    monotonic clock (injected in tests). `admission` is released when the job ends, also after an exception."""
     try:
+        if _is_paused(ctx):
+            _clear_thinking_placeholder(client, job)
+            return
         _run_job(ctx, client, job, now_fn or time.monotonic)
     except Exception as exc:
         log.error("voice job failed: %s", type(exc).__name__)
+        if _is_paused(ctx):
+            _clear_thinking_placeholder(client, job)
+        else:
+            try:
+                _post_canned_now(ctx, client, job, "voice")
+            except Exception as fallback_exc:
+                log.error("voice fallback failed: %s", type(fallback_exc).__name__)
     finally:
         if admission is not None:
             admission.release()
@@ -291,33 +371,51 @@ def run_voice_job(ctx: Any, client: Any, job: VoiceJob, now_fn: Optional[Callabl
 
 def _run_job(ctx: Any, client: Any, job: VoiceJob, clock_fn: Callable[[], float]) -> None:
     if _is_paused(ctx):
+        _clear_thinking_placeholder(client, job)
         return
     voice = ctx.voice_client
-    stale = bool(job.created_ts) and clock_fn() - job.created_ts > STALE_JOB_S
+    queue_timeout = float(getattr(ctx.config.voice, "queue_timeout_s", STALE_JOB_S))
+    stale = bool(job.created_ts) and clock_fn() - job.created_ts > queue_timeout
     if voice is None:
         vr = VoiceResult(ok=False, reason="disabled")
     elif stale:
         vr = VoiceResult(ok=False, reason="stale")
     else:
         vr = voice.call(job.request, user_id=job.user)
+    if _is_paused(ctx):
+        _clear_thinking_placeholder(client, job)
+        return
     names = _names_for(ctx, job)
     post_filter = PostFilter(ctx.config, ctx.lines)
     message = (job.request.get("input") or {}).get("message") or {}
     user_text = str(message.get("text") or "")
     recent = _recent_texts(ctx, job.channel)
-    filtered_ok = False
+    checked: Optional[FilterResult] = None
     if vr.ok and voice is not None:
         checked = post_filter.check(vr.response or {}, job.request, user_text=user_text, names=names,
-                                    recent_texts=recent)
-        filtered_ok = checked.ok
+                                    private=bool(job.ephemeral), recent_texts=recent)
         if not checked.ok:
             voice.mark_junk(str(job.request.get("request_id") or ""))
-    actions = finalize(job, vr, post_filter, ctx.lines, names=names, recent_texts=recent)
+    actions = finalize(job, vr, post_filter, ctx.lines, names=names, recent_texts=recent,
+                       checked_result=checked)
+    if _is_paused(ctx):
+        _clear_thinking_placeholder(client, job)
+        return
     errors = slack_io.execute(client, actions, job.channel)
-    if filtered_ok and not errors:
+    if checked is not None and checked.ok and not errors:
         for action in actions:
-            if action.kind == "post":
+            if action.kind in ("post", "update"):
                 _remember_post(ctx, action.channel or job.channel, action.text)
+
+
+def _clear_thinking_placeholder(client: Any, job: VoiceJob) -> None:
+    """Remove a pending visual marker if a pause cancels its reply."""
+    if not job.channel or not job.thinking_ts:
+        return
+    try:
+        client.chat_delete(channel=job.channel, ts=job.thinking_ts)
+    except Exception as exc:
+        log.debug("thinking placeholder cleanup failed: %s", type(exc).__name__)
 
 
 def _post_canned_now(ctx: Any, client: Any, job: VoiceJob, reason: str) -> None:
@@ -351,7 +449,6 @@ def build_handlers(ctx: Any, router: Any, client: Any, *, submit: Optional[Calla
             log.info("voice queue full, canned line posted")
             _post_canned_now(ctx, client, job, "queue_full")
             return
-        job.created_ts = clock_fn()
         # Immediate visual feedback: send a temporary thinking message into the thread/channel
         thinking_ts = ""
         if job.channel and not job.ephemeral:
@@ -363,19 +460,31 @@ def build_handlers(ctx: Any, router: Any, client: Any, *, submit: Optional[Calla
                     thread_ts=target_thread or None,
                     parse="none",
                 )
-                if isinstance(resp, dict):
-                    thinking_ts = str(resp.get("ts") or "")
+                ts_getter = getattr(resp, "get", None)
+                if callable(ts_getter):
+                    thinking_ts = str(ts_getter("ts") or "")
+                elif resp is not None:
+                    thinking_ts = str(resp["ts"] or "")
             except Exception as exc:
-                log.debug("initial thinking message skipped: %s", exc)
+                log.debug("initial thinking message skipped: %s", type(exc).__name__)
         job.thinking_ts = thinking_ts
+        job.created_ts = clock_fn()
         try:
             voice_fn(run_voice_job, ctx, client, job, clock_fn, admission)
-        except BaseException:
+        except BaseException as exc:
             admission.release()
-            raise
+            log.error("voice submission failed: %s", type(exc).__name__)
+            if not _is_paused(ctx):
+                try:
+                    _post_canned_now(ctx, client, job, "queue_full")
+                except Exception as fallback_exc:
+                    log.error("voice fallback failed: %s", type(fallback_exc).__name__)
 
     def process(event: Event) -> None:
         try:
+            if event.is_bot or (event.user and event.user == bot_id):
+                lookup.observe(event)
+                return
             lookup.enrich(event)
             result: Result = router.handle(event)
             slack_io.execute(client, result.actions, event.channel)

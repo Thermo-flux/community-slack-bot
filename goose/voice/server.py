@@ -229,7 +229,8 @@ def handle_request(body: Dict[str, Any], provider: Provider) -> Tuple[int, Dict[
     request_id = body["request_id"]
     try:
         result = provider.complete_usage(
-            build_messages(body), max_tokens_for(body, default=350, elaborate=600), timeout=40.0,
+            build_messages(body), max_tokens_for(body, default=350, elaborate=600),
+            timeout=provider.request_timeout_s,
             parts=build_parts(body))
         text, tokens_in, tokens_out = result.text, result.tokens_in, result.tokens_out
     except ProviderError as exc:
@@ -305,12 +306,16 @@ def make_server(host: str, port: int, provider: Provider, secret: str,
 
         def _send(self, status: int, payload: Dict[str, Any]) -> None:
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                # A gateway timeout can close its socket before this response arrives.
+                return
 
         def do_GET(self) -> None:
             if self.path.split("?", 1)[0] == "/health":

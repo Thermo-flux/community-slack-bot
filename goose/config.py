@@ -6,6 +6,7 @@ Secrets are NOT here. They come from environment variables.
 from __future__ import annotations
 
 import dataclasses
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, get_type_hints
@@ -113,24 +114,25 @@ class VoiceConfig:
     model: str = ""                        # must be on the voice's allowlist
     messages_per_person_per_hour: int = 200  # the message limit (replaces spend caps)
     notice_version: str = "2"              # members must have accepted this privacy notice (via /goose join) before their messages go to the voice
-    person_gap_s: int = 5
-    reply_max_chars: int = 300
-    elaborate_max_chars: int = 700
-    max_tokens: int = 100
-    elaborate_max_tokens: int = 200
+    person_gap_s: int = 0
+    reply_max_chars: int = 800
+    elaborate_max_chars: int = 1200
+    max_tokens: int = 350
+    elaborate_max_tokens: int = 600
     input_max_chars: int = 500
     thread_max_messages: int = 6
     thread_item_chars: int = 200
     thread_total_chars: int = 1200
-    timeout_s: float = 5.0
+    timeout_s: float = 30.0
+    queue_timeout_s: float = 5.0
     concurrency: int = 2
     queue_size: int = 5
     breaker_failures: int = 3
     breaker_window_s: int = 300
-    breaker_open_s: int = 900
+    breaker_open_s: int = 15
     junk_window: int = 50
     junk_ratio: float = 0.2
-    junk_off_s: int = 3600
+    junk_off_s: int = 30
     slow_p95_s: float = 3.0
     slow_for_s: int = 600
     event_remarks_per_hour: int = 4
@@ -286,6 +288,23 @@ def _validate(cfg: Config, problems: List[str]) -> None:
         problems.append("channels.organizer: must be a real channel id, not empty or '*'")
     if cfg.voice.messages_per_person_per_hour < 1:
         problems.append("voice.messages_per_person_per_hour: must be at least 1")
+    for name in ("timeout_s", "queue_timeout_s"):
+        value = getattr(cfg.voice, name)
+        if not math.isfinite(value) or value <= 0:
+            problems.append("voice.%s: must be a finite positive number" % name)
+    if cfg.voice.concurrency < 1:
+        problems.append("voice.concurrency: must be at least 1")
+    if cfg.voice.queue_size < 0:
+        problems.append("voice.queue_size: must be zero or greater")
+    if cfg.voice.person_gap_s < 0:
+        problems.append("voice.person_gap_s: must be zero or greater")
+    if cfg.voice.breaker_failures < 1:
+        problems.append("voice.breaker_failures: must be at least 1")
+    for name in ("breaker_window_s", "breaker_open_s", "junk_window", "junk_off_s"):
+        if getattr(cfg.voice, name) <= 0:
+            problems.append("voice.%s: must be positive" % name)
+    if not math.isfinite(cfg.voice.junk_ratio) or not 0.0 < cfg.voice.junk_ratio <= 1.0:
+        problems.append("voice.junk_ratio: must be above 0 and at most 1")
     if cfg.voice.reply_max_chars < 20 or cfg.voice.elaborate_max_chars < cfg.voice.reply_max_chars:
         problems.append("voice.reply_max_chars/elaborate_max_chars: invalid lengths")
     if cfg.schedule.program_weeks < 1:
