@@ -807,7 +807,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
 
             if clean_lower in ("!help", "/help", ".help", "bot help", "bothelp", "help"):
                 templates = CONFIG.get("templates") or {}
-                help_msg = templates.get("help_message", "Type `/level` or `/leaderboard`!")
+                help_msg = templates.get("help_message", "Type `!level` or `!leaderboard`!")
                 formatted_help = help_msg.format(
                     bot_id=bot_user_id or "bot",
                     cooldown=rules.get("cooldown_seconds", 30),
@@ -889,7 +889,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
 
         if clean_lower in ("help", "commands"):
             templates = CONFIG.get("templates") or {}
-            help_msg = templates.get("help_message", "Type `/level` or `/leaderboard`!")
+            help_msg = templates.get("help_message", "Type `!level` or `!leaderboard`!")
             formatted_help = help_msg.format(
                 bot_id=bot_user_id or "bot",
                 cooldown=rules.get("cooldown_seconds", 30),

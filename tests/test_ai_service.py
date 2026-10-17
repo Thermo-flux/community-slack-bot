@@ -111,7 +111,9 @@ def test_leveling_knowledge_is_authoritative_and_config_driven():
     assert "30-second cooldown" in knowledge
     assert "Head Duck" in knowledge
     assert "Hatchling" in knowledge
-    assert "/leaderboard" in knowledge
+    assert "!leaderboard" in knowledge
+    assert "/leaderboard" not in knowledge
+    assert "/level" not in knowledge
     assert "current tracked members" not in knowledge.lower()
     assert knowledge in ai_service.build_system_instructions()
 

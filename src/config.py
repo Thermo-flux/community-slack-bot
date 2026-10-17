@@ -150,7 +150,7 @@ def _get_default_config() -> Dict[str, Any]:
             "leaderboard_row": "*{rank}.* <@{user_id}> — Level {level} (*{title}*) • `{xp} XP`",
             "leaderboard_empty": "No contributions recorded yet. Start chatting to earn XP.",
             "help_message": (
-                "I'm Goose Lee. Use /level for a card or /leaderboard for the standings. "
+                "I'm Goose Lee. Type `!level` for a card or `!leaderboard` for the standings. "
                 "Mention me to chat in #loadout or #loadout-development."
             ),
             "ai_offline_fallback": "Hi <@{user_id}>. I can't reach my answer service right now. Try again shortly.",
