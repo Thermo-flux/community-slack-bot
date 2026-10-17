@@ -64,16 +64,18 @@ def test_build_system_instructions():
     assert "most replies use none" in instructions.lower()
     assert ":duck:" in instructions
     assert "current tracked members" not in instructions.lower()
-    assert "direct messages, clear goose name calls" in instructions.lower()
+    assert "direct mentions, direct messages, clear goose name calls" in instructions.lower()
     assert "only speak when you are directly called" in instructions.lower()
 
 
-def test_soul_has_a_dry_bruce_lee_easter_egg_without_forced_hype():
+def test_soul_preserves_goose_lore_and_avoids_docs_persona():
     soul = ai_service.load_soul_prompt().lower()
     assert "bruce lee" in soul
-    assert "jackie chan" in soul
+    assert "wants people to admire him" in soul
+    assert "treats orry's corrections as banter" in soul
+    assert "not a full loadout documentation assistant" in soul
     assert "avoid canned hype" in soul
-    assert "high-energy" not in soul
+    assert "do not call orry the friend who “keeps goose honest”" in soul
 
 
 def test_assistance_limits_forbid_code_and_bulk_work():
@@ -81,12 +83,14 @@ def test_assistance_limits_forbid_code_and_bulk_work():
     soul = ai_service.load_soul_prompt().lower()
     instructions = ai_service.build_system_instructions().lower()
 
-    for text in (soul, instructions):
-        assert "never write, complete, review, debug, or refactor code" in text
-        assert "code blocks" in text
-        assert "general-purpose assistant" in text
-        assert "refuse homework, essays, translations" in text
-        assert "generic chatbot" in text
+    assert "decline requests to write, complete, debug, review, or refactor code" in soul
+    assert "never output code blocks" in soul
+    assert "general-purpose assistant" in soul
+    assert "homework, essays, translations" in soul
+    assert "never write, complete, review, debug, or refactor code" in instructions
+    assert "code blocks" in instructions
+    assert "refuse homework, essays, translations" in instructions
+    assert "generic chatbot" in instructions
 
 
 def test_fallback_prompt_keeps_assistance_limits(monkeypatch):
@@ -96,11 +100,11 @@ def test_fallback_prompt_keeps_assistance_limits(monkeypatch):
     assert "assistance limits" in instructions
     assert "never write, complete, review, debug, or refactor code" in instructions
 
-def test_fallback_prompt_keeps_privacy_and_bruce_lee_rules(monkeypatch):
+def test_fallback_prompt_keeps_privacy_and_goose_personality(monkeypatch):
     monkeypatch.setattr(ai_service, "SOUL_PATH", MagicMock(exists=lambda: False))
     instructions = ai_service.build_system_instructions().lower()
-    assert "jackie chan" in instructions
-    assert "direct messages, clear goose name calls" in instructions
+    assert "martial-arts moves are impressive" in instructions
+    assert "direct mentions, direct messages, clear goose name calls" in instructions
     assert "only speak when you are directly called" in instructions
 
 
@@ -130,24 +134,36 @@ def test_may_decline_instructions_only_added_when_asked():
     assert not ai_service.is_no_reply("")
 
 
-def test_loadout_knowledge_is_retrieved_on_demand_only():
-    """The mirrored docs are pulled in only for LOADOUT questions, never kept in context by default."""
-    pages = ai_service.load_loadout_pages()
-    assert pages
-    assert any("Raspberry Pi 5" in page["text"] for page in pages)
+def test_program_questions_use_limited_basics_or_detail_redirect():
+    assert ai_service.is_simple_program_question("What is LOADOUT?")
+    assert ai_service.is_simple_program_question("Has LOADOUT launched?")
+    assert ai_service.is_simple_program_question("What are the tracks?")
+    assert ai_service.is_simple_program_question("What's Ore?")
+    assert not ai_service.is_program_question("What is LOADOUT?")
+    assert not ai_service.is_program_question("Has LOADOUT launched?")
+    assert not ai_service.is_program_question("What are Pond Levels?")
+    assert ai_service.is_program_question("How much Ore does the LOADOUT program give?")
+    assert ai_service.is_program_question("Where are the LOADOUT docs?")
+    assert not ai_service.is_program_question("How do you find Orry?")
+    assert not ai_service.is_program_question(
+        "Where can I find Orry?",
+        context_messages=[{"role": "assistant", "content": "The LOADOUT tracks are Tools and Systems."}],
+    )
+    assert not ai_service.is_program_question("I mean your personal opinion?")
+    assert ai_service.is_program_question(
+        "When does it open?",
+        context_messages=[{"role": "assistant", "content": "LOADOUT is a builder program."}],
+    )
+    assert ai_service.SIMPLE_PROGRAM_FACTS not in ai_service.build_system_instructions()
+    assert ai_service.SIMPLE_PROGRAM_FACTS in ai_service.build_system_instructions(include_program_basics=True)
 
-    # A LOADOUT question retrieves the relevant docs.
-    knowledge = ai_service.retrieve_loadout_knowledge("how much Ore is the Raspberry Pi 5?")
-    assert "Raspberry Pi 5" in knowledge
-
-    # The docs are only in the system prompt when explicitly supplied.
-    assert "LOADOUT PROGRAM KNOWLEDGE" not in ai_service.build_system_instructions()
-    instructions = ai_service.build_system_instructions(knowledge)
-    assert "LOADOUT PROGRAM KNOWLEDGE" in instructions
-    assert "Raspberry Pi 5" in instructions
-
-    # Plain chit-chat does not pull the docs.
-    assert ai_service.retrieve_loadout_knowledge("hey goose how's the pond today?") == ""
+    generated = "LOADOUT is about shipping technical projects for review."
+    with patch("ai_service.AI_API_KEY", "test-key"), \
+         patch("ai_service.AI_PROVIDER", "custom"), \
+         patch("ai_service._call_openai_compatible", return_value=generated) as call:
+        response = ai_service.generate_response("U_TEST", "What is LOADOUT?")
+    assert response == generated
+    assert ai_service.SIMPLE_PROGRAM_FACTS in call.call_args.args[0][0]["content"]
 
 
 def test_error_resilience_on_network_failure():

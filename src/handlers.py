@@ -985,6 +985,14 @@ def _queue_ai_reply(
 ) -> None:
     if not _claim_reply_trigger(channel_id, current_ts):
         return
+    if ai_service.is_program_question(message):
+        _safe_say(
+            say,
+            text=ai_service.PROGRAM_REDIRECT_TEXT,
+            channel=channel_id,
+            thread_ts=thread_ts,
+        )
+        return
     if not _AI_REPLY_SLOTS.acquire(blocking=False):
         try:
             say(

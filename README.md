@@ -66,14 +66,14 @@ python run_tests.py
 
 ## AI replies
 
-Direct mentions, direct messages, recognized Goose name calls, and explicit untagged opinion questions naming Goose or Orry return quickly to the Slack listener and run in a bounded worker queue. Goose Lee posts a short status message, then replaces it with the answer. If the queue is full or the provider is unavailable, the bot replies with a brief fallback.
+Direct mentions, DMs, recognized Goose name calls, and relevant follow-ups in a Goose thread run in a bounded worker queue. Goose Lee posts a short status message, then replaces it with the answer. If the queue is full or the provider is unavailable, the bot replies with a brief fallback.
 
 The Grok 4.7 configuration uses low reasoning effort. AI_TIMEOUT_SECONDS sets the provider connection/read timeout and the response-body read deadline (15 seconds by default); provider requests are not retried. AI_MAX_REPLY_CHARS defaults to 400. AI_REPLY_WORKERS and AI_REPLY_QUEUE_SIZE control parallel replies and queued work.
 
-Goose Lee uses the 10 most recent messages from the same conversation for an unthreaded request, or all messages in the relevant thread. It fetches context only after a call trigger and redacts common credential formats before sending it to the model. Ordinary channel messages do not trigger an AI reply or enter the model context. Replies stay to one or two short sentences and usually have no emoji. Any emoji is limited to one approved Slack shortcode.
+Goose Lee uses recent messages from the same conversation or thread, only after someone calls him. It redacts common credential formats before sending context to the model. Ordinary channel messages do not trigger an AI reply or enter model context. A small curated fact set supports simple LOADOUT questions and the model answers in Goose's own voice; the full mirrored Docs are not retrieved. Detailed questions and exact/current details beyond the basic status fact point to Orry, the official site, or an organizer. Replies stay to one or two short sentences and usually have no emoji.
 
-The Slack manifest enables one-to-one DMs with `message.im` and `im:history`. Reinstall the app after applying manifest scope changes.
+The Slack manifest enables DMs and private-group message events through `message.im`, `im:history`, `message.groups`, and `groups:history`. Reinstall or reauthorize the app after applying manifest scope changes.
 
-Channel replies are enabled only in the configured public `#loadout` and `#loadout-development` channels after Slack confirms each ID resolves to its exact channel name at startup. Set `OFFICIAL_LOADOUT_CHANNEL_ID` or `LOADOUT_DEVELOPMENT_CHANNEL_ID` to override an ID for another workspace. Setting `WATCHED_CHANNELS` to a comma-separated list of channel IDs overrides the pair and watches exactly those channels (public or private). Direct messages remain enabled.
+By default, channel replies are enabled in the configured public `#loadout` and `#loadout-development` channels after Slack verifies their names. `OFFICIAL_LOADOUT_CHANNEL_ID` and `LOADOUT_DEVELOPMENT_CHANNEL_ID` can override those IDs. `WATCHED_CHANNELS` can instead set an explicit comma-separated list of public or private channel IDs. DMs remain enabled.
 
 For deployment, see `deployment/`, `Dockerfile`, and `docker-compose.yml`. Copy `.env.example` and set the Slack tokens and channel IDs before starting the bot.
