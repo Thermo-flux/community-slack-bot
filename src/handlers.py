@@ -41,6 +41,14 @@ def clean_mention_text(text: str) -> str:
     return re.sub(r"<@[A-Z0-9]+(?:\|[^>]+)?>", "", text, flags=re.IGNORECASE).strip()
 
 
+def is_leaderboard_request(text: str) -> bool:
+    """Recognize leaderboard requests, including the bot's name."""
+    clean = re.sub(r"[!?.,]+$", "", (text or "").strip().lower())
+    return bool(re.fullmatch(r"(?:goose[ -]lee[, ]+)?(?:show(?: me)? )?leaderboard", clean)) or clean in {
+        "/leaderboard", "!leaderboard", ".leaderboard", "/top", "!top", ".top", "top", "ranks", "scores"
+    }
+
+
 def parse_card_request_targets(text: str, caller_id: str, bot_user_id: Optional[str] = None) -> Optional[List[str]]:
     """
     Parses a message or command string to determine if it is asking for a rank/level card,
@@ -242,7 +250,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
                 return
 
             # Leaderboard in-chat trigger
-            if clean_lower in ("/leaderboard", "!leaderboard", ".leaderboard", "leaderboard", "/top", "!top", "top", "ranks"):
+            if is_leaderboard_request(text):
                 leaders = get_leaderboard(limit=10)
                 board = format_leaderboard(leaders)
                 try:
@@ -312,7 +320,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             if rules.get("announce_level_up_in_channel", True):
                 announcement = format_level_up_message(user_id, new_level, new_title)
                 try:
-                    say(text=announcement, channel=channel_id)
+                    say(text=announcement, channel=channel_id, thread_ts=event.get("thread_ts") or event.get("ts"))
                     if event.get("ts"):
                         client.reactions_add(channel=channel_id, timestamp=event["ts"], name="tada")
                 except Exception as e:
@@ -344,7 +352,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             return
 
         # Leaderboard command
-        if clean_lower in ("leaderboard", "top", "ranks", "scores"):
+        if is_leaderboard_request(cleaned_text):
             leaders = get_leaderboard(limit=10)
             board = format_leaderboard(leaders)
             say(text=board, thread_ts=target_thread_ts)

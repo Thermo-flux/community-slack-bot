@@ -82,10 +82,10 @@ def _get_default_config():
         "watched_channels": ["*"],
         "interaction_rules": {
             "cooldown_seconds": 30,
-            "base_xp_per_message": 10,
-            "bonus_xp_long_message": 5,
+            "base_xp_per_message": 5,
+            "bonus_xp_long_message": 3,
             "long_message_threshold": 80,
-            "bonus_xp_suggestion": 15,
+            "bonus_xp_suggestion": 5,
             "suggestion_keywords": ["suggest", "idea", "propose", "what if", "rfc"],
             "announce_level_up_in_channel": True,
             "reply_in_thread": False
@@ -98,14 +98,14 @@ def _get_default_config():
             "custom_pfp_emoji": ":robot_face:"
         },
         "level_tiers": [
-            {"level": 1, "min_xp": 0, "title": "🌱 Novice Explorer"},
-            {"level": 2, "min_xp": 50, "title": "🌿 Active Contributor"},
-            {"level": 3, "min_xp": 150, "title": "⭐ Thoughtful Voice"},
-            {"level": 4, "min_xp": 300, "title": "💡 Idea Champion"},
-            {"level": 5, "min_xp": 550, "title": "🚀 Pillar of Community"}
+            {"level": 1, "min_xp": 0, "title": "Newcomer"},
+            {"level": 2, "min_xp": 50, "title": "Contributor"},
+            {"level": 3, "min_xp": 150, "title": "Regular"},
+            {"level": 4, "min_xp": 300, "title": "Problem Solver"},
+            {"level": 5, "min_xp": 550, "title": "Community Builder"}
         ],
         "templates": {
-            "level_up": "🎉 *LEVEL UP!* Congratulations <@{user_id}>! You just reached *Level {level}: {title}*! 🚀",
+            "level_up": "*Level {level}: {title}* for <@{user_id}>. Nice work; the XP graph has evidence now.",
             "rank_card": "*Level Card for <@{user_id}>*\n• Level: {level} ({title})\n• XP: {xp} XP\n• Progress: {progress_bar} {percent}%\n• XP Needed: {xp_needed} XP",
             "leaderboard_header": "🏆 *Top Contributors Leaderboard* 🏆",
             "leaderboard_row": "*{rank}.* <@{user_id}> — Level {level} (*{title}*) • `{xp} XP`",

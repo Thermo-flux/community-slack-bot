@@ -183,7 +183,7 @@ def test_massive_message_payload(stress_db):
 
     assert is_sug is True
     assert is_long is True
-    assert xp == 30  # 10 base + 5 long + 15 suggestion
+    assert xp == 13  # 5 base + 3 long + 5 suggestion
 
     user = database.record_message_and_add_xp(
         user_id="U_HEAVY",
@@ -194,7 +194,7 @@ def test_massive_message_payload(stress_db):
         is_suggestion=is_sug,
         db_path=stress_db
     )
-    assert user["xp"] == 30
+    assert user["xp"] == 13
 
 
 def test_multi_level_jump():
@@ -209,7 +209,7 @@ def test_multi_level_jump():
     # Jump straight to 1400 XP (Level 7)
     lvl_end, title_end = leveling.get_level_info_for_xp(1400)
     assert lvl_end == 7
-    assert "Legend" in title_end
+    assert title_end == "Go-to Builder"
 
 
 def test_ai_service_offline_stress():
