@@ -214,6 +214,21 @@ def test_season_line_and_set_end(monkeypatch):
     assert "open-ended" in handlers._season_line()
 
 
+def test_loadout_questions_deflect_to_orry():
+    instructions = ai_service.build_system_instructions()
+    assert "Orry" in instructions
+    assert "silly goose" in instructions.lower()
+    assert "Stay fresh" in instructions
+
+
+def test_knowledge_block_deflects_instead_of_answering():
+    instructions = ai_service.build_system_instructions(knowledge="Ore price for X is 100.")
+    assert "LOADOUT PROGRAM KNOWLEDGE" in instructions
+    assert "Orry is the authority" in instructions
+    assert "Quote exact figures" not in instructions
+    assert "Use it as the source of truth for this LOADOUT question" not in instructions
+
+
 def test_persona_blocks_are_conditional():
     base = ai_service.build_system_instructions()
     assert "ROAST POLICY (a rare bit" not in base
