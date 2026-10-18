@@ -378,3 +378,15 @@ def test_claim_state_is_atomic_and_value_aware(temp_db):
     assert database.claim_state("weekly", "2026-W42", db_path=temp_db) is False
     assert database.claim_state("weekly", "2026-W43", db_path=temp_db) is True
     assert database.get_state("weekly", db_path=temp_db) == "2026-W43"
+
+def test_persona_keeps_chinese_american_flavor_and_guards_against_caricature():
+    soul = ai_service.load_soul_prompt()
+    assert "Chinese-American" in soul
+    assert "not a garnish" in soul
+
+    prompt = ai_service.build_system_instructions()
+    assert "Chinese-American" in prompt
+    assert "VOICE EXAMPLES" in prompt
+    assert "boba" in prompt.lower()
+    assert "caricature" in prompt
+    assert "not only on special occasions" in prompt
