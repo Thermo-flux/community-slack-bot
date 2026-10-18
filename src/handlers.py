@@ -1245,7 +1245,7 @@ def _maybe_send_asset(
     if slack_assets.is_quote_request(text):
         if not _claim_reply_trigger(channel_id, message_ts):
             return True
-        quote = slack_assets.pick_quote()
+        quote = slack_assets.generate_quote()
         line = slack_assets.format_quote(quote)
         image = quote.get("image")
         if not (image and slack_assets.upload_asset(client, channel_id, thread_ts, image, initial_comment=line)):

@@ -89,7 +89,7 @@
     "end_ts": 0
   },
   "assets": {
-    "_comment": "Rare reaction GIFs and bad sifu quotes. Uploads need the files:write bot scope. Cooldown is per channel.",
+    "_comment": "Rare reaction GIFs and generated sifu quotes. Uploads need the files:write bot scope. Cooldown is per channel.",
     "enabled": true,
     "cooldown_seconds": 900,
     "chance": 0.5

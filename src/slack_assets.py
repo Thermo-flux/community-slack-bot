@@ -5,8 +5,10 @@ scope is unavailable, the same asset is posted from its public repository URL so
 clips still appear. Callers fall back to text only if both paths fail.
 """
 
+import json
 import logging
 import os
+import random
 import re
 import time
 from pathlib import Path
@@ -24,48 +26,251 @@ ASSET_BASE_URL = (
     or "https://raw.githubusercontent.com/Thermo-flux/community-slack-bot/feat/goose-lee-v6/assets/goose"
 ).rstrip("/")
 
-QUOTES = [
-    {
-        "text": "Don't let anyone ruin your day. It's your day, ruin it yourself.",
-        "who": "Paw Tzu",
-        "image": None,
-    },
-    {
-        "text": "Defeat yourself so your enemy can't defeat you, as you're already defeated.",
-        "who": "Master Cat Tzu",
-        "image": "quotes/already_defeated.png",
-    },
-    {
-        "text": "If you want to avoid a bad day, wake up at night.",
-        "who": "Ancient Sifu Wisdom",
-        "image": None,
-    },
-    {
-        "text": "If your enemy can predict your next move, don't move.",
-        "who": "Master Sifu Cat",
-        "image": "quotes/dont_move.png",
-    },
-    {
-        "text": "If at first you don't succeed, skydiving is not for you.",
-        "who": "Grandmaster Dog Tzu",
-        "image": "quotes/skydiving.png",
-    },
-    {
-        "text": "Hard work pays off in the future, but laziness pays off right now.",
-        "who": "Sifu Cat",
-        "image": "quotes/laziness.png",
-    },
-    {
-        "text": "Before you marry a person, first make them use a computer with slow internet to see who they really are.",
-        "who": "Goose Lee",
-        "image": None,
-    },
-    {
-        "text": "Never argue with an idiot. They will drag you down to their level and beat you with experience.",
-        "who": "Sifu Shifu",
-        "image": None,
-    },
+_QUOTE_SUBJECTS = [
+    "the last dumpling",
+    "a lukewarm boba",
+    "cold fried rice",
+    "your unmerged branch",
+    "a silent semicolon",
+    "the family group chat",
+    "one stubborn noodle",
+    "a calm merge conflict",
+    "the bug you ignored",
+    "a spoon in the sink",
+    "the auntie at the door",
+    "a half-finished congee",
+    "your green build",
+    "the duck who waits",
+    "a suspicious bao",
+    "the oldest hot pot",
+    "a single spring roll",
+    "your commit history",
+    "the lint warning you dismissed",
+    "a very confident pigeon",
+    "the rice cooker at 3am",
+    "an empty boba cup",
+    "the mat you slipped on",
+    "a nunchuck with opinions",
+    "the shifu's left sandal",
+    "your fifth browser tab",
+    "a tiny victory waddle",
+    "the pond at midnight",
+    "a fork in the noodle bowl",
+    "the last piece of ginger",
+    "your backup plan",
+    "the dumpling steamer",
+    "a very serious goose",
+    "the chopstick that rolled away",
+    "an overcooked noodle",
+    "the moon over the mines",
+    "a spoonful of chili oil",
+    "your first clean deploy",
+    "the snack drawer",
+    "a bowl of rice with big dreams",
 ]
+
+_QUOTE_VERBS = [
+    "forgives",
+    "outranks",
+    "teaches",
+    "haunts",
+    "fears",
+    "respects",
+    "improves",
+    "misunderstands",
+    "betrays",
+    "comforts",
+    "ignores",
+    "sharpens",
+    "questions",
+    "inherits",
+    "defeats",
+    "befriends",
+    "warns",
+    "outlasts",
+    "judges",
+    "nourishes",
+    "embarrasses",
+    "protects",
+    "interrupts",
+    "remembers",
+]
+
+_QUOTE_OBJECTS = [
+    "a calm mind",
+    "a clean diff",
+    "the family group chat",
+    "a warm bowl of rice",
+    "your next deploy",
+    "a patient shifu",
+    "the last slice of ginger",
+    "a quiet pond",
+    "your future self",
+    "a well-timed snack",
+    "the ancestor group chat",
+    "a green build",
+    "one honest commit message",
+    "a very small duck",
+    "the spirit of Bruce Lee",
+    "a fresh pot of tea",
+    "your loudest bug",
+    "a plate of dumplings",
+    "the 3am rice cooker",
+    "a serious boba order",
+    "the family bill argument",
+    "a lint-free morning",
+    "the slowest noodle",
+    "a patient rice farmer",
+    "your oldest branch",
+    "the last dumpling",
+    "a quiet semicolon",
+    "the pond elders",
+    "a well-fed duckling",
+    "your next idea",
+    "the auntie's approval",
+    "a stubborn wok",
+    "the moon over the pond",
+    "a single chopstick",
+    "the snack you hid",
+    "a calm nunchuck",
+    "the smell of garlic",
+    "a suspicious spoon",
+    "your best excuse",
+    "the sound of a steamer",
+]
+
+_QUOTE_TEMPLATES = [
+    ("{s} {v} {o}.", "wise"),
+    ("{s} {v} {o}.", "wise"),
+    ("{s} {v} {o}, and the pond nods.", "sassy"),
+    ("{s} {v} {o}, which explains everything.", "sassy"),
+    ("Beware: {s} {v} {o}.", "sassy"),
+    ("The way of the pond: {s} {v} {o}.", "wise"),
+    ("{s} {v} {o}, as the ancestors predicted.", "wise"),
+    ("{s} {v} {o}, and that is why we eat first.", "sassy"),
+]
+
+_QUOTE_AUTHORS = [
+    "Paw Tzu",
+    "Master Cat Tzu",
+    "Ancient Sifu Wisdom",
+    "Master Sifu Cat",
+    "Grandmaster Dog Tzu",
+    "Sifu Cat",
+    "Sifu Shifu",
+    "Goose Lee",
+]
+
+_FOOD_IMAGE_WORDS = (
+    "dumpling",
+    "boba",
+    "rice",
+    "noodle",
+    "bao",
+    "congee",
+    "hot pot",
+    "spring roll",
+    "wok",
+    "tea",
+    "ginger",
+    "chili",
+    "snack",
+    "steamer",
+    "chopstick",
+    "garlic",
+    "soup",
+)
+
+_QUOTE_HISTORY_KEY = "quote_history"
+_QUOTE_HISTORY_LIMIT = 5000
+
+
+def _normalize_quote(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", text.lower())).strip()
+
+
+def _quote_history() -> list:
+    try:
+        raw = get_state(_QUOTE_HISTORY_KEY, "[]")
+        history = json.loads(raw) if raw else []
+    except Exception:
+        history = []
+    return history if isinstance(history, list) else []
+
+
+def _remember_quote(text: str) -> None:
+    history = _quote_history()
+    history.append(_normalize_quote(text))
+    if len(history) > _QUOTE_HISTORY_LIMIT:
+        history = history[-_QUOTE_HISTORY_LIMIT:]
+    try:
+        set_state(_QUOTE_HISTORY_KEY, json.dumps(history))
+    except Exception:
+        logger.warning("Could not persist quote history", exc_info=True)
+
+
+def _compose_quote():
+    template, tone = random.choice(_QUOTE_TEMPLATES)
+    text = template.format(
+        s=random.choice(_QUOTE_SUBJECTS),
+        v=random.choice(_QUOTE_VERBS),
+        o=random.choice(_QUOTE_OBJECTS),
+    )
+    return text[0].upper() + text[1:], tone
+
+
+def _pick_quote_author() -> str:
+    if random.random() < 0.2:
+        return "Goose Lee"
+    return random.choice(_QUOTE_AUTHORS)
+
+
+def pick_quote_image(text: str, tone: str, who: str) -> str:
+    """Choose an image that fits the quote's tone and subject."""
+    if who == "Goose Lee":
+        return random.choice(GOOSE_IMAGES)
+    if any(word in text.lower() for word in _FOOD_IMAGE_WORDS):
+        return random.choice(SASSY_IMAGES)
+    return random.choice(WISE_IMAGES if tone == "wise" else SASSY_IMAGES)
+
+
+def generate_quote() -> Dict[str, Optional[str]]:
+    """Compose a brand-new faux-sifu quote and attach a matching image.
+
+    Every generated line is checked against the persisted history, so the bot never
+    repeats a quote.
+    """
+    history = set(_quote_history())
+    text = None
+    tone = "wise"
+    for _ in range(60):
+        candidate, candidate_tone = _compose_quote()
+        if _normalize_quote(candidate) not in history:
+            text, tone = candidate, candidate_tone
+            break
+    if text is None:
+        for template, candidate_tone in _QUOTE_TEMPLATES:
+            for subject in _QUOTE_SUBJECTS:
+                for verb in _QUOTE_VERBS:
+                    for obj in _QUOTE_OBJECTS:
+                        candidate = template.format(s=subject, v=verb, o=obj)
+                        candidate = candidate[0].upper() + candidate[1:]
+                        if _normalize_quote(candidate) not in history:
+                            text, tone = candidate, candidate_tone
+                            break
+                    if text:
+                        break
+                if text:
+                    break
+            if text:
+                break
+    if text is None:
+        history.clear()
+        text, tone = _compose_quote()
+    who = _pick_quote_author()
+    quote = {"text": text, "who": who, "image": pick_quote_image(text, tone, who)}
+    _remember_quote(text)
+    return quote
 
 _QUOTE_RE = re.compile(
     r"\b(?:tell|give|got|share|drop|send)\b[^.?!]{0,24}\b(?:quote|quotes|wisdom|wise words)\b"
@@ -75,54 +280,89 @@ _QUOTE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_SLANDER = r"(?:bad|mid|overrated|trash|awful|gross|terrible|sucks|worst|disgusting|fake|boring|overhyped)"
-_FOOD = r"(?:boba|dim sum|noodles?|fried rice|dumplings?)"
+_SLANDER = r"(?:bad|mid|overrated|trash|awful|gross|terrible|sucks|worst|disgusting|fake|boring|overhyped|weird|pointless|useless)"
+_FOOD = (
+    r"(?:msg|boba|dim sum|noodles?|fried rice|dumplings?|hot pot|congee|bao|spring rolls?"
+    r"|mapo tofu|chow mein|lo mein|wontons?|xiaolongbao|pho|ramen|sushi|kimchi|matcha)"
+)
 
 _RAGE_RULES = [
     (
         re.compile(
             rf"\bmsg\b.{{0,40}}\b{_SLANDER}\b|\b{_SLANDER}\b.{{0,20}}\bmsg\b", re.IGNORECASE
         ),
-        ("rage/msg_sacred.gif", "MSG is sacred. This is a personal attack."),
+        (
+            "rage/msg_sacred.gif",
+            "AIYA! MSG is sacred! You just insulted every grandmother in the pond. I am shaking. Explain yourself.",
+        ),
     ),
     (
         re.compile(
             rf"\b{_FOOD}\b.{{0,40}}\b{_SLANDER}\b|\b{_SLANDER}\b.{{0,20}}\b{_FOOD}\b",
             re.IGNORECASE,
         ),
-        ("rage/food_slander.gif", "Aiya. We do not speak about the food that way."),
+        (
+            "rage/food_slander.gif",
+            "AIYA! You did not just say that about the food. The ancestors heard you. The whole pond heard you.",
+        ),
     ),
     (
         re.compile(
             rf"\bbruce lee\b.{{0,40}}\b{_SLANDER}\b|\b{_SLANDER}\b.{{0,20}}\bbruce lee\b",
             re.IGNORECASE,
         ),
-        ("rage/bruce_lee.gif", "That is my namesake. Choose your next words very carefully."),
+        (
+            "rage/bruce_lee.gif",
+            "That is my namesake. My ancestors are standing up right now. Choose your next words like your life depends on it.",
+        ),
+    ),
+    (
+        re.compile(
+            rf"\b(?:kung fu|wing chun|martial arts?)\b.{{0,40}}\b{_SLANDER}\b"
+            rf"|\b{_SLANDER}\b.{{0,20}}\b(?:kung fu|wing chun|martial arts?)\b",
+            re.IGNORECASE,
+        ),
+        (
+            "rage/bruce_lee.gif",
+            "Fake? FAKE? My whole bloodline just gasped. The pond is in crisis. I need a moment.",
+        ),
     ),
     (
         re.compile(r"\b(?:nunchaku|nunchuck)\b", re.IGNORECASE),
-        ("rage/nunchaku_fail.gif", "I have trained my whole life for this. Watch."),
+        (
+            "rage/nunchaku_fail.gif",
+            "I have trained my whole life for this. Watch closely. Do not blink. Do not tell Orry.",
+        ),
     ),
     (
         re.compile(
             r"\b(?:show|demonstrate|teach|do|use)\b[^.?!]{0,24}\b(?:kung fu|wing chun|martial arts|karate)\b",
             re.IGNORECASE,
         ),
-        ("rage/nunchaku_fail.gif", "I have trained my whole life for this. Watch."),
+        (
+            "rage/nunchaku_fail.gif",
+            "I have trained my whole life for this. Watch closely. Do not blink. Do not tell Orry.",
+        ),
     ),
     (
         re.compile(
             r"\b(?:build|ci|deploy|pipeline|tests?)\b.{0,30}\b(?:fail|failed|failing|red|broke|broken)\b",
             re.IGNORECASE,
         ),
-        ("rage/failure.gif", "The build has dishonored the pond."),
+        (
+            "quotes/shifu_deep_sigh.png",
+            "The build failed. The ancestors are disappointed, the pond is in mourning, and I am not okay. Fix it.",
+        ),
     ),
     (
         re.compile(
             r"\b(?:emotional damage|my code (?:broke|is broken)|everything is broken)\b",
             re.IGNORECASE,
         ),
-        ("rage/emotional_damage.gif", "Emotional damage."),
+        (
+            "quotes/shifu_frustrated.png",
+            "Emotional damage! I felt that in my tail feathers. My ancestors felt it too. AIYA.",
+        ),
     ),
 ]
 
@@ -137,31 +377,23 @@ def is_quote_request(text: str) -> bool:
     return bool(_QUOTE_RE.search(text or ""))
 
 
-SIFU_IMAGES = [
+WISE_IMAGES = [
     "quotes/paw_tzu_wise.png",
     "quotes/bearded_shifu_peace.png",
-    "quotes/shifu_deep_sigh.png",
-    "quotes/shifu_frustrated.png",
+    "quotes/dog_master_staff.png",
+]
+
+SASSY_IMAGES = [
     "quotes/pai_mei_smirk.png",
     "quotes/sifu_cat_stance.png",
-    "quotes/dog_master_staff.png",
+    "quotes/shifu_frustrated.png",
+    "quotes/shifu_deep_sigh.png",
 ]
 
 GOOSE_IMAGES = [
     "quotes/goose_typing.gif",
     "quotes/goose_kick.gif",
 ]
-
-
-def pick_quote() -> Dict[str, Optional[str]]:
-    """Pick a quote and attach an unpaired sifu still, or a duck clip for Goose's own line."""
-    import random
-
-    quote = dict(random.choice(QUOTES))
-    if not quote.get("image"):
-        pool = GOOSE_IMAGES if quote.get("who") == "Goose Lee" else SIFU_IMAGES
-        quote["image"] = random.choice(pool)
-    return quote
 
 
 def format_quote(quote: Dict[str, Optional[str]]) -> str:

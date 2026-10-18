@@ -19,24 +19,59 @@ def test_quote_requests_are_detected():
     assert not slack_assets.is_quote_request("goose me")
 
 
-def test_pick_quote_always_attaches_an_image():
-    assert slack_assets.pick_quote()["image"]
+def test_generate_quote_always_attaches_an_image(monkeypatch):
+    monkeypatch.setattr(slack_assets, "_quote_history", lambda: [])
+    monkeypatch.setattr(slack_assets, "_remember_quote", lambda text: None)
+    assert slack_assets.generate_quote()["image"]
 
 
 def test_goose_quote_uses_a_duck_clip(monkeypatch):
-    monkeypatch.setattr(
-        slack_assets, "QUOTES", [{"text": "Stay lazy.", "who": "Goose Lee", "image": None}]
-    )
+    monkeypatch.setattr(slack_assets, "_quote_history", lambda: [])
+    monkeypatch.setattr(slack_assets, "_remember_quote", lambda text: None)
+    monkeypatch.setattr(slack_assets, "_pick_quote_author", lambda: "Goose Lee")
     monkeypatch.setattr(slack_assets, "GOOSE_IMAGES", ["quotes/goose_typing.gif"])
-    assert slack_assets.pick_quote()["image"] == "quotes/goose_typing.gif"
+    assert slack_assets.generate_quote()["image"] == "quotes/goose_typing.gif"
 
 
 def test_sifu_quote_uses_an_unpaired_still(monkeypatch):
+    monkeypatch.setattr(slack_assets, "_quote_history", lambda: [])
+    monkeypatch.setattr(slack_assets, "_remember_quote", lambda text: None)
+    monkeypatch.setattr(slack_assets, "_pick_quote_author", lambda: "Sifu Cat")
+    monkeypatch.setattr(slack_assets, "_compose_quote", lambda: ("Stay lazy.", "wise"))
+    monkeypatch.setattr(slack_assets, "WISE_IMAGES", ["quotes/paw_tzu_wise.png"])
+    assert slack_assets.generate_quote()["image"] == "quotes/paw_tzu_wise.png"
+
+
+def test_food_quote_prefers_a_sassy_still(monkeypatch):
+    monkeypatch.setattr(slack_assets, "_quote_history", lambda: [])
+    monkeypatch.setattr(slack_assets, "_remember_quote", lambda text: None)
+    monkeypatch.setattr(slack_assets, "_pick_quote_author", lambda: "Sifu Cat")
     monkeypatch.setattr(
-        slack_assets, "QUOTES", [{"text": "Stay lazy.", "who": "Sifu Cat", "image": None}]
+        slack_assets, "_compose_quote", lambda: ("The last dumpling forgives.", "wise")
     )
-    monkeypatch.setattr(slack_assets, "SIFU_IMAGES", ["quotes/paw_tzu_wise.png"])
-    assert slack_assets.pick_quote()["image"] == "quotes/paw_tzu_wise.png"
+    monkeypatch.setattr(slack_assets, "SASSY_IMAGES", ["quotes/pai_mei_smirk.png"])
+    assert slack_assets.generate_quote()["image"] == "quotes/pai_mei_smirk.png"
+
+
+def test_generated_quotes_are_never_reused(monkeypatch):
+    state = {}
+    monkeypatch.setattr(
+        slack_assets, "get_state", lambda key, default="": state.get(key, default)
+    )
+    monkeypatch.setattr(
+        slack_assets, "set_state", lambda key, value: state.__setitem__(key, value)
+    )
+    quotes = [slack_assets.generate_quote()["text"] for _ in range(30)]
+    assert len(set(quotes)) == len(quotes)
+    assert slack_assets._quote_history()
+
+
+def test_every_served_image_exists():
+    images = set(slack_assets.WISE_IMAGES + slack_assets.SASSY_IMAGES + slack_assets.GOOSE_IMAGES)
+    images.update(moment[0] for _, moment in slack_assets._RAGE_RULES)
+    images.update({"victory/waddle.gif"})
+    for image in images:
+        assert (slack_assets.ASSETS_DIR / image).is_file(), image
 
 
 def test_format_quote():
@@ -50,8 +85,10 @@ def test_format_quote():
         ("boba is overrated", "rage/food_slander.gif"),
         ("bruce lee is trash", "rage/bruce_lee.gif"),
         ("goose show me your nunchaku", "rage/nunchaku_fail.gif"),
-        ("the ci failed again", "rage/failure.gif"),
-        ("emotional damage", "rage/emotional_damage.gif"),
+        ("kung fu is fake", "rage/bruce_lee.gif"),
+        ("hot pot is overrated", "rage/food_slander.gif"),
+        ("the ci failed again", "quotes/shifu_deep_sigh.png"),
+        ("emotional damage", "quotes/shifu_frustrated.png"),
         ("the build passed", "victory/waddle.gif"),
         ("I shipped it", "victory/waddle.gif"),
     ],
@@ -136,7 +173,7 @@ def test_quote_request_falls_back_to_text(monkeypatch):
     monkeypatch.setattr(handlers.slack_assets, "is_quote_request", lambda text: True)
     monkeypatch.setattr(
         handlers.slack_assets,
-        "pick_quote",
+        "generate_quote",
         lambda: {"text": "Stay lazy.", "who": "Sifu Cat", "image": "quotes/x.png"},
     )
     monkeypatch.setattr(handlers.slack_assets, "upload_asset", lambda *a, **k: False)
@@ -156,7 +193,7 @@ def test_quote_request_uploads_its_image(monkeypatch):
     monkeypatch.setattr(handlers.slack_assets, "is_quote_request", lambda text: True)
     monkeypatch.setattr(
         handlers.slack_assets,
-        "pick_quote",
+        "generate_quote",
         lambda: {"text": "Stay lazy.", "who": "Sifu Cat", "image": "quotes/x.png"},
     )
     uploaded = []
