@@ -68,7 +68,7 @@ python run_tests.py
 
 Direct mentions, direct messages, recognized Goose name calls, and explicit untagged opinion questions naming Goose or Orry return quickly to the Slack listener and run in a bounded worker queue. Goose Lee posts a short status message, then replaces it with the answer. If the queue is full or the provider is unavailable, the bot replies with a brief fallback.
 
-The Grok 4.7 configuration uses low reasoning effort. AI_TIMEOUT_SECONDS sets the provider connection/read timeout and the response-body read deadline (15 seconds by default); provider requests are not retried. AI_MAX_REPLY_CHARS defaults to 400. AI_REPLY_WORKERS and AI_REPLY_QUEUE_SIZE control parallel replies and queued work.
+The default configuration uses Claude Haiku 5.5 (`anthropic/claude-haiku-5.5`) with low reasoning effort. AI_TIMEOUT_SECONDS sets the provider connection/read timeout and the response-body read deadline (15 seconds by default); provider requests are not retried. AI_MAX_REPLY_CHARS defaults to 400. AI_REPLY_WORKERS and AI_REPLY_QUEUE_SIZE control parallel replies and queued work.
 
 Goose Lee uses the 10 most recent messages from the same conversation for an unthreaded request, or all messages in the relevant thread. It fetches context only after a call trigger and redacts common credential formats before sending it to the model. Ordinary channel messages do not trigger an AI reply or enter the model context. Replies stay to one or two short sentences and usually have no emoji. Any emoji is limited to one approved Slack shortcode.
 
