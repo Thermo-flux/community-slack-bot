@@ -1,20 +1,16 @@
 {
   "bot_name": "goose-lee",
-  
-  "_comment_channels": "List the Slack channel IDs the bot should monitor. Example: ['C0123456789']. Use ['*'] to monitor all channels the bot is added to.",
-  "watched_channels": ["*"],
-
+  "_comment_channels": "Set the two channel IDs separately. Each must resolve to its exact public Slack channel name at startup.",
+  "official_loadout_channel_id": "C0C5XUDMRH9",
+  "loadout_development_channel_id": "C0C68G3K0AJ",
   "interaction_rules": {
     "_comment_cooldown": "Minimum seconds between XP gains per user. Prevents rapid-fire message spam.",
     "cooldown_seconds": 30,
-
     "_comment_base_xp": "XP points awarded for any valid message.",
     "base_xp_per_message": 10,
-
     "_comment_long_message": "Bonus XP awarded if message is longer than long_message_threshold characters.",
     "bonus_xp_long_message": 5,
     "long_message_threshold": 80,
-
     "_comment_suggestion": "Bonus XP awarded if message contains suggestion or idea keywords.",
     "bonus_xp_suggestion": 15,
     "suggestion_keywords": [
@@ -30,46 +26,138 @@
       "improvement",
       "feedback"
     ],
-
     "_comment_level_up": "Whether to post a public celebration message in the channel when a user levels up.",
     "announce_level_up_in_channel": true,
-
-    "_comment_thread": "Whether command responses (like /level) should be posted in threads where possible.",
-    "reply_in_thread": false
+    "_comment_thread": "Goose always replies in a thread: it continues the triggering thread, or starts one on the mention.",
+    "reply_in_thread": true
   },
-
   "emoji_settings": {
     "_comment_frequency": "Controls how many emojis the bot uses. Options: 'none', 'low', 'moderate', 'high'",
     "frequency": "low",
-
     "_comment_allowed": "Approved emojis the bot is allowed to use in its responses and reactions.",
-    "allowed_emojis": ["🎉", "⭐", "🚀", "💡", "🔥", "✨", "👏", "🏆", "🌱", "🌿"]
+    "allowed_emojis": [
+      ":duck:",
+      ":eyes:",
+      ":sparkles:",
+      ":rocket:"
+    ]
   },
-
   "profile": {
     "_comment_pfp": "Default fallback emoji icon if custom PFP avatar is not set in Slack App settings.",
-    "custom_pfp_emoji": ":robot_face:"
+    "custom_pfp_emoji": ":duck:"
   },
-
+  "_comment_targets": "Organizer channel receives the weekly Pond Report and alerts; owner_user_id confirms all-time results.",
+  "organizer_channel_id": "",
+  "owner_user_id": "",
+  "privacy": {
+    "_comment": "Public boards show at most this many members, and only those who ran 'show'.",
+    "public_board_size": 3
+  },
+  "voice": {
+    "_comment": "LLM chat is on by default so the bot keeps talking; hourly_limit is per person per hour. Set enabled false to mute the voice.",
+    "enabled": true,
+    "hourly_limit": 120
+  },
+  "rewards": {
+    "_comment": "While announced is false, the runtime voice filter blocks these words from bot replies.",
+    "announced": false,
+    "words": ["reward", "rewards", "prize", "prizes", "swag", "giveaway", "payout", "cash", "stipend", "bounty", "paid", "money"]
+  },
+  "reactions": {
+    "_comment": "Budget is per channel per hour; quiet members never get bot reactions.",
+    "enabled": true,
+    "budget_per_hour": 6,
+    "trigger_words": ["congrats", "congratulations", "gm", "good morning", "nice one"]
+  },
+  "roasts": {
+    "_comment": "Rare, light roasts on harmless habits only. Never on distress or newcomers.",
+    "enabled": true,
+    "max_per_day": 3
+  },
+  "goose_meter": {
+    "_comment": "Channel counter that rises when people call Goose a goose.",
+    "enabled": true,
+    "reset_hours": 24
+  },
+  "distress": {
+    "_comment": "Plain safety reply plus an organizer alert on sad or unsafe messages.",
+    "enabled": true,
+    "reply": "Hey, I'm just a duck and I can't help with something this heavy, but you matter. If you're in danger or thinking about harming yourself, please reach out to a local emergency number or a crisis line right now. If you're in the US you can call or text 988. I've also pinged the organizers so a real human can check in on you."
+  },
+  "season": {
+    "_comment": "Season end as a Unix timestamp (0 = open-ended). Set with 'goose set-end'.",
+    "end_ts": 0
+  },
+  "kill_switch": false,
   "level_tiers": [
-    { "level": 1, "min_xp": 0,    "title": "🌱 Novice Explorer" },
-    { "level": 2, "min_xp": 50,   "title": "🌿 Active Contributor" },
-    { "level": 3, "min_xp": 150,  "title": "⭐ Thoughtful Voice" },
-    { "level": 4, "min_xp": 300,  "title": "💡 Idea Champion" },
-    { "level": 5, "min_xp": 550,  "title": "🚀 Pillar of Community" },
-    { "level": 6, "min_xp": 900,  "title": "🔥 Discussion Leader" },
-    { "level": 7, "min_xp": 1400, "title": "👑 Community Legend" },
-    { "level": 8, "min_xp": 2200, "title": "⚡ Grandmaster Builder" },
-    { "level": 9, "min_xp": 3500, "title": "🏆 Mythic Contributor" }
+    {
+      "level": 1,
+      "min_xp": 0,
+      "title": "Hatchling"
+    },
+    {
+      "level": 2,
+      "min_xp": 12,
+      "title": "Duckling"
+    },
+    {
+      "level": 3,
+      "min_xp": 36,
+      "title": "Paddler"
+    },
+    {
+      "level": 4,
+      "min_xp": 72,
+      "title": "Dabbler"
+    },
+    {
+      "level": 5,
+      "min_xp": 120,
+      "title": "Mallard"
+    },
+    {
+      "level": 6,
+      "min_xp": 180,
+      "title": "Diver"
+    },
+    {
+      "level": 7,
+      "min_xp": 252,
+      "title": "Pond Scout"
+    },
+    {
+      "level": 8,
+      "min_xp": 336,
+      "title": "Flock Leader"
+    },
+    {
+      "level": 9,
+      "min_xp": 432,
+      "title": "Wing Commander"
+    },
+    {
+      "level": 10,
+      "min_xp": 540,
+      "title": "Golden Beak"
+    },
+    {
+      "level": 11,
+      "min_xp": 660,
+      "title": "Pond Elder"
+    },
+    {
+      "level": 12,
+      "min_xp": 792,
+      "title": "Head Duck"
+    }
   ],
-
   "templates": {
-    "level_up": "🎉 *LEVEL UP!* Congratulations <@{user_id}>! You just reached *Level {level}: {title}*! Thank you for your awesome contributions to the channel! 🚀✨",
-    "rank_card": "*Level & Activity Card for <@{user_id}>*\n• *Current Rank:* Level {level} — *{title}*\n• *Total Points (XP):* `{xp} XP`\n• *Progress:* `{progress_bar}` {percent}%\n• *XP to Next Level:* `{xp_needed} XP`\n• *Contributions Tracked:* {message_count} messages",
-    "leaderboard_header": "🏆 *Channel Top Contributors Leaderboard* 🏆\nHere are the most active and helpful community members:",
+    "level_up": ":sparkles: <@{user_id}> hit Level {level}: {title}. The duck does a tiny victory waddle.",
+    "rank_card": "*Level Card for <@{user_id}>*\n• Level {level}: {title}\n• XP: {xp} XP\n• Progress: {progress_bar} {percent}%\n• XP Needed: {xp_needed} XP",
+    "leaderboard_header": "Top contributors",
     "leaderboard_row": "*{rank}.* <@{user_id}> — Level {level} (*{title}*) • `{xp} XP`",
-    "leaderboard_empty": "No contributions recorded yet. Be the first to start chatting and earn XP! 🚀",
-    "help_message": "*👋 Hey! I'm goose-lee, your resident community bot! 🚀*\n• Type `/level` to see your level, XP, and rank progress (or `/level @user` to check anyone's card!).\n• Type `/leaderboard` to view the top contributors.\n• Mention me `<@{bot_id}>` anytime to brainstorm, ask questions, or chat!\n• *GitHub Repo:* <https://github.com/Thermo-flux/community-slack-bot|Thermo-flux/community-slack-bot>\n• *How to earn points:* Chat actively, share suggestions, and contribute valuable ideas. There is a {cooldown}s cooldown between points. 💡",
-    "ai_offline_fallback": "Hey <@{user_id}>! 👋 I received your message! My AI reasoning engine is currently in standby mode, but I am actively monitoring this channel and recording your activity points! 🚀"
+    "leaderboard_empty": "No contributions recorded yet. Start chatting to earn XP.",
+    "help_message": "I'm Goose Lee. Type `goose join` to earn Pond Levels in #loadout, `goose me` for your card, or `goose leaderboard` for the standings. Mention me to chat in #loadout or #loadout-development.",
+    "ai_offline_fallback": "Hi <@{user_id}>. I can't reach my answer service right now. Try again shortly."
   }
 }

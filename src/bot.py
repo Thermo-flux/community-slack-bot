@@ -4,119 +4,195 @@ MAIN SLACK BOT ENTRY POINT (src/bot.py)
 ==============================================================================
 """
 
-import sys
-import signal
 import logging
+import signal
+import sys
+import threading
+import time
 
-# Ensure standard output and error support UTF-8 on Windows consoles
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8")
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from config import (
-    SLACK_BOT_TOKEN,
-    SLACK_APP_TOKEN,
-    CONFIG,
-    WATCHED_CHANNELS,
-    AI_PROVIDER,
     AI_MODEL,
-    DB_PATH
+    AI_PROVIDER,
+    CONFIG,
+    ConfigValidationError,
+    DB_PATH,
+    SLACK_APP_TOKEN,
+    SLACK_BOT_TOKEN,
+    WATCHED_CHANNELS,
+    assert_valid_config,
+    disable_watched_channel,
+    get_configured_channels,
+    set_watched_channel_verified,
 )
 from database import init_db
-from handlers import register_handlers
+from handlers import register_handlers, run_scheduled_maintenance
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
 logger = logging.getLogger("CommunityBot")
 
+_PLACEHOLDER_TOKENS = {
+    "xoxb-your-slack-bot-token-here",
+    "xoxb-your-bot-token-here",
+    "xapp-your-slack-app-token-here",
+    "xapp-1-your-app-level-token-here",
+}
 
-def print_banner(bot_name: str, bot_user_id: str):
+
+def print_banner(bot_name: str, bot_user_id: str) -> None:
     """Prints a friendly startup banner in the terminal."""
+    safe_name = str(bot_name or "goose-lee")
+    rules = CONFIG.get("interaction_rules") or {}
+    channels_str = ", ".join(str(c) for c in (WATCHED_CHANNELS or [])) or "DMs only"
     banner = f"""
 ================================================================
-🚀 {bot_name.upper()} IS ONLINE!
+🚀 {safe_name.upper()} IS ONLINE!
 ================================================================
 • Bot User ID       : {bot_user_id or "Connected via Socket Mode"}
-• Monitored Channels: {', '.join(WATCHED_CHANNELS)}
+• Monitored Channels: {channels_str}
 • AI Provider       : {AI_PROVIDER} (Model: {AI_MODEL or "default"})
 • Database Path     : {DB_PATH}
-• Base XP/Message   : {CONFIG.get('interaction_rules', {}).get('base_xp_per_message', 10)} XP
-• Anti-Spam Wait    : {CONFIG.get('interaction_rules', {}).get('cooldown_seconds', 30)}s cooldown
+• Base XP/Message   : {rules.get('base_xp_per_message', 10)} XP
+• Anti-Spam Wait    : {rules.get('cooldown_seconds', 30)}s cooldown
 ================================================================
 Ready and listening for Slack events! Press Ctrl+C to stop.
     """
-    print(banner)
+    print(banner, flush=True)
 
 
 def check_tokens() -> bool:
-    """Checks that the required Slack tokens are present."""
+    """Checks that the required Slack tokens are present and not example placeholders."""
     missing = []
-    if not SLACK_BOT_TOKEN or not SLACK_BOT_TOKEN.startswith("xoxb-"):
+    if (
+        not SLACK_BOT_TOKEN
+        or not SLACK_BOT_TOKEN.startswith("xoxb-")
+        or SLACK_BOT_TOKEN in _PLACEHOLDER_TOKENS
+    ):
         missing.append("SLACK_BOT_TOKEN (must start with 'xoxb-')")
-    if not SLACK_APP_TOKEN or not SLACK_APP_TOKEN.startswith("xapp-"):
+    if (
+        not SLACK_APP_TOKEN
+        or not SLACK_APP_TOKEN.startswith("xapp-")
+        or SLACK_APP_TOKEN in _PLACEHOLDER_TOKENS
+    ):
         missing.append("SLACK_APP_TOKEN (must start with 'xapp-')")
 
     if missing:
-        print("\n" + "=" * 70)
-        print("❌ MISSING CONFIGURATION CREDENTIALS")
-        print("=" * 70)
-        print("The bot cannot start because the following tokens are missing or invalid:")
+        print("\n" + "=" * 70, flush=True)
+        print("❌ MISSING CONFIGURATION CREDENTIALS", flush=True)
+        print("=" * 70, flush=True)
+        print("The bot cannot start because the following tokens are missing or invalid:", flush=True)
         for item in missing:
-            print(f"  • {item}")
-        print("\n👉 QUICK FIX:")
-        print("  1. Copy '.env.example' to '.env'")
-        print("  2. Open '.env' and paste your Slack tokens.")
-        print("  3. For full step-by-step guidance, check 'HANDOVER_GUIDE.md'.")
-        print("=" * 70 + "\n")
+            print(f"  • {item}", flush=True)
+        print("\n👉 QUICK FIX:", flush=True)
+        print("  1. Copy '.env.example' to '.env'", flush=True)
+        print("  2. Open '.env' and paste your Slack tokens.", flush=True)
+        print("  3. For setup guidance, check 'README.md'.", flush=True)
+        print("=" * 70 + "\n", flush=True)
         return False
 
     return True
 
 
-def main():
+def main() -> None:
     """Initializes and runs the Slack bot."""
-    print("Initializing Community Slack Bot...")
+    print("Initializing Community Slack Bot...", flush=True)
 
     if not check_tokens():
         sys.exit(1)
 
-    logger.info("Initializing SQLite database...")
-    init_db(DB_PATH)
+    try:
+        assert_valid_config()
+    except ConfigValidationError as e:
+        print("\n" + "=" * 70, flush=True)
+        print("❌ INVALID CONFIGURATION - refusing to start", flush=True)
+        print(f"  • {e}", flush=True)
+        print("Fix config/config.json, then restart.", flush=True)
+        print("=" * 70 + "\n", flush=True)
+        sys.exit(1)
 
-    app = App(token=SLACK_BOT_TOKEN)
+    logger.info("Initializing SQLite database...")
+    try:
+        init_db(DB_PATH)
+    except Exception as e:
+        logger.error("Failed to initialize SQLite database: %s", e)
+        sys.exit(1)
 
     bot_user_id = ""
     try:
+        app = App(token=SLACK_BOT_TOKEN)
         auth_test_res = app.client.auth_test()
         bot_user_id = auth_test_res.get("user_id", "")
-        bot_name = auth_test_res.get("user", CONFIG.get("bot_name", "Community Bot"))
-        logger.info(f"Authenticated with Slack as @{bot_name} ({bot_user_id})")
+        bot_name = auth_test_res.get("user", CONFIG.get("bot_name") or "goose-lee")
+        logger.info("Authenticated with Slack as @%s (%s)", bot_name, bot_user_id)
     except Exception as e:
-        logger.error(f"Failed to authenticate with Slack: {e}")
-        print("\n⚠️ Authentication with Slack failed. Please verify your SLACK_BOT_TOKEN.\n")
+        logger.error("Failed to authenticate with Slack: %s", e)
+        print("\n⚠️ Authentication with Slack failed. Please verify your SLACK_BOT_TOKEN.\n", flush=True)
         sys.exit(1)
+
+    configured_channels = get_configured_channels()
+    if not configured_channels:
+        logger.warning(
+            "No valid public channels are configured; channel handling is disabled (DMs remain enabled)."
+        )
+    for channel_id, expected_name in configured_channels:
+        try:
+            channel_info = app.client.conversations_info(channel=channel_id).get("channel", {})
+            resolved_name = str(channel_info.get("name") or "") or channel_id
+            if set_watched_channel_verified(
+                channel_id=channel_info.get("id", ""),
+                name=channel_info.get("name", ""),
+                is_private=channel_info.get("is_private"),
+            ):
+                privacy = "private" if channel_info.get("is_private") else "public"
+                logger.info(
+                    "Verified #%s channel (%s).",
+                    expected_name or resolved_name,
+                    privacy,
+                )
+            else:
+                logger.error(
+                    "Configured channel did not resolve to public #%s; that channel is disabled.",
+                    expected_name or resolved_name,
+                )
+        except Exception as exc:
+            disable_watched_channel(channel_id)
+            logger.error(
+                "Could not verify #%s (%s); that channel is disabled.",
+                expected_name or channel_id,
+                type(exc).__name__,
+            )
 
     register_handlers(app, bot_user_id=bot_user_id)
 
-    bot_display_name = CONFIG.get("bot_name", "Community Champion Bot")
+    def _scheduler_loop() -> None:
+        while True:
+            try:
+                run_scheduled_maintenance(app.client)
+            except Exception as exc:
+                logger.warning("Scheduled maintenance error (%s)", type(exc).__name__)
+            time.sleep(3600)
+
+    threading.Thread(target=_scheduler_loop, name="goose-scheduler", daemon=True).start()
+
+    bot_display_name = CONFIG.get("bot_name") or "goose-lee"
     print_banner(bot_display_name, bot_user_id)
 
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
 
     def handle_exit(sig, frame):
-        logger.info("Shutdown signal received. Closing Slack connection...")
         try:
             handler.close()
         except Exception:
             pass
-        logger.info("Bot stopped cleanly. Goodbye!")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_exit)
@@ -125,7 +201,7 @@ def main():
     try:
         handler.start()
     except Exception as e:
-        logger.error(f"Socket Mode encountered an error: {e}")
+        logger.error("Socket Mode encountered an error: %s", e)
         sys.exit(1)
 
 

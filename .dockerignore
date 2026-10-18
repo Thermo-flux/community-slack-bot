@@ -1,0 +1,25 @@
+# secrets and runtime data never enter an image
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# development material
+.git/
+.github/
+.venv/
+venv/
+tests/
+deployment/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# documentation: keep README and config/soul.md inside the image
+*.md
+!README.md
+!config/soul.md

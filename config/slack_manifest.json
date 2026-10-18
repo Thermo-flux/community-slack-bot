@@ -1,12 +1,12 @@
 {
   "display_information": {
-    "name": "Community Champion Bot",
-    "description": "Tracks channel contributions, rewards ideas with points, manages levels, and assists the community.",
+    "name": "Goose Lee",
+    "description": "Tracks contributions and answers when called.",
     "background_color": "#1f2937"
   },
   "features": {
     "bot_user": {
-      "display_name": "Community Bot",
+      "display_name": "Goose Lee",
       "always_online": true
     },
     "slash_commands": [
@@ -23,6 +23,12 @@
         "should_escape": false
       },
       {
+        "command": "/card",
+        "description": "View a contributor card",
+        "usage_hint": "[optional] username",
+        "should_escape": false
+      },
+      {
         "command": "/leaderboard",
         "description": "Show the top community contributors and rankings",
         "usage_hint": "[optional]",
@@ -34,8 +40,10 @@
     "scopes": {
       "bot": [
         "app_mentions:read",
+        "channels:read",
         "channels:history",
         "groups:history",
+        "im:history",
         "chat:write",
         "commands",
         "reactions:write",
@@ -48,7 +56,8 @@
       "bot_events": [
         "app_mention",
         "message.channels",
-        "message.groups"
+        "message.groups",
+        "message.im"
       ]
     },
     "interactivity": {
