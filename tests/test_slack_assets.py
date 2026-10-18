@@ -12,8 +12,18 @@ def test_quote_requests_are_detected():
     assert slack_assets.is_quote_request("goose, tell me a quote")
     assert slack_assets.is_quote_request("give me some ancient wisdom")
     assert slack_assets.is_quote_request("drop a sifu quote")
+    assert slack_assets.is_quote_request("quote")
+    assert slack_assets.is_quote_request("quote please")
+    assert slack_assets.is_quote_request("wisdom")
     assert not slack_assets.is_quote_request("how is the build going")
     assert not slack_assets.is_quote_request("goose me")
+
+
+def test_pick_quote_prefers_an_image_most_of_the_time(monkeypatch):
+    import random
+
+    monkeypatch.setattr(random, "random", lambda: 0.1)
+    assert slack_assets.pick_quote()["image"]
 
 
 def test_format_quote():
@@ -84,9 +94,28 @@ def test_upload_asset_uses_files_upload_v2(monkeypatch, tmp_path):
     assert kwargs["initial_comment"] == "hi"
 
 
-def test_upload_asset_missing_file(monkeypatch, tmp_path):
+def test_upload_asset_missing_file_falls_back_to_url(monkeypatch, tmp_path):
     monkeypatch.setattr(slack_assets, "ASSETS_DIR", tmp_path)
-    assert slack_assets.upload_asset(MagicMock(), "C1", "T1", "nope.gif") is False
+    client = MagicMock()
+    assert slack_assets.upload_asset(client, "C1", "T1", "nope.gif") is True
+    kwargs = client.chat_postMessage.call_args.kwargs
+    assert kwargs["blocks"][0]["image_url"].endswith("/assets/goose/nope.gif")
+
+
+def test_upload_asset_falls_back_to_url_when_upload_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(slack_assets, "ASSETS_DIR", tmp_path)
+    (tmp_path / "x.gif").write_bytes(b"GIF89a")
+    client = MagicMock()
+    client.files_upload_v2.side_effect = RuntimeError("missing_scope")
+
+    assert slack_assets.upload_asset(client, "C1", "T1", "x.gif", "hi") is True
+    kwargs = client.chat_postMessage.call_args.kwargs
+    assert kwargs["channel"] == "C1"
+    assert kwargs["thread_ts"] == "T1"
+    assert kwargs["text"] == "hi"
+    assert kwargs["blocks"][0]["type"] == "image"
+    assert kwargs["blocks"][0]["image_url"].endswith("/assets/goose/x.gif")
+    assert kwargs["blocks"][1]["elements"][0]["text"] == "hi"
 
 
 def test_quote_request_falls_back_to_text(monkeypatch):

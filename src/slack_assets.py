@@ -1,10 +1,12 @@
 """Rare visual bits for Goose: bad sifu quotes and reaction GIFs.
 
-Assets live under ``assets/goose`` and are posted with ``files_upload_v2`` (needs the
-``files:write`` bot scope). Callers fall back to text when an upload is unavailable.
+Assets live under ``assets/goose`` and are posted with ``files_upload_v2``. When that
+scope is unavailable, the same asset is posted from its public repository URL so the
+clips still appear. Callers fall back to text only if both paths fail.
 """
 
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -16,6 +18,11 @@ from database import get_state, set_state
 logger = logging.getLogger("SlackBotAssets")
 
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets" / "goose"
+ASSET_BASE_URL = (
+    os.getenv("ASSETS_BASE_URL", "").strip()
+    or str(ASSETS.get("base_url") or "").strip()
+    or "https://raw.githubusercontent.com/Thermo-flux/community-slack-bot/9a9d3de/assets/goose"
+).rstrip("/")
 
 QUOTES = [
     {
@@ -62,7 +69,9 @@ QUOTES = [
 
 _QUOTE_RE = re.compile(
     r"\b(?:tell|give|got|share|drop|send)\b[^.?!]{0,24}\b(?:quote|quotes|wisdom|wise words)\b"
-    r"|\b(?:words? of wisdom|ancient wisdom|sifu wisdom|paw tzu|cat tzu|sifu quote|quote me)\b",
+    r"|\b(?:words? of wisdom|ancient wisdom|sifu wisdom|paw tzu|cat tzu|sifu quote|quote me)\b"
+    r"|^\s*(?:quote|quotes|wisdom)\b"
+    r"|\b(?:quote|quotes|wisdom)\b\s*(?:please)?\s*[?!.]*$",
     re.IGNORECASE,
 )
 
@@ -131,7 +140,9 @@ def is_quote_request(text: str) -> bool:
 def pick_quote() -> Dict[str, Optional[str]]:
     import random
 
-    return random.choice(QUOTES)
+    with_images = [quote for quote in QUOTES if quote.get("image")]
+    pool = with_images if with_images and random.random() < 0.8 else QUOTES
+    return random.choice(pool)
 
 
 def format_quote(quote: Dict[str, Optional[str]]) -> str:
@@ -173,6 +184,42 @@ def allow_asset(channel_id: str) -> bool:
     return True
 
 
+def asset_url(relative_path: str) -> str:
+    return f"{ASSET_BASE_URL}/{relative_path.replace(os.sep, '/')}"
+
+
+def post_asset_url(
+    client,
+    channel_id: str,
+    thread_ts: Optional[str],
+    relative_path: str,
+    caption: str = "",
+) -> bool:
+    """Post an asset from its public URL when a direct upload is not allowed."""
+    blocks = [
+        {
+            "type": "image",
+            "image_url": asset_url(relative_path),
+            "alt_text": caption or "Goose Lee",
+        }
+    ]
+    if caption:
+        blocks.append(
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": caption}]}
+        )
+    try:
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts or None,
+            text=caption or "Goose Lee",
+            blocks=blocks,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("Could not post %s from its URL (%s)", relative_path, type(exc).__name__)
+        return False
+
+
 def upload_asset(
     client,
     channel_id: str,
@@ -182,8 +229,8 @@ def upload_asset(
 ) -> bool:
     path = ASSETS_DIR / relative_path
     if not path.is_file():
-        logger.warning("Asset is missing: %s", relative_path)
-        return False
+        logger.warning("Asset is missing locally: %s", relative_path)
+        return post_asset_url(client, channel_id, thread_ts, relative_path, initial_comment)
     try:
         client.files_upload_v2(
             channel=channel_id,
@@ -194,5 +241,9 @@ def upload_asset(
         )
         return True
     except Exception as exc:
-        logger.warning("Could not upload %s (%s)", relative_path, type(exc).__name__)
-        return False
+        logger.warning(
+            "Could not upload %s (%s); trying the public asset URL",
+            relative_path,
+            type(exc).__name__,
+        )
+        return post_asset_url(client, channel_id, thread_ts, relative_path, initial_comment)

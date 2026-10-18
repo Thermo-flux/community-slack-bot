@@ -315,11 +315,7 @@ def get_pond_leaderboard(limit: int = 10, db_path=None, public: bool = True) -> 
                 (BOT_USER_ID,),
             )
             user_ids = [r["user_id"] for r in cur.fetchall()]
-    entries = []
-    for uid in user_ids:
-        status = get_pond_status(uid, db_path)
-        if status["crumbs"] > 0:
-            entries.append(status)
+    entries = [get_pond_status(uid, db_path) for uid in user_ids]
     entries.sort(key=lambda e: (e["crumbs"], e["level"]), reverse=True)
     if public:
         from config import PUBLIC_BOARD_SIZE
@@ -402,7 +398,7 @@ def format_pond_card(status: Dict[str, Any], mention: Optional[str] = None) -> s
 
 def format_pond_leaderboard(entries: List[Dict[str, Any]], limit: int = 10) -> str:
     if not entries:
-        return "No crumbs on the board yet. Say `goose join`, then chat in #loadout to start."
+        return "Nobody is on the board yet. Say `goose join`, then chat in #loadout to start."
     out = ["*Pond standings*"]
     for rank, entry in enumerate(entries[:limit], start=1):
         out.append(
@@ -524,7 +520,7 @@ def is_resting(user_id: str, db_path=None) -> bool:
 
 def format_all_time(entries: List[Dict[str, Any]], limit: int = 3) -> str:
     if not entries:
-        return "No crumbs on the board yet. Say `goose join`, then chat in #loadout to start."
+        return "Nobody is on the board yet. Say `goose join`, then chat in #loadout to start."
     out = ["*All-time Pond standings*"]
     for rank, entry in enumerate(entries[:limit], start=1):
         out.append(

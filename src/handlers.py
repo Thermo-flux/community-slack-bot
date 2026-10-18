@@ -468,6 +468,7 @@ def _handle_pond_command(
         crumbs.set_opted_in(user_id)
         status = crumbs.get_pond_status(user_id)
         lead = "You're already in the pond. " if already else "Welcome to the pond. "
+        lead += "You're on the public board now. "
         _post_private(client, say, channel_id, user_id, lead + "\n" + crumbs.format_pond_card(status), thread_ts)
         return True
 

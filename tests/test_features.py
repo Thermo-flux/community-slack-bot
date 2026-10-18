@@ -119,6 +119,12 @@ def test_privacy_controls_public_board(temp_db):
     assert {"U_SHOW", "U_HIDE"} <= {e["user_id"] for e in full}
 
 
+def test_leaderboard_lists_joined_members_with_no_crumbs(temp_db):
+    crumbs.set_opted_in("U_NEW", db_path=temp_db)
+    public = crumbs.get_pond_leaderboard(public=True, db_path=temp_db)
+    assert [e["user_id"] for e in public] == ["U_NEW"]
+
+
 def test_public_board_is_visible_by_default_and_not_capped(temp_db):
     ids = [f"U{i}" for i in range(5)]
     for amount, uid in enumerate(ids, start=1):
