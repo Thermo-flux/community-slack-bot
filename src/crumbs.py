@@ -16,6 +16,7 @@ The hard-coded core owns all level math; the LLM voice never calculates levels.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import math
 import re
 import time
@@ -54,7 +55,10 @@ def crumbs_to_reach(level: int) -> int:
         return 0
     if level <= 12:
         return _BASE_THRESHOLDS[level - 1]
-    return int(round((890.0 * (1.2 ** (level - 12))) / 5.0) * 5)
+    try:
+        return int(round((890.0 * (1.2 ** min(level - 12, 1200))) / 5.0) * 5)
+    except OverflowError:
+        return 10**18
 
 
 def title_for_level(level: int) -> Optional[str]:
@@ -66,7 +70,7 @@ def level_for_crumbs(crumbs: float, has_star: bool) -> int:
     candidate = 1
     while crumbs_to_reach(candidate + 1) <= crumbs:
         candidate += 1
-        if candidate > 1_000_000:
+        if candidate > 2000:
             break
     if not has_star and candidate > STAR_GATE_MAX_LEVEL:
         candidate = STAR_GATE_MAX_LEVEL
@@ -179,7 +183,7 @@ def add_ledger_event(
             with conn:
                 cur = conn.execute(
                     """
-                    INSERT INTO crumbs_ledger (
+                    INSERT OR IGNORE INTO crumbs_ledger (
                         user_id, kind, amount, week_key, day_key, source_ts,
                         channel_id, message_ts, ref, voided, void_reason, created_at
                     )
@@ -188,7 +192,7 @@ def add_ledger_event(
                     (user_id, kind, amount, week_key(now), day_key(now), now,
                      channel_id, message_ts, ref, time.time()),
                 )
-                return int(cur.lastrowid)
+                return int(cur.lastrowid) if cur.rowcount else 0
 
 
 def void_ledger_event(event_id: int, reason: str = "", db_path=None) -> Optional[Dict[str, Any]]:
@@ -263,7 +267,6 @@ def get_pond_status(user_id: str, db_path=None) -> Dict[str, Any]:
     breakdown = compute_breakdown(user_id, db_path)
     with _DB_LOCK:
         with _managed_connection(db_path) as conn:
-            get_or_create_user(user_id, db_path)
             row = conn.execute(
                 "SELECT opted_in, level_floor, privacy_show, quiet, resting FROM users WHERE user_id = ?",
                 (user_id,),
@@ -306,17 +309,100 @@ def set_level_floor(user_id: str, level: int, db_path=None) -> None:
                 )
 
 
-def get_pond_leaderboard(limit: int = 10, db_path=None, public: bool = True) -> List[Dict[str, Any]]:
-    """Lifetime standings. Public boards are privacy-filtered and capped; organizer boards are not."""
+def _all_pond_statuses(db_path=None) -> List[Dict[str, Any]]:
+    """Build every member's status with one aggregate query instead of per-user replays."""
     with _DB_LOCK:
         with _managed_connection(db_path) as conn:
-            cur = conn.execute(
-                "SELECT user_id FROM users WHERE opted_in = 1 AND user_id != ?",
+            user_rows = conn.execute(
+                "SELECT user_id, opted_in, level_floor, privacy_show, quiet, resting "
+                "FROM users WHERE user_id != ?",
                 (BOT_USER_ID,),
+            ).fetchall()
+            ledger_rows = conn.execute(
+                """
+                SELECT user_id, week_key,
+                    SUM(CASE WHEN kind = 'message' THEN 1 ELSE 0 END) AS messages,
+                    COUNT(DISTINCT CASE WHEN kind = 'message' THEN day_key END) AS days,
+                    SUM(CASE WHEN kind = 'thanks' THEN 1 ELSE 0 END) AS thanks,
+                    SUM(CASE WHEN kind = 'helpful' THEN 1 ELSE 0 END) AS helpful,
+                    SUM(CASE WHEN kind = 'star' THEN 1 ELSE 0 END) AS stars,
+                    SUM(CASE WHEN kind = 'bigstar' THEN 1 ELSE 0 END) AS bigstars
+                FROM crumbs_ledger
+                WHERE voided = 0
+                GROUP BY user_id, week_key
+                """
+            ).fetchall()
+
+    aggregates: Dict[str, Dict[str, Any]] = {}
+    for row in ledger_rows:
+        uid = str(row["user_id"])
+        agg = aggregates.setdefault(uid, {"weeks": {}, "stars": 0, "bigstars": 0})
+        agg["stars"] += int(row["stars"] or 0)
+        agg["bigstars"] += int(row["bigstars"] or 0)
+        messages = int(row["messages"] or 0)
+        thanks = int(row["thanks"] or 0)
+        helpful = int(row["helpful"] or 0)
+        if messages or thanks or helpful:
+            agg["weeks"][str(row["week_key"] or "")] = {
+                "messages": messages,
+                "days": int(row["days"] or 0),
+                "thanks": thanks,
+                "helpful": helpful,
+            }
+
+    statuses: List[Dict[str, Any]] = []
+    for row in user_rows:
+        uid = str(row["user_id"])
+        agg = aggregates.get(uid, {"weeks": {}, "stars": 0, "bigstars": 0})
+        total = STAR_CRUMBS * agg["stars"] + BIGSTAR_CRUMBS * agg["bigstars"]
+        weekly = []
+        for wk in sorted(agg["weeks"]):
+            bucket = agg["weeks"][wk]
+            cr = weekly_crumbs(
+                bucket["messages"], bucket["days"], bucket["thanks"], bucket["helpful"]
             )
-            user_ids = [r["user_id"] for r in cur.fetchall()]
-    entries = [get_pond_status(uid, db_path) for uid in user_ids]
-    entries.sort(key=lambda e: (e["crumbs"], e["level"]), reverse=True)
+            total += cr
+            weekly.append({
+                "week": wk,
+                "messages": bucket["messages"],
+                "active_days": bucket["days"],
+                "thanks": bucket["thanks"],
+                "helpful": bucket["helpful"],
+                "crumbs": round(cr, 1),
+            })
+        total = round(total, 1)
+        has_star = (agg["stars"] + agg["bigstars"]) > 0
+        floor = int(row["level_floor"]) if row["level_floor"] else 1
+        level = max(level_for_crumbs(total, has_star), floor)
+        next_level = level + 1
+        next_reach = crumbs_to_reach(next_level)
+        statuses.append({
+            "user_id": uid,
+            "opted_in": bool(row["opted_in"]),
+            "privacy_show": bool(row["privacy_show"]),
+            "quiet": bool(row["quiet"]),
+            "resting": bool(row["resting"]),
+            "crumbs": total,
+            "level": level,
+            "title": title_for_level(level) or "",
+            "next_level": next_level,
+            "next_title": title_for_level(next_level) or "",
+            "crumbs_to_next": max(0, int(round(next_reach - total))),
+            "next_threshold": next_reach,
+            "has_star": has_star,
+            "stars": agg["stars"],
+            "bigstars": agg["bigstars"],
+            "level_floor": floor,
+            "weekly": weekly,
+            "gated": (not has_star) and level >= STAR_GATE_MAX_LEVEL,
+        })
+    return statuses
+
+
+def get_pond_leaderboard(limit: int = 10, db_path=None, public: bool = True) -> List[Dict[str, Any]]:
+    """Lifetime standings. Public boards are privacy-filtered and capped; organizer boards are not."""
+    entries = [e for e in _all_pond_statuses(db_path) if e["opted_in"]]
+    entries.sort(key=lambda e: (-e["crumbs"], -e["level"], e["user_id"]))
     if public:
         from config import PUBLIC_BOARD_SIZE
         entries = [e for e in entries if e.get("privacy_show")]
@@ -327,37 +413,24 @@ def get_pond_leaderboard(limit: int = 10, db_path=None, public: bool = True) -> 
 
 def get_weekly_leaderboard(week_key: str, limit: int = 10, db_path=None) -> List[Dict[str, Any]]:
     """Standings for a single week, ranked by that week's crumbs (star-gate ignored)."""
-    with _DB_LOCK:
-        with _managed_connection(db_path) as conn:
-            cur = conn.execute(
-                "SELECT user_id FROM users WHERE opted_in = 1 AND user_id != ?",
-                (BOT_USER_ID,),
-            )
-            user_ids = [r["user_id"] for r in cur.fetchall()]
     entries = []
-    for uid in user_ids:
-        status = get_pond_status(uid, db_path)
+    for status in _all_pond_statuses(db_path):
+        if not status["opted_in"]:
+            continue
         week = next((w for w in status["weekly"] if w["week"] == week_key), None)
         crumbs = float(week["crumbs"]) if week else 0.0
         if crumbs > 0:
             entry = dict(status)
             entry["week_crumbs"] = crumbs
             entries.append(entry)
-    entries.sort(key=lambda e: e["week_crumbs"], reverse=True)
+    entries.sort(key=lambda e: (-e["week_crumbs"], e["user_id"]))
     return entries[:limit]
 
 
 def get_roster(limit: int = 50, db_path=None) -> List[Dict[str, Any]]:
     """All opted-in members with their live status (organizer view)."""
-    with _DB_LOCK:
-        with _managed_connection(db_path) as conn:
-            cur = conn.execute(
-                "SELECT user_id FROM users WHERE opted_in = 1 AND user_id != ?",
-                (BOT_USER_ID,),
-            )
-            user_ids = [r["user_id"] for r in cur.fetchall()]
-    entries = [get_pond_status(uid, db_path) for uid in user_ids]
-    entries.sort(key=lambda e: (e["level"], e["crumbs"]), reverse=True)
+    entries = [e for e in _all_pond_statuses(db_path) if e["opted_in"]]
+    entries.sort(key=lambda e: (-e["level"], -e["crumbs"], e["user_id"]))
     return entries[:limit]
 
 
@@ -421,6 +494,7 @@ def record_qualified_message(
     """Score one qualified message if not flooding or repeating. Returns level-up info or None."""
     now = time.time()
     clean = strip_for_scoring(text)
+    fingerprint = hashlib.sha256(clean.encode("utf-8")).hexdigest() if clean else ""
     with _DB_LOCK:
         with _managed_connection(db_path) as conn:
             get_or_create_user(user_id, db_path)
@@ -434,14 +508,14 @@ def record_qualified_message(
             last_text = (row["last_scored_text"] or "")
             if last_ts and (now - last_ts) < flood_seconds:
                 return None
-            if last_text and clean and clean == last_text and (now - last_ts) < REPEAT_WINDOW_SECONDS:
+            if last_text and fingerprint and fingerprint == last_text and (now - last_ts) < REPEAT_WINDOW_SECONDS:
                 return None
 
             before = get_pond_status(user_id, db_path)
             with conn:
-                conn.execute(
+                cur = conn.execute(
                     """
-                    INSERT INTO crumbs_ledger (
+                    INSERT OR IGNORE INTO crumbs_ledger (
                         user_id, kind, amount, week_key, day_key, source_ts,
                         channel_id, message_ts, ref, voided, void_reason, created_at
                     )
@@ -449,9 +523,11 @@ def record_qualified_message(
                     """,
                     (user_id, week_key(now), day_key(now), now, channel_id, message_ts, now),
                 )
+                if not cur.rowcount:
+                    return None
                 conn.execute(
                     "UPDATE users SET last_scored_ts = ?, last_scored_text = ?, updated_at = ? WHERE user_id = ?",
-                    (now, clean, now, user_id),
+                    (now, fingerprint, now, user_id),
                 )
     after = get_pond_status(user_id, db_path)
     if after["level"] > before["level"]:
@@ -505,17 +581,28 @@ def set_opted_out(user_id: str, db_path=None) -> None:
         with _managed_connection(db_path) as conn:
             with conn:
                 conn.execute(
-                    "UPDATE users SET opted_in = 0, updated_at = ? WHERE user_id = ?",
+                    "UPDATE users SET opted_in = 0, last_scored_text = '', updated_at = ? WHERE user_id = ?",
                     (now, user_id),
                 )
 
 
+def _user_flag(user_id: str, column: str, db_path=None) -> bool:
+    if not user_id:
+        return False
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            row = conn.execute(
+                f"SELECT {column} FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return bool(row and row[column])
+
+
 def is_quiet(user_id: str, db_path=None) -> bool:
-    return get_pond_status(user_id, db_path)["quiet"]
+    return _user_flag(user_id, "quiet", db_path)
 
 
 def is_resting(user_id: str, db_path=None) -> bool:
-    return get_pond_status(user_id, db_path)["resting"]
+    return _user_flag(user_id, "resting", db_path)
 
 
 def format_all_time(entries: List[Dict[str, Any]], limit: int = 3) -> str:

@@ -251,8 +251,19 @@ def test_season_line_and_set_end(monkeypatch):
     assert "open-ended" in handlers._season_line()
     handlers._handle_pond_command("set-end", ["1700000000"], MagicMock(), MagicMock(), "C1", "U1", None)
     assert "2023-11-14" in handlers._season_line()
+    assert handlers._season_ended() is True
     handlers._handle_pond_command("set-end", ["off"], MagicMock(), MagicMock(), "C1", "U1", None)
     assert "open-ended" in handlers._season_line()
+    assert handlers._season_ended() is False
+
+
+def test_poisoned_season_state_does_not_crash():
+    handlers.set_state("season_end_ts", str(10**30))
+    try:
+        assert "open-ended" in handlers._season_line()
+        assert handlers._season_ended() is False
+    finally:
+        handlers.set_state("season_end_ts", "0")
 
 
 def test_loadout_questions_deflect_to_orry():
@@ -280,3 +291,59 @@ def test_persona_blocks_are_conditional():
 
     with_meter = ai_service.build_system_instructions(goose_meter=7)
     assert "GOOSE METER (the channel" in with_meter
+
+
+def test_ledger_duplicate_events_are_ignored(monkeypatch, temp_db):
+    monkeypatch.setattr(database, "DB_PATH", temp_db)
+    assert crumbs.add_ledger_event(
+        "U_DUP", "thanks", message_ts="111.222", ref="U_REACTOR", db_path=temp_db
+    ) > 0
+    before = crumbs.get_pond_status("U_DUP", db_path=temp_db)["crumbs"]
+    assert crumbs.add_ledger_event(
+        "U_DUP", "thanks", message_ts="111.222", ref="U_REACTOR", db_path=temp_db
+    ) == 0
+    after = crumbs.get_pond_status("U_DUP", db_path=temp_db)["crumbs"]
+    assert after == before
+
+
+def test_read_paths_do_not_create_ghost_users(monkeypatch, temp_db):
+    monkeypatch.setattr(database, "DB_PATH", temp_db)
+    status = crumbs.get_pond_status("U_GHOST", db_path=temp_db)
+    assert status["opted_in"] is False
+    assert database.get_user("U_GHOST", db_path=temp_db) is None
+    assert crumbs.is_quiet("U_GHOST", db_path=temp_db) is False
+    assert database.get_user("U_GHOST", db_path=temp_db) is None
+
+
+def test_distress_detector_ignores_figurative_language():
+    assert ai_service.detect_distress("this bug is killing me") is False
+    assert ai_service.detect_distress("the API is abusing my patience") is False
+    assert ai_service.detect_distress("I am starving for content") is False
+    assert ai_service.detect_distress("I want to die") is True
+    assert ai_service.detect_distress("I\u200b want to die") is True
+
+
+def test_no_reply_requires_exact_token():
+    assert ai_service.is_no_reply("[[NO_REPLY]]") is True
+    assert ai_service.is_no_reply("  [[no_reply]]  ") is True
+    assert ai_service.is_no_reply("I have no reply for that") is False
+
+
+def test_weekly_report_posts_at_most_once(monkeypatch):
+    state = {}
+    monkeypatch.setattr(handlers, "get_state", lambda k, d="": state.get(k, d))
+    monkeypatch.setattr(handlers, "set_state", lambda k, v: state.__setitem__(k, v))
+    monkeypatch.setattr(handlers, "_is_paused", lambda: False)
+    monkeypatch.setattr(handlers, "_is_frozen", lambda: False)
+    monkeypatch.setattr(handlers.crumbs, "week_key_now", lambda: "2026-W42")
+    monkeypatch.setattr(handlers.crumbs, "get_weekly_leaderboard", lambda *a, **k: [])
+    monkeypatch.setattr(handlers.crumbs, "format_weekly_report", lambda *a, **k: "report")
+    monkeypatch.setattr(handlers.crumbs, "snapshot_week", lambda *a, **k: None)
+    monkeypatch.setattr(handlers, "backup_database", lambda: None)
+    monkeypatch.setattr(handlers, "ORGANIZER_CHANNEL_ID", "C_ORG")
+    client = MagicMock()
+
+    handlers.run_scheduled_maintenance(client, force=True)
+    handlers.run_scheduled_maintenance(client, force=True)
+
+    assert client.chat_postMessage.call_count == 1

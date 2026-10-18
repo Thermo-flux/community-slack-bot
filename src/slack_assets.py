@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Dict, Optional
@@ -182,7 +183,10 @@ _FOOD_IMAGE_WORDS = (
 )
 
 _QUOTE_HISTORY_KEY = "quote_history"
-_QUOTE_HISTORY_LIMIT = 5000
+_QUOTE_HISTORY_LIMIT = 50000
+_QUOTE_HISTORY_LOCK = threading.RLock()
+
+_QUOTE_COOLDOWN_SECONDS = float(os.getenv("QUOTE_COOLDOWN_SECONDS", "20") or 20)
 
 
 def _normalize_quote(text: str) -> str:
@@ -195,18 +199,21 @@ def _quote_history() -> list:
         history = json.loads(raw) if raw else []
     except Exception:
         history = []
-    return history if isinstance(history, list) else []
+    if not isinstance(history, list):
+        return []
+    return history[-_QUOTE_HISTORY_LIMIT:]
 
 
 def _remember_quote(text: str) -> None:
-    history = _quote_history()
-    history.append(_normalize_quote(text))
-    if len(history) > _QUOTE_HISTORY_LIMIT:
-        history = history[-_QUOTE_HISTORY_LIMIT:]
-    try:
-        set_state(_QUOTE_HISTORY_KEY, json.dumps(history))
-    except Exception:
-        logger.warning("Could not persist quote history", exc_info=True)
+    with _QUOTE_HISTORY_LOCK:
+        history = _quote_history()
+        history.append(_normalize_quote(text))
+        if len(history) > _QUOTE_HISTORY_LIMIT:
+            history = history[-_QUOTE_HISTORY_LIMIT:]
+        try:
+            set_state(_QUOTE_HISTORY_KEY, json.dumps(history))
+        except Exception:
+            logger.warning("Could not persist quote history", exc_info=True)
 
 
 def _compose_quote():
@@ -229,7 +236,7 @@ def pick_quote_image(text: str, tone: str, who: str) -> str:
     """Choose an image that fits the quote's tone and subject."""
     if who == "Goose Lee":
         return random.choice(GOOSE_IMAGES)
-    if any(word in text.lower() for word in _FOOD_IMAGE_WORDS):
+    if re.search(rf"\b(?:{'|'.join(map(re.escape, _FOOD_IMAGE_WORDS))})\b", text.lower()):
         return random.choice(SASSY_IMAGES)
     return random.choice(WISE_IMAGES if tone == "wise" else SASSY_IMAGES)
 
@@ -237,50 +244,77 @@ def pick_quote_image(text: str, tone: str, who: str) -> str:
 def generate_quote() -> Dict[str, Optional[str]]:
     """Compose a brand-new faux-sifu quote and attach a matching image.
 
-    Every generated line is checked against the persisted history, so the bot never
-    repeats a quote.
+    Every generated line is checked against the persisted history, so the bot does not
+    repeat a quote until the full candidate pool is exhausted.
     """
-    history = set(_quote_history())
-    text = None
-    tone = "wise"
-    for _ in range(60):
-        candidate, candidate_tone = _compose_quote()
-        if _normalize_quote(candidate) not in history:
-            text, tone = candidate, candidate_tone
-            break
-    if text is None:
-        for template, candidate_tone in _QUOTE_TEMPLATES:
-            for subject in _QUOTE_SUBJECTS:
-                for verb in _QUOTE_VERBS:
-                    for obj in _QUOTE_OBJECTS:
-                        candidate = template.format(s=subject, v=verb, o=obj)
-                        candidate = candidate[0].upper() + candidate[1:]
-                        if _normalize_quote(candidate) not in history:
-                            text, tone = candidate, candidate_tone
+    with _QUOTE_HISTORY_LOCK:
+        history = set(_quote_history())
+        text = None
+        tone = "wise"
+        for _ in range(60):
+            candidate, candidate_tone = _compose_quote()
+            if _normalize_quote(candidate) not in history:
+                text, tone = candidate, candidate_tone
+                break
+        if text is None:
+            for template, candidate_tone in _QUOTE_TEMPLATES:
+                for subject in _QUOTE_SUBJECTS:
+                    for verb in _QUOTE_VERBS:
+                        for obj in _QUOTE_OBJECTS:
+                            candidate = template.format(s=subject, v=verb, o=obj)
+                            candidate = candidate[0].upper() + candidate[1:]
+                            if _normalize_quote(candidate) not in history:
+                                text, tone = candidate, candidate_tone
+                                break
+                        if text:
                             break
                     if text:
                         break
                 if text:
                     break
-            if text:
-                break
-    if text is None:
-        history.clear()
-        text, tone = _compose_quote()
-    who = _pick_quote_author()
-    quote = {"text": text, "who": who, "image": pick_quote_image(text, tone, who)}
-    _remember_quote(text)
-    return quote
+        if text is None:
+            base, tone = _compose_quote()
+            text = f"{base} (lesson {len(history) + 1})"
+        who = _pick_quote_author()
+        quote = {"text": text, "who": who, "image": pick_quote_image(text, tone, who)}
+        _remember_quote(text)
+        return quote
+
+
+def allow_quote(channel_id: str) -> bool:
+    """One prophecy at a time per channel so quote spam cannot rewrite history repeatedly."""
+    if not channel_id:
+        return True
+    if _QUOTE_COOLDOWN_SECONDS <= 0:
+        return True
+    now = time.time()
+    key = f"quote_last:{channel_id}"
+    try:
+        last = float(get_state(key, "0") or 0)
+    except (TypeError, ValueError):
+        last = 0.0
+    if now - last < _QUOTE_COOLDOWN_SECONDS:
+        return False
+    try:
+        set_state(key, str(now))
+    except Exception:
+        pass
+    return True
 
 _QUOTE_RE = re.compile(
-    r"\b(?:tell|give|got|share|drop|send)\b[^.?!]{0,24}\b(?:quote|quotes|wisdom|wise words)\b"
-    r"|\b(?:words? of wisdom|ancient wisdom|sifu wisdom|paw tzu|cat tzu|sifu quote|quote me)\b"
+    r"\b(?:tell|give|got|share|drop|send|get|fetch|hit)\b[^.?!]{0,24}\b(?:quote|quotes|wisdom|wise words)\b"
+    r"|\b(?:words? of wisdom|ancient wisdom|sifu wisdom|sifu quote|quote me|something wise)\b"
     r"|^\s*(?:quote|quotes|wisdom)\b"
     r"|\b(?:quote|quotes|wisdom)\b\s*(?:please)?\s*[?!.]*$",
     re.IGNORECASE,
 )
 
 _SLANDER = r"(?:bad|mid|overrated|trash|awful|gross|terrible|sucks|worst|disgusting|fake|boring|overhyped|weird|pointless|useless)"
+_NEGATION_RE = re.compile(
+    rf"(?i)\b(?:not|never|no|n't|isn't|aren't|wasn't|weren't|don't|doesn't|didn't)\b"
+    rf"[^.?!]{{0,30}}\b{_SLANDER}\b"
+    rf"|\b{_SLANDER}\b[^.?!]{{0,20}}\b(?:not|never|no|n't)\b"
+)
 _FOOD = (
     r"(?:msg|boba|dim sum|noodles?|fried rice|dumplings?|hot pot|congee|bao|spring rolls?"
     r"|mapo tofu|chow mein|lo mein|wontons?|xiaolongbao|pho|ramen|sushi|kimchi|matcha)"
@@ -377,6 +411,13 @@ def is_quote_request(text: str) -> bool:
     return bool(_QUOTE_RE.search(text or ""))
 
 
+def _negated(body: str, start: int, end: int) -> bool:
+    window = body[max(0, start - 45):min(len(body), end + 25)]
+    if re.search(r"(?i)\bnot\s+(?:gonna|going\s+to)\s+lie\b", window):
+        return False
+    return bool(_NEGATION_RE.search(window))
+
+
 WISE_IMAGES = [
     "quotes/paw_tzu_wise.png",
     "quotes/bearded_shifu_peace.png",
@@ -403,8 +444,9 @@ def format_quote(quote: Dict[str, Optional[str]]) -> str:
 def detect_moment(text: str) -> Optional[Dict[str, str]]:
     body = text or ""
     for pattern, (image, line) in _RAGE_RULES:
-        if pattern.search(body):
-            return {"image": image, "line": line, "kind": "rage"}
+        for match in pattern.finditer(body):
+            if not _negated(body, match.start(), match.end()):
+                return {"image": image, "line": line, "kind": "rage"}
     if _VICTORY_RE.search(body):
         return {"image": "victory/waddle.gif", "line": "victory waddle", "kind": "victory"}
     return None

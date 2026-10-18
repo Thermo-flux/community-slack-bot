@@ -235,6 +235,27 @@ def init_db(db_path: str = DB_PATH) -> None:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_crumbs_week ON crumbs_ledger(week_key, kind);"
                 )
+                conn.execute(
+                    """
+                    DELETE FROM crumbs_ledger
+                    WHERE id NOT IN (
+                        SELECT MIN(id) FROM crumbs_ledger
+                        WHERE voided = 0 AND message_ts != ''
+                          AND kind IN ('message', 'thanks', 'helpful')
+                        GROUP BY user_id, kind, channel_id, message_ts, ref
+                    )
+                    AND voided = 0 AND message_ts != ''
+                    AND kind IN ('message', 'thanks', 'helpful');
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_crumbs_event_unique
+                    ON crumbs_ledger(user_id, kind, channel_id, message_ts, ref)
+                    WHERE voided = 0 AND message_ts != ''
+                      AND kind IN ('message', 'thanks', 'helpful');
+                    """
+                )
 
                 now = time.time()
                 for alias, uid in DEFAULT_ALIASES.items():

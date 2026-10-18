@@ -31,7 +31,6 @@ from config import (
     SLACK_BOT_TOKEN,
     WATCHED_CHANNELS,
     assert_valid_config,
-    disable_watched_channel,
     get_configured_channels,
     set_watched_channel_verified,
 )
@@ -102,6 +101,19 @@ def check_tokens() -> bool:
     return True
 
 
+def _retry_call(label: str, fn, attempts: int = 5, delay: float = 2.0):
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("%s failed (%s), attempt %d/%d", label, type(exc).__name__, attempt, attempts)
+            if attempt < attempts:
+                time.sleep(delay * attempt)
+    raise last_exc
+
+
 def main() -> None:
     """Initializes and runs the Slack bot."""
     print("Initializing Community Slack Bot...", flush=True)
@@ -129,7 +141,7 @@ def main() -> None:
     bot_user_id = ""
     try:
         app = App(token=SLACK_BOT_TOKEN)
-        auth_test_res = app.client.auth_test()
+        auth_test_res = _retry_call("Slack auth.test", app.client.auth_test)
         bot_user_id = auth_test_res.get("user_id", "")
         bot_name = auth_test_res.get("user", CONFIG.get("bot_name") or "goose-lee")
         logger.info("Authenticated with Slack as @%s (%s)", bot_name, bot_user_id)
@@ -145,7 +157,12 @@ def main() -> None:
         )
     for channel_id, expected_name in configured_channels:
         try:
-            channel_info = app.client.conversations_info(channel=channel_id).get("channel", {})
+            channel_info = _retry_call(
+                f"channel lookup {expected_name or channel_id}",
+                lambda cid=channel_id: app.client.conversations_info(channel=cid).get("channel", {}),
+                attempts=3,
+                delay=1.5,
+            )
             resolved_name = str(channel_info.get("name") or "") or channel_id
             if set_watched_channel_verified(
                 channel_id=channel_info.get("id", ""),
@@ -164,9 +181,8 @@ def main() -> None:
                     expected_name or resolved_name,
                 )
         except Exception as exc:
-            disable_watched_channel(channel_id)
             logger.error(
-                "Could not verify #%s (%s); that channel is disabled.",
+                "Could not verify #%s (%s) after retries; keeping its previous watch state.",
                 expected_name or channel_id,
                 type(exc).__name__,
             )

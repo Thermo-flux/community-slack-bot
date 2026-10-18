@@ -381,12 +381,16 @@ def get_cards_response_for_targets(targets: List[str], caller_id: str) -> str:
     """Resolves targets (usernames, user IDs, or mentions) to Pond Level cards."""
     cards = []
     for target in targets:
-        uid, _user_data = resolve_user(target, create_if_missing=True)
-        if uid:
-            cards.append(crumbs.format_pond_card(crumbs.get_pond_status(uid)))
-        else:
+        uid, _user_data = resolve_user(target, create_if_missing=False)
+        if not uid:
             clean_name = target.strip().lstrip("@")
             cards.append(f"No activity record found for '{clean_name}' yet.")
+            continue
+        status = crumbs.get_pond_status(uid)
+        if uid != caller_id and not _is_organizer(caller_id) and not status.get("privacy_show"):
+            cards.append("That member keeps their pond card private.")
+            continue
+        cards.append(crumbs.format_pond_card(status))
     return "\n\n".join(cards)
 
 
@@ -406,16 +410,47 @@ POND_HELP_TEXT = (
 )
 
 
-def parse_pond_command(text: str) -> Optional[tuple]:
-    """Parse a Pond text command from already-cleaned/addressed text."""
+_POND_NO_ARG_COMMANDS = {
+    "join", "leave", "top", "all", "help", "pond", "show", "hide", "roster",
+    "results", "reports", "status", "pause", "resume", "freeze", "unfreeze",
+    "leaderboard", "season",
+}
+
+
+def _valid_pond_args(sub: str, args: List[str]) -> bool:
+    """Reject bare words that only look like a command because of extra chatter."""
+    if sub in _POND_NO_ARG_COMMANDS:
+        return not args
+    if sub in ("me", "quiet", "voice"):
+        return len(args) <= 1
+    if sub == "set-end":
+        return len(args) == 1
+    if sub in ("report", "appeal", "star", "bigstar", "revoke", "resolve"):
+        return bool(args)
+    return True
+
+
+def parse_pond_command(text: str, allow_bare: bool = False) -> Optional[tuple]:
+    """Parse a Pond text command from already-cleaned/addressed text.
+
+    A command needs an explicit ``goose`` prefix unless the caller explicitly allows a
+    bare subcommand (for a direct @mention or a vocative Gooose call). Arity is checked
+    so ordinary sentences like "leave me alone" never trigger a command.
+    """
     t = (text or "").strip().lower()
     rest = t
+    prefixed = False
     for prefix in ("!goose", ".goose", "goose", "!g", ".g"):
         if t == prefix:
             return ("help", [])
         if t.startswith(prefix + " "):
             rest = t[len(prefix) + 1:].strip()
+            prefixed = True
             break
+    if not prefixed:
+        if not allow_bare:
+            return None
+        rest = t
     parts = [p for p in rest.split() if p]
     if not parts:
         return None
@@ -425,9 +460,40 @@ def parse_pond_command(text: str) -> Optional[tuple]:
         "quiet", "report", "appeal", "star", "bigstar", "revoke", "roster",
         "results", "reports", "resolve", "pause", "resume", "status",
         "freeze", "unfreeze", "voice", "leaderboard", "season", "set-end",
-    ):
+    ) and _valid_pond_args(sub, parts[1:]):
         return (sub, parts[1:])
     return None
+
+
+def _parse_event_id(value: str) -> Optional[int]:
+    """Parse a ledger id into SQLite's signed 64-bit range, or None."""
+    try:
+        number = int(str(value).lstrip("#"))
+    except (TypeError, ValueError):
+        return None
+    return number if 0 < number < 2**63 else None
+
+
+def _dispatch_pond_command(
+    sub: str,
+    args: List[str],
+    client,
+    say,
+    channel_id: str,
+    user_id: str,
+    thread_ts: Optional[str],
+) -> bool:
+    """Run a Pond command without letting bad input crash the Slack listener."""
+    try:
+        return _handle_pond_command(sub, args, client, say, channel_id, user_id, thread_ts)
+    except Exception as exc:
+        logger.error("Pond command %s failed (%s)", sub, type(exc).__name__)
+        _post_private(
+            client, say, channel_id, user_id,
+            "Something went sideways with that command. Try again in a moment.",
+            thread_ts,
+        )
+        return True
 
 
 def _resolve_target_identifier(args: List[str]) -> Optional[str]:
@@ -438,16 +504,19 @@ def _resolve_target_identifier(args: List[str]) -> Optional[str]:
 
 
 def _post_private(client, say, channel_id: str, user_id: str, text: str, thread_ts: Optional[str]) -> None:
-    """Send a private note: ephemeral in-channel if possible, else a threaded reply."""
+    """Send a private note: ephemeral in-channel if possible, else a DM. Never post publicly."""
     try:
         client.chat_postEphemeral(channel=channel_id, user=user_id, text=text, thread_ts=thread_ts)
         return
     except Exception:
         pass
     try:
-        client.chat_postMessage(channel=channel_id, text=text, thread_ts=thread_ts)
-    except Exception as exc:
-        logger.error("Could not send a private pond note (%s)", type(exc).__name__)
+        if client is not None and user_id:
+            client.chat_postMessage(channel=user_id, text=text)
+            return
+    except Exception:
+        pass
+    logger.error("Could not send a private pond note; leaving it unsent.")
 
 
 def _handle_pond_command(
@@ -530,11 +599,15 @@ def _handle_pond_command(
         return True
 
     if sub == "appeal":
-        if not args or not args[0].lstrip("#").isdigit():
+        if not args:
             _post_private(client, say, channel_id, user_id,
                           "Usage: `goose appeal <ledger id> [reason]`", thread_ts)
             return True
-        event_id = int(args[0].lstrip("#"))
+        event_id = _parse_event_id(args[0])
+        if event_id is None:
+            _post_private(client, say, channel_id, user_id,
+                          "That ledger id does not look right.", thread_ts)
+            return True
         appeal_id = add_appeal(user_id, event_id, " ".join(args[1:]).strip())
         _alert_organizers(client, f":scales: Appeal #{appeal_id} from <@{user_id}> about ledger entry #{event_id}.")
         _post_private(client, say, channel_id, user_id,
@@ -570,11 +643,15 @@ def _handle_pond_command(
         if not _is_organizer(user_id):
             _post_private(client, say, channel_id, user_id, "Only organizers can revoke entries.", thread_ts)
             return True
-        if not args or not args[0].lstrip("#").isdigit():
+        if not args:
             _post_private(client, say, channel_id, user_id,
                           "Usage: `goose revoke <ledger id> [reason]`", thread_ts)
             return True
-        event_id = int(args[0].lstrip("#"))
+        event_id = _parse_event_id(args[0])
+        if event_id is None:
+            _post_private(client, say, channel_id, user_id,
+                          "That ledger id does not look right.", thread_ts)
+            return True
         reason = " ".join(args[1:]).strip()
         row = crumbs.void_ledger_event(event_id, reason)
         if not row:
@@ -604,6 +681,9 @@ def _handle_pond_command(
         return True
 
     if sub == "results":
+        if not _is_organizer(user_id):
+            _post_private(client, say, channel_id, user_id, "Only organizers can view full results.", thread_ts)
+            return True
         board = crumbs.format_all_time(crumbs.get_pond_leaderboard(limit=3, public=False))
         _post_private(client, say, channel_id, user_id, board + "\n" + _season_line() + "\n" + _status_line(), thread_ts)
         return True
@@ -619,11 +699,15 @@ def _handle_pond_command(
             value = args[0].lower()
             if value in ("off", "none", "clear", "0"):
                 set_state("season_end_ts", "0")
-            elif args[0].isdigit():
-                set_state("season_end_ts", args[0])
             else:
-                _post_private(client, say, channel_id, user_id, "Give me a Unix timestamp or `off`.", thread_ts)
-                return True
+                try:
+                    end_ts = int(args[0])
+                except (TypeError, ValueError):
+                    end_ts = -1
+                if end_ts <= 0 or end_ts > 2**31 - 1:
+                    _post_private(client, say, channel_id, user_id, "Give me a Unix timestamp or `off`.", thread_ts)
+                    return True
+                set_state("season_end_ts", str(end_ts))
         _post_private(client, say, channel_id, user_id, _season_line(), thread_ts)
         return True
 
@@ -645,10 +729,13 @@ def _handle_pond_command(
         if not _is_organizer(user_id):
             _post_private(client, say, channel_id, user_id, "Only organizers can resolve items.", thread_ts)
             return True
-        if not args or not args[0].lstrip("#").isdigit():
+        if not args:
             _post_private(client, say, channel_id, user_id, "Usage: `goose resolve <appeal id> [note]`", thread_ts)
             return True
-        appeal_id = int(args[0].lstrip("#"))
+        appeal_id = _parse_event_id(args[0])
+        if appeal_id is None:
+            _post_private(client, say, channel_id, user_id, "That appeal id does not look right.", thread_ts)
+            return True
         note = " ".join(args[1:]).strip()
         row = resolve_appeal(appeal_id, "resolved", note)
         if not row:
@@ -695,6 +782,8 @@ def _handle_pond_command(
 
 def _score_loadout_activity(user_id: str, channel_id: str, event, client, text: str, rules) -> None:
     """Score a qualified message in the official #loadout channel for opted-in members."""
+    if _season_ended():
+        return
     if _is_paused() or _is_frozen():
         return
     if channel_id != OFFICIAL_LOADOUT_CHANNEL_ID:
@@ -966,7 +1055,9 @@ def _run_ai_reply(
                 return
             reply = "I could not complete that reply. Please try again."
 
-        reply = ai_service.post_filter_voice(reply) or reply
+        reply = ai_service.post_filter_voice(reply) or (
+            "I'm going to keep that one to myself. Ask me about the pond instead."
+        )
         if placeholder_ts:
             _deliver_ai_reply(client, channel_id, thread_ts, placeholder_ts, reply, queue_key)
         else:
@@ -1123,7 +1214,7 @@ def _set_frozen(value: bool, actor: str = "") -> None:
 
 
 def _set_voice(value: bool, actor: str = "") -> None:
-    _set_state("voice_enabled", value, "voice-on" if value else "voice-off", actor)
+    _set_state("voice", value, "voice-on" if value else "voice-off", actor)
 
 
 def _status_line() -> str:
@@ -1134,19 +1225,35 @@ def _status_line() -> str:
     )
 
 
-def _season_line() -> str:
+def _season_end_ts() -> float:
     try:
         end = float(get_state("season_end_ts", str(SEASON.get("end_ts") or 0)) or 0)
     except (TypeError, ValueError):
-        end = 0.0
+        return 0.0
+    return end if 0 < end <= 2**31 - 1 else 0.0
+
+
+def _season_ended() -> bool:
+    end = _season_end_ts()
+    return end > 0 and time.time() >= end
+
+
+def _season_line() -> str:
+    end = _season_end_ts()
     if end <= 0:
         return "Season: open-ended."
-    return "Season ends " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(end)) + "."
+    try:
+        when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(end))
+    except (OverflowError, OSError, ValueError):
+        return "Season end date needs to be reset by an organizer."
+    if time.time() >= end:
+        return f"Season ended {when}."
+    return f"Season ends {when}."
 
 
-def _control_sub(text: str) -> Optional[str]:
+def _control_sub(text: str, allow_bare: bool = False) -> Optional[str]:
     """Return the Pond control sub-command in text, if it is a global control command."""
-    parsed = parse_pond_command(text)
+    parsed = parse_pond_command(text, allow_bare=allow_bare)
     if parsed and parsed[0] in ("pause", "resume", "status", "freeze", "unfreeze", "voice", "help"):
         return parsed[0]
     return None
@@ -1245,6 +1352,9 @@ def _maybe_send_asset(
     if slack_assets.is_quote_request(text):
         if not _claim_reply_trigger(channel_id, message_ts):
             return True
+        if not slack_assets.allow_quote(channel_id):
+            _safe_say(say, text="One prophecy at a time. Let the last one settle.", thread_ts=thread_ts)
+            return True
         quote = slack_assets.generate_quote()
         line = slack_assets.format_quote(quote)
         image = quote.get("image")
@@ -1272,20 +1382,21 @@ def _react_to_message(client, channel_id: str, text: str, author_id: str, messag
         return
     if not channel_id or not message_ts or not author_id:
         return
-    try:
-        if crumbs.is_quiet(author_id):
-            return
-    except Exception:
-        pass
     words = [str(w).lower() for w in (REACTIONS.get("trigger_words") or [])]
     lower = (text or "").lower()
     matched = any(re.search(rf"\b{re.escape(w)}\b", lower) for w in words if w)
     at_bot = bool(re.search(rf"<@{re.escape(_bot_user_id_global or '')}>", text or "", re.IGNORECASE)) if _bot_user_id_global else False
     if not matched and not at_bot:
         return
-    budget = int(REACTIONS.get("budget_per_hour", 6) or 6)
     try:
-        used = touch_channel_counter(channel_id, "reactions_hour", 1.0, 1.0)
+        if crumbs.is_quiet(author_id):
+            return
+    except Exception:
+        pass
+    budget = int(REACTIONS.get("budget_per_hour", 6) or 6)
+    hour_bucket = time.strftime("%Y%m%d%H", time.gmtime())
+    try:
+        used = touch_channel_counter(channel_id, f"reactions_hour:{hour_bucket}", 1.0, 0.0)
     except Exception:
         return
     if used > budget:
@@ -1308,11 +1419,12 @@ def run_scheduled_maintenance(client, force: bool = False) -> None:
     """
     if _is_paused() or _is_frozen():
         return
-    if not force and time.localtime().tm_wday != 0:
+    if not force and time.gmtime().tm_wday != 0:
         return
     week = crumbs.week_key_now()
     if get_state("last_weekly_report", "") == week:
         return
+    set_state("last_weekly_report", week)
     try:
         entries = crumbs.get_weekly_leaderboard(week, limit=10)
     except Exception as exc:
@@ -1338,7 +1450,6 @@ def run_scheduled_maintenance(client, force: bool = False) -> None:
         backup_database()
     except Exception as exc:
         logger.warning("Database backup failed (%s)", type(exc).__name__)
-    set_state("last_weekly_report", week)
 
 
 
@@ -1370,16 +1481,6 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         # ALWAYS reply in a thread: continue the existing thread, or start one on the message.
         target_thread_ts = event.get("thread_ts") or event.get("ts")
 
-        # Global kill switch: when paused, only organizers may run control commands.
-        if _is_paused():
-            control = _control_sub(clean_bot_addressing(text, bot_user_id).lower())
-            if not (control and _is_organizer(user_id)):
-                return
-
-        # Goose meter + light reactions for channel activity (persisted, match-gated, budgeted).
-        _bump_goose_meter(channel_id, text)
-        _react_to_message(client, channel_id, text, user_id, event.get("ts") or "")
-
         is_dm = bool(channel_id and channel_id.startswith("D")) or event.get("channel_type") == "im"
         is_direct_bot_mention = bool(
             bot_user_id
@@ -1397,27 +1498,42 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         is_addressed = is_named or is_thread_followup
         is_prefixed_cmd = bool(_COMMAND_PREFIX_RE.match(text))
         is_called = is_addressed or is_prefixed_cmd
+        clean_addressed = clean_bot_addressing(text, bot_user_id)
+        clean_lower = clean_addressed.lower().strip()
+        raw_lower = text.lower()
+        has_explicit_prefix = any(
+            raw_lower == p or raw_lower.startswith(p + " ")
+            for p in ("!goose", ".goose", "goose", "!g", ".g")
+        )
+        allow_bare_command = (is_named and not is_dm) or (is_dm and has_explicit_prefix)
 
-        # Distress takes priority over the persona: plain safety reply + organizer alert.
+        # Distress takes priority over the persona, the kill switch, and every other bit.
         if (
             DISTRESS.get("enabled", True)
             and ai_service.detect_distress(text)
-            and (is_dm or is_addressed)
+            and (is_dm or is_addressed or is_direct_bot_mention)
         ):
             _distress_reply_and_alert(client, say, channel_id, user_id, target_thread_ts)
             return
+
+        # Global kill switch: when paused, only organizers may run control commands.
+        if _is_paused():
+            control = _control_sub(clean_lower, allow_bare=allow_bare_command)
+            if not (control and _is_organizer(user_id)):
+                return
+
+        # Goose meter + light reactions for channel activity (persisted, match-gated, budgeted).
+        _bump_goose_meter(channel_id, text)
+        _react_to_message(client, channel_id, text, user_id, event.get("ts") or "")
 
         if not is_called:
             _score_loadout_activity(user_id, channel_id, event, client, text, rules)
             return
 
-        clean_addressed = clean_bot_addressing(text, bot_user_id)
-        clean_lower = clean_addressed.lower().strip()
-
         if not is_direct_bot_mention:
-            pond_cmd = parse_pond_command(clean_lower)
+            pond_cmd = parse_pond_command(clean_lower, allow_bare=allow_bare_command)
             if pond_cmd is not None:
-                if _handle_pond_command(pond_cmd[0], pond_cmd[1], client, say, channel_id, user_id, target_thread_ts):
+                if _dispatch_pond_command(pond_cmd[0], pond_cmd[1], client, say, channel_id, user_id, target_thread_ts):
                     return
 
             card_targets = parse_card_request_targets(
@@ -1508,23 +1624,23 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         cleaned_text = sanitize_context_text(clean_bot_addressing(raw_text, bot_user_id))
         clean_lower = cleaned_text.lower()
 
+        # Distress takes priority over the persona, the kill switch, and every other bit.
+        if DISTRESS.get("enabled", True) and ai_service.detect_distress(raw_text or cleaned_text):
+            _distress_reply_and_alert(client, say, channel_id, user_id, target_thread_ts)
+            return
+
         # Global kill switch: when paused, only organizers may run control commands.
         if _is_paused():
-            control = _control_sub(clean_lower)
+            control = _control_sub(clean_lower, allow_bare=True)
             if not (control and _is_organizer(user_id)):
                 return
 
         _bump_goose_meter(channel_id, raw_text)
         _react_to_message(client, channel_id, raw_text, user_id, event.get("ts") or "")
 
-        # Distress takes priority over the persona: plain safety reply + organizer alert.
-        if DISTRESS.get("enabled", True) and ai_service.detect_distress(raw_text or cleaned_text):
-            _distress_reply_and_alert(client, say, channel_id, user_id, target_thread_ts)
-            return
-
-        pond_cmd = parse_pond_command(clean_lower)
+        pond_cmd = parse_pond_command(clean_lower, allow_bare=True)
         if pond_cmd is not None:
-            if _handle_pond_command(pond_cmd[0], pond_cmd[1], client, say, channel_id, user_id, target_thread_ts):
+            if _dispatch_pond_command(pond_cmd[0], pond_cmd[1], client, say, channel_id, user_id, target_thread_ts):
                 return
 
         card_targets = parse_card_request_targets(
@@ -1600,7 +1716,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             return
         if channel_id != OFFICIAL_LOADOUT_CHANNEL_ID:
             return
-        if _is_paused() or _is_frozen():
+        if _is_paused() or _is_frozen() or _season_ended():
             return
         if reactor == author or (bot_user_id and reactor == bot_user_id):
             return

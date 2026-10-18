@@ -210,6 +210,7 @@ def test_get_cards_response_for_targets():
         "user_id": "U1", "opted_in": True, "crumbs": 15.0, "level": 2, "title": "Duckling",
         "next_level": 3, "next_title": "Paddler", "crumbs_to_next": 10, "next_threshold": 25,
         "has_star": False, "stars": 0, "bigstars": 0, "level_floor": 1, "weekly": [], "gated": False,
+        "privacy_show": True,
     }
     with patch("handlers.resolve_user") as mock_resolve, \
          patch("handlers.crumbs.get_pond_status", return_value=fake_status):
@@ -1016,3 +1017,97 @@ def test_reaction_added_ignores_self_and_non_official_channels():
 
 
 
+
+
+def test_pond_commands_do_not_hijack_bare_sentences():
+    assert handlers.parse_pond_command("leave me alone") is None
+    assert handlers.parse_pond_command("show me the money") is None
+    assert handlers.parse_pond_command("top of the morning") is None
+    assert handlers.parse_pond_command("join us tomorrow") is None
+    assert handlers.parse_pond_command("help me debug this") is None
+    assert handlers.parse_pond_command("goose leave me alone") is None
+    assert handlers.parse_pond_command("goose hide and seek champion") is None
+
+
+def test_bare_pond_commands_allowed_only_for_vocative_calls():
+    assert handlers.parse_pond_command("me", allow_bare=True) == ("me", [])
+    assert handlers.parse_pond_command("me") is None
+    assert handlers.parse_pond_command("goose appeal 999999999999999999999999") == (
+        "appeal", ["999999999999999999999999"],
+    )
+    assert handlers._parse_event_id("999999999999999999999999") is None
+
+
+def test_cross_member_card_respects_privacy(monkeypatch):
+    status = {
+        "user_id": "U1", "opted_in": True, "crumbs": 15.0, "level": 2,
+        "title": "Duckling", "next_level": 3, "next_title": "Paddler",
+        "crumbs_to_next": 10, "next_threshold": 25, "has_star": False,
+        "stars": 0, "bigstars": 0, "level_floor": 1, "weekly": [],
+        "gated": False, "privacy_show": False,
+    }
+    monkeypatch.setattr(handlers, "resolve_user", lambda t, **k: ("U1", {"user_id": "U1"}))
+    monkeypatch.setattr(handlers.crumbs, "get_pond_status", lambda uid: status)
+    monkeypatch.setattr(handlers, "ORGANIZER_USER_IDS", {"U_ORG"})
+
+    assert "private" in handlers.get_cards_response_for_targets(["U1"], "U_CALLER")
+    assert "Level" in handlers.get_cards_response_for_targets(["U1"], "U1")
+    assert "Level" in handlers.get_cards_response_for_targets(["U1"], "U_ORG")
+
+
+def test_dm_commands_need_a_prefix_but_vocative_channel_calls_do_not(monkeypatch):
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    monkeypatch.setattr(handlers, "is_channel_watched", lambda channel: True)
+    monkeypatch.setattr(handlers, "_queue_ai_reply", lambda *a, **k: None)
+    monkeypatch.setattr(handlers.crumbs, "set_opted_out", MagicMock())
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U123BOT")
+
+    app.events["message"](
+        body={"event": {"channel": "D1", "channel_type": "im", "user": "U1", "text": "leave me alone", "ts": "1"}},
+        client=MagicMock(),
+        say=MagicMock(),
+    )
+    handlers.crumbs.set_opted_out.assert_not_called()
+
+    app.events["message"](
+        body={"event": {"channel": "D1", "channel_type": "im", "user": "U1", "text": "goose leave", "ts": "2"}},
+        client=MagicMock(),
+        say=MagicMock(),
+    )
+    handlers.crumbs.set_opted_out.assert_called_once_with("U1")
+
+
+def test_distress_reply_survives_the_pause_switch(monkeypatch):
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    monkeypatch.setattr(handlers, "is_channel_watched", lambda channel: True)
+    monkeypatch.setattr(handlers, "_is_paused", lambda: True)
+    alert = MagicMock()
+    monkeypatch.setattr(handlers, "_distress_reply_and_alert", alert)
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U123BOT")
+
+    app.events["message"](
+        body={"event": {"channel": "D1", "channel_type": "im", "user": "U1", "text": "I want to die", "ts": "1"}},
+        client=MagicMock(),
+        say=MagicMock(),
+    )
+    alert.assert_called_once()

@@ -203,6 +203,7 @@ def test_quote_request_uploads_its_image(monkeypatch):
         lambda *a, **k: uploaded.append((a, k)) or True,
     )
     monkeypatch.setattr(handlers, "_claim_reply_trigger", lambda channel, ts: True)
+    monkeypatch.setattr(handlers.slack_assets, "allow_quote", lambda channel: True)
 
     assert handlers._maybe_send_asset(MagicMock(), MagicMock(), "C1", "tell me a quote", "T1", "M1")
     assert uploaded and uploaded[0][1]["initial_comment"] == '"Stay lazy." - Sifu Cat'
@@ -250,3 +251,23 @@ def test_normal_text_is_not_handled(monkeypatch):
     monkeypatch.setattr(handlers.slack_assets, "is_quote_request", lambda text: False)
     monkeypatch.setattr(handlers.slack_assets, "detect_moment", lambda text: None)
     assert handlers._maybe_send_asset(MagicMock(), MagicMock(), "C1", "hello", "T1", "M1") is False
+
+
+def test_rage_detector_ignores_negated_slander():
+    assert slack_assets.detect_moment("boba is not bad at all") is None
+    assert slack_assets.detect_moment("MSG is not bad") is None
+    assert slack_assets.detect_moment("the noodles are not terrible") is None
+
+
+def test_rage_detector_still_fires_through_ngl():
+    assert slack_assets.detect_moment("not gonna lie, boba is bad") is not None
+
+
+def test_quote_cooldown_blocks_back_to_back_requests(monkeypatch):
+    store = {}
+    monkeypatch.setattr(slack_assets, "get_state", lambda k, d="": store.get(k, d))
+    monkeypatch.setattr(slack_assets, "set_state", lambda k, v: store.__setitem__(k, v))
+    monkeypatch.setattr(slack_assets, "_QUOTE_COOLDOWN_SECONDS", 20.0)
+    assert slack_assets.allow_quote("C1") is True
+    assert slack_assets.allow_quote("C1") is False
+    assert slack_assets.allow_quote("C2") is True
