@@ -159,7 +159,7 @@ def _get_default_config() -> Dict[str, Any]:
         "organizer_channel_id": "",
         "owner_user_id": "",
         "privacy": {
-            "public_board_size": 3,
+            "public_board_size": 0,
         },
         "voice": {
             "enabled": True,
@@ -465,7 +465,7 @@ DISTRESS = CONFIG.get("distress") or {}
 SEASON = CONFIG.get("season") or {}
 ASSETS = CONFIG.get("assets") or {}
 PRIVACY = CONFIG.get("privacy") or {}
-PUBLIC_BOARD_SIZE = int(PRIVACY.get("public_board_size", 3) or 3)
+PUBLIC_BOARD_SIZE = max(0, int(PRIVACY.get("public_board_size", 0) or 0))
 KILL_SWITCH_ENV = _bool_setting("KILL_SWITCH", bool(CONFIG.get("kill_switch", False)))
 
 

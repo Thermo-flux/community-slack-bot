@@ -79,6 +79,7 @@ logger = logging.getLogger("SlackBotHandlers")
 
 THREAD_PAGE_SIZE = 200
 CHANNEL_CONTEXT_LIMIT = 10
+LEADERBOARD_DISPLAY_LIMIT = 200
 BOT_THREAD_CACHE_SIZE = 512
 
 _IGNORED_SUBTYPES = {
@@ -491,11 +492,9 @@ def _handle_pond_command(
         return True
 
     if sub in ("top", "all", "leaderboard"):
-        if _is_organizer(user_id):
-            board = crumbs.format_pond_leaderboard(crumbs.get_pond_leaderboard(limit=25, public=False))
-        else:
-            board = crumbs.format_pond_leaderboard(crumbs.get_pond_leaderboard(public=True))
-        _post_private(client, say, channel_id, user_id, board, thread_ts)
+        entries = crumbs.get_pond_leaderboard(limit=LEADERBOARD_DISPLAY_LIMIT, public=True)
+        board = crumbs.format_pond_leaderboard(entries, limit=LEADERBOARD_DISPLAY_LIMIT)
+        _safe_say(say, text=board, thread_ts=thread_ts)
         return True
 
     if sub in ("show", "hide"):
@@ -1432,7 +1431,10 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
                 "/leaderboard", "!leaderboard", ".leaderboard", "leaderboard",
                 "/top", "!top", ".top", "top", "ranks", "pond leaderboard",
             ):
-                board = crumbs.format_pond_leaderboard(crumbs.get_pond_leaderboard(limit=10))
+                board = crumbs.format_pond_leaderboard(
+                    crumbs.get_pond_leaderboard(limit=LEADERBOARD_DISPLAY_LIMIT, public=True),
+                    limit=LEADERBOARD_DISPLAY_LIMIT,
+                )
                 _safe_say(say, text=board, channel=channel_id, thread_ts=target_thread_ts)
                 return
 
@@ -1536,7 +1538,10 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             "/leaderboard", "!leaderboard", ".leaderboard", "leaderboard",
             "/top", "!top", ".top", "top", "ranks", "scores", "pond leaderboard",
         ):
-            board = crumbs.format_pond_leaderboard(crumbs.get_pond_leaderboard(limit=10))
+            board = crumbs.format_pond_leaderboard(
+                crumbs.get_pond_leaderboard(limit=LEADERBOARD_DISPLAY_LIMIT, public=True),
+                limit=LEADERBOARD_DISPLAY_LIMIT,
+            )
             _safe_say(say, text=board, thread_ts=target_thread_ts)
             return
 
@@ -1654,7 +1659,10 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
     @app.command("/leaderboard")
     def handle_leaderboard_command(ack, respond, say):
         ack()
-        board = crumbs.format_pond_leaderboard(crumbs.get_pond_leaderboard(limit=10))
+        board = crumbs.format_pond_leaderboard(
+                crumbs.get_pond_leaderboard(limit=LEADERBOARD_DISPLAY_LIMIT, public=True),
+                limit=LEADERBOARD_DISPLAY_LIMIT,
+            )
         try:
             respond(text=board, response_type="in_channel")
         except Exception:

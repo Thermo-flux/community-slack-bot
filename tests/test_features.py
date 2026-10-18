@@ -109,6 +109,7 @@ def test_privacy_controls_public_board(temp_db):
     crumbs.add_ledger_event("U_SHOW", "star", amount=25, db_path=temp_db)
     crumbs.add_ledger_event("U_HIDE", "star", amount=60, db_path=temp_db)
     crumbs.set_privacy_show("U_SHOW", True, db_path=temp_db)
+    crumbs.set_privacy_show("U_HIDE", False, db_path=temp_db)
 
     public = crumbs.get_pond_leaderboard(public=True, db_path=temp_db)
     ids = {e["user_id"] for e in public}
@@ -116,6 +117,16 @@ def test_privacy_controls_public_board(temp_db):
 
     full = crumbs.get_pond_leaderboard(public=False, db_path=temp_db)
     assert {"U_SHOW", "U_HIDE"} <= {e["user_id"] for e in full}
+
+
+def test_public_board_is_visible_by_default_and_not_capped(temp_db):
+    ids = [f"U{i}" for i in range(5)]
+    for amount, uid in enumerate(ids, start=1):
+        crumbs.set_opted_in(uid, db_path=temp_db)
+        crumbs.add_ledger_event(uid, "star", amount=25 + amount, db_path=temp_db)
+
+    public = crumbs.get_pond_leaderboard(public=True, db_path=temp_db)
+    assert {e["user_id"] for e in public} == set(ids)
 
 
 # --- voice cap ------------------------------------------------------------
@@ -197,6 +208,30 @@ def test_parse_pond_command_leaderboard_and_season_aliases():
     assert handlers.parse_pond_command("goose leaderboard") == ("leaderboard", [])
     assert handlers.parse_pond_command("goose set-end 1700000000") == ("set-end", ["1700000000"])
     assert handlers.parse_pond_command("goose season") == ("season", [])
+
+
+def test_pond_leaderboard_is_posted_publicly(monkeypatch):
+    posted = {}
+
+    def fake_say(say, **kwargs):
+        posted.update(kwargs)
+
+    entries = [{"user_id": f"U{i}"} for i in range(5)]
+    monkeypatch.setattr(handlers, "_safe_say", fake_say)
+    monkeypatch.setattr(handlers, "_is_organizer", lambda uid: False)
+    monkeypatch.setattr(
+        handlers.crumbs, "get_pond_leaderboard", lambda **kwargs: entries
+    )
+    monkeypatch.setattr(
+        handlers.crumbs, "format_pond_leaderboard", lambda items, limit=10: f"{len(items)} entries"
+    )
+
+    handled = handlers._handle_pond_command(
+        "leaderboard", [], MagicMock(), MagicMock(), "C1", "U1", "T1"
+    )
+
+    assert handled is True
+    assert posted == {"text": "5 entries", "thread_ts": "T1"}
 
 
 def test_season_line_and_set_end(monkeypatch):

@@ -82,7 +82,8 @@ def _ensure_user_columns(conn) -> None:
         "level_floor": "INTEGER NOT NULL DEFAULT 1",
         "last_scored_ts": "REAL NOT NULL DEFAULT 0.0",
         "last_scored_text": "TEXT NOT NULL DEFAULT ''",
-        "privacy_show": "INTEGER NOT NULL DEFAULT 0",
+        "privacy_show": "INTEGER NOT NULL DEFAULT 1",
+        "privacy_set": "INTEGER NOT NULL DEFAULT 0",
         "quiet": "INTEGER NOT NULL DEFAULT 0",
         "resting": "INTEGER NOT NULL DEFAULT 0",
         "last_roast_ts": "REAL NOT NULL DEFAULT 0.0",
@@ -215,6 +216,10 @@ def init_db(db_path: str = DB_PATH) -> None:
                     );
                 """)
                 _ensure_user_columns(conn)
+                conn.execute(
+                    "UPDATE users SET privacy_show = 1 "
+                    "WHERE privacy_show = 0 AND privacy_set = 0;"
+                )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_users_xp ON users(xp DESC, message_count DESC);"
                 )

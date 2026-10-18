@@ -50,8 +50,8 @@
   "organizer_channel_id": "",
   "owner_user_id": "",
   "privacy": {
-    "_comment": "Public boards show at most this many members, and only those who ran 'show'.",
-    "public_board_size": 3
+    "_comment": "Public boards list visible members; 0 means no size cap. Members default to visible and can run 'goose hide'.",
+    "public_board_size": 0
   },
   "voice": {
     "_comment": "LLM chat is on by default so the bot keeps talking; hourly_limit is per person per hour. Set enabled false to mute the voice.",

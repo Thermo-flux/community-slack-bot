@@ -323,7 +323,9 @@ def get_pond_leaderboard(limit: int = 10, db_path=None, public: bool = True) -> 
     entries.sort(key=lambda e: (e["crumbs"], e["level"]), reverse=True)
     if public:
         from config import PUBLIC_BOARD_SIZE
-        entries = [e for e in entries if e.get("privacy_show")][: max(1, PUBLIC_BOARD_SIZE)]
+        entries = [e for e in entries if e.get("privacy_show")]
+        if PUBLIC_BOARD_SIZE > 0:
+            entries = entries[:PUBLIC_BOARD_SIZE]
     return entries[:limit]
 
 
@@ -480,7 +482,16 @@ def _set_user_flag(user_id: str, column: str, value: int, db_path=None) -> None:
 
 
 def set_privacy_show(user_id: str, show: bool, db_path=None) -> None:
-    _set_user_flag(user_id, "privacy_show", bool(show), db_path)
+    """Set public visibility and remember that the member chose it explicitly."""
+    now = time.time()
+    with _DB_LOCK:
+        with _managed_connection(db_path) as conn:
+            get_or_create_user(user_id, db_path)
+            with conn:
+                conn.execute(
+                    "UPDATE users SET privacy_show = ?, privacy_set = 1, updated_at = ? WHERE user_id = ?",
+                    (1 if show else 0, now, user_id),
+                )
 
 
 def set_quiet(user_id: str, quiet: bool, db_path=None) -> None:
