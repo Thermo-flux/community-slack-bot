@@ -197,6 +197,11 @@ def _get_default_config() -> Dict[str, Any]:
         "season": {
             "end_ts": 0,
         },
+        "assets": {
+            "enabled": True,
+            "cooldown_seconds": 900,
+            "chance": 0.5,
+        },
     }
 
 
@@ -458,6 +463,7 @@ ROASTS = CONFIG.get("roasts") or {}
 GOOSE_METER = CONFIG.get("goose_meter") or {}
 DISTRESS = CONFIG.get("distress") or {}
 SEASON = CONFIG.get("season") or {}
+ASSETS = CONFIG.get("assets") or {}
 PRIVACY = CONFIG.get("privacy") or {}
 PUBLIC_BOARD_SIZE = int(PRIVACY.get("public_board_size", 3) or 3)
 KILL_SWITCH_ENV = _bool_setting("KILL_SWITCH", bool(CONFIG.get("kill_switch", False)))
@@ -489,7 +495,7 @@ def validate_config() -> List[str]:
             problems.append(f"{key} must be a Slack user ID like U01234567.")
 
     for key in ("privacy", "voice", "rewards", "reactions", "roasts", "goose_meter",
-                "distress", "season"):
+                "distress", "season", "assets"):
         value = CONFIG.get(key)
         if value is not None and not isinstance(value, dict):
             problems.append(f"{key} must be an object.")

@@ -88,6 +88,12 @@
     "_comment": "Season end as a Unix timestamp (0 = open-ended). Set with 'goose set-end'.",
     "end_ts": 0
   },
+  "assets": {
+    "_comment": "Rare reaction GIFs and bad sifu quotes. Uploads need the files:write bot scope. Cooldown is per channel.",
+    "enabled": true,
+    "cooldown_seconds": 900,
+    "chance": 0.5
+  },
   "kill_switch": false,
   "level_tiers": [
     {

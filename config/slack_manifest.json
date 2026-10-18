@@ -46,6 +46,7 @@
         "im:history",
         "chat:write",
         "commands",
+        "files:write",
         "reactions:write",
         "users:read"
       ]

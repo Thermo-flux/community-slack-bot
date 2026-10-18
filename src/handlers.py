@@ -24,6 +24,7 @@ from config import (
     AI_REPLY_QUEUE_SIZE,
     AI_REPLY_WORKERS,
     AI_TIMEOUT_SECONDS,
+    ASSETS,
     CONFIG,
     DISTRESS,
     GOOSE_METER,
@@ -72,6 +73,7 @@ from leveling import (
 )
 import ai_service
 import crumbs
+import slack_assets
 
 logger = logging.getLogger("SlackBotHandlers")
 
@@ -1210,6 +1212,42 @@ def _roast_budget_ok(user_id: str, event=None) -> bool:
     return True
 
 
+def _maybe_send_asset(
+    client,
+    say,
+    channel_id: str,
+    text: str,
+    thread_ts: Optional[str],
+    message_ts: Optional[str],
+) -> bool:
+    """Send a rare reaction clip or a bad sifu quote. Returns True when it handled the message."""
+    if not ASSETS.get("enabled", True):
+        return False
+
+    if slack_assets.is_quote_request(text):
+        if not _claim_reply_trigger(channel_id, message_ts):
+            return True
+        quote = slack_assets.pick_quote()
+        line = slack_assets.format_quote(quote)
+        image = quote.get("image")
+        if not (image and slack_assets.upload_asset(client, channel_id, thread_ts, image, initial_comment=line)):
+            _safe_say(say, text=line, channel=channel_id, thread_ts=thread_ts)
+        return True
+
+    moment = slack_assets.detect_moment(text)
+    if not moment:
+        return False
+    if not slack_assets.allow_asset(channel_id):
+        return False
+    if not _claim_reply_trigger(channel_id, message_ts):
+        return True
+    if not slack_assets.upload_asset(
+        client, channel_id, thread_ts, moment["image"], initial_comment=moment["line"]
+    ):
+        _safe_say(say, text=moment["line"], channel=channel_id, thread_ts=thread_ts)
+    return True
+
+
 def _react_to_message(client, channel_id: str, text: str, author_id: str, message_ts: str) -> None:
     """Add a light reaction to noteworthy messages, within a per-channel hourly budget."""
     if not client or not (REACTIONS.get("enabled", True)):
@@ -1402,6 +1440,10 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             return
         # A real addressed message (not a command) still counts as pond activity.
         _score_loadout_activity(user_id, channel_id, event, client, clean_addressed, rules)
+        if should_respond and _maybe_send_asset(
+            client, say, channel_id, clean_addressed, target_thread_ts, event.get("ts")
+        ):
+            return
         if should_respond:
             require_decision = (
                 is_thread_followup and not is_named and not is_prefixed_cmd and not is_dm
@@ -1498,6 +1540,9 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
                 cooldown=rules.get("cooldown_seconds", 30),
             )
             _safe_say(say, text=formatted_help, thread_ts=target_thread_ts)
+            return
+
+        if _maybe_send_asset(client, say, channel_id, cleaned_text, target_thread_ts, event.get("ts")):
             return
 
         _score_loadout_activity(user_id, channel_id, event, client, cleaned_text, rules)
