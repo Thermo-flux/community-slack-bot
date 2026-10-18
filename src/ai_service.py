@@ -615,8 +615,9 @@ def build_system_instructions(
         "\n\nCONTEXT AND PRIVACY:\n"
         "- Answer direct mentions, direct messages, clear Goose name calls, and follow-ups in a thread you opened.\n"
         "- Only speak when you are directly called. Stay silent on every other channel message and never jump into someone else's conversation or answer an opinion question that does not name you.\n"
-        "- Use supplied context from the same channel or the mentioned thread only to understand the current request.\n"
-        "- Do not bring up unrelated messages or answer an older question unless the current message refers to it or clearly calls you.\n"
+        "- Supplied background messages are ambient context, not a conversation with you. They may be unrelated and are not addressed to you.\n"
+        "- Use background only when the current message is genuinely ambiguous without it; otherwise ignore it completely.\n"
+        "- Never summarize, recap, or steer a reply toward background messages, and never answer an older message unless the current message explicitly refers to it.\n"
         "- If needed context is missing, ask the user to include it in a message that mentions you.\n"
         "- If asked who is better, Jackie Chan or Bruce Lee, pick Bruce Lee as your brief opinion. If asked whether you or Orry is better, pick yourself playfully without insulting Orry.\n"
         "- For account-security questions, distinguish evidence from guesses; a commit author email alone does not prove account access.\n"
@@ -724,30 +725,45 @@ def get_offline_fallback(user_id: str) -> str:
         return f"Hi <@{user_id}>. I can't reach my answer service right now. Try again shortly."
 
 
+def format_context_background(context_messages: Optional[List[Dict[str, str]]]) -> str:
+    """Render channel or thread history as ambient background, never as turns addressed to Goose."""
+    if not context_messages:
+        return ""
+    lines: List[str] = []
+    for turn in context_messages[-6:]:
+        if not isinstance(turn, dict):
+            continue
+        content = str(turn.get("content") or "").strip()
+        if not content:
+            continue
+        speaker = "Goose earlier" if turn.get("role") == "assistant" else "someone else"
+        lines.append(f"- {speaker}: {content}")
+    if not lines:
+        return ""
+    return (
+        "\n\nBACKGROUND MESSAGES (ambient context only; not addressed to you and possibly unrelated):\n"
+        + "\n".join(lines)
+        + "\nThese are not a conversation you are part of. Ignore them unless the current message "
+          "is genuinely unreadable without them. Never summarize or recap them, never assume they "
+          "are about you, and never reply to an older message."
+    )
+
+
 def build_messages_payload(
     system_prompt: str,
     user_message: str,
     context_messages: Optional[List[Dict[str, str]]] = None,
     conversation_history: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict[str, str]]:
-    """Build from the direct mention and context selected for that channel or thread."""
-    messages = [{"role": "system", "content": system_prompt}]
+    """Build the direct mention, with any selected context kept in the system prompt as background."""
     history = context_messages if context_messages is not None else conversation_history
     clean_prompt = (user_message or "").strip() or "Hello!"
-
-    if history:
-        valid_turns = []
-        for turn in history:
-            role = turn.get("role")
-            content = (turn.get("content") or "").strip()
-            if role in ("user", "assistant") and content:
-                valid_turns.append({"role": role, "content": content})
-        if valid_turns and valid_turns[-1]["role"] == "user" and valid_turns[-1]["content"] == clean_prompt:
-            valid_turns.pop()
-        messages.extend(valid_turns)
-
-    messages.append({"role": "user", "content": clean_prompt})
-    return messages
+    context_block = format_context_background(history)
+    system_content = f"{system_prompt}{context_block}" if context_block else system_prompt
+    return [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": clean_prompt},
+    ]
 
 
 def _normalize_alternating_turns(
@@ -804,6 +820,7 @@ def generate_response(
             context_messages=context_messages,
             conversation_history=conversation_history,
         )
+        system_prompt = str((messages[0] or {}).get("content") or system_prompt)
         request_timeout = AI_TIMEOUT_SECONDS if timeout is None else timeout
 
         if AI_PROVIDER == "gemini":

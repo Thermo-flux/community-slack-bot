@@ -212,17 +212,33 @@ def test_build_messages_payload_without_context_contains_only_the_direct_mention
     assert payload[1]["content"] == "<@UGOOSE> cool, thanks!"
 
 
-def test_build_messages_payload_includes_explicitly_selected_context():
+def test_build_messages_payload_keeps_selected_context_as_background():
     payload = ai_service.build_messages_payload(
         "system instruction",
         "<@UGOOSE> what about that?",
-        context_messages=[{"role": "user", "content": "Should we use SQLite?"}],
+        context_messages=[
+            {"role": "user", "content": "Should we use SQLite?"},
+            {"role": "assistant", "content": "Only if the app is single-user."},
+        ],
     )
-    assert payload == [
-        {"role": "system", "content": "system instruction"},
-        {"role": "user", "content": "Should we use SQLite?"},
-        {"role": "user", "content": "<@UGOOSE> what about that?"},
-    ]
+    assert len(payload) == 2
+    assert payload[0]["role"] == "system"
+    assert "system instruction" in payload[0]["content"]
+    assert "BACKGROUND MESSAGES" in payload[0]["content"]
+    assert "not addressed to you" in payload[0]["content"]
+    assert "Should we use SQLite?" in payload[0]["content"]
+    assert "- Goose earlier: Only if the app is single-user." in payload[0]["content"]
+    assert payload[1] == {"role": "user", "content": "<@UGOOSE> what about that?"}
+
+
+def test_format_context_background_never_treats_history_as_a_dialogue():
+    block = ai_service.format_context_background(
+        [{"role": "user", "content": "unrelated chatter about lunch"}]
+    )
+    assert "BACKGROUND MESSAGES" in block
+    assert "Ignore them unless" in block
+    assert "Never summarize or recap" in block
+    assert ai_service.format_context_background([]) == ""
 
 
 def test_clean_ai_output_enforces_shortcode_allowlist_and_low_frequency():

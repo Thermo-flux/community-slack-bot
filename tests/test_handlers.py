@@ -324,6 +324,56 @@ def test_channel_context_uses_recent_same_channel_messages_before_the_mention():
     }
 
 
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("what about that?", True),
+        ("and then?", True),
+        ("why did the build fail", True),
+        ("can you explain the hardware track in detail", False),
+        ("what is a W", False),
+        ("goose, thoughts?", True),
+    ],
+)
+def test_needs_channel_context_only_for_short_or_referential_messages(text, expected):
+    assert handlers.needs_channel_context(text) is expected
+
+
+def test_self_contained_mentions_skip_channel_context():
+    class Slots:
+        def release(self):
+            return None
+
+    client = MagicMock()
+    client.chat_postMessage.return_value = {"ok": True, "ts": "FINAL_TS"}
+    with patch("handlers._AI_REPLY_SLOTS", Slots()), \
+         patch("handlers.fetch_mentioned_channel_context") as fetch, \
+         patch("handlers.ai_service.generate_response", return_value="ok") as generate:
+        handlers._run_ai_reply(
+            client, "C1", "U1", "explain the hardware track in detail",
+            None, None, "5.0", "U_BOT", False, None,
+        )
+    fetch.assert_not_called()
+    assert generate.call_args.kwargs["context_messages"] == []
+
+
+def test_referential_mentions_fetch_channel_context():
+    class Slots:
+        def release(self):
+            return None
+
+    client = MagicMock()
+    client.chat_postMessage.return_value = {"ok": True, "ts": "FINAL_TS"}
+    with patch("handlers._AI_REPLY_SLOTS", Slots()), \
+         patch("handlers.fetch_mentioned_channel_context", return_value=[]) as fetch, \
+         patch("handlers.ai_service.generate_response", return_value="ok"):
+        handlers._run_ai_reply(
+            client, "C1", "U1", "what about that?",
+            None, None, "5.0", "U_BOT", False, None,
+        )
+    fetch.assert_called_once()
+
+
 def test_ai_mention_queues_work_and_updates_the_placeholder():
     class ListenerApp:
         def __init__(self):

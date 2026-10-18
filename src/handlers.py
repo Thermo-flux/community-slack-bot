@@ -4,7 +4,7 @@ SLACK EVENT & COMMAND HANDLERS (src/handlers.py)
 ==============================================================================
 Handles Slack message events, @mentions, and slash commands (/level, /rank,
 /card, /leaderboard).
-- Recent channel or thread context is fetched only when Goose Lee is called.
+- Thread context is fetched only when needed; same-channel history only for short or referential calls.
 - Ordinary uncalled messages earn XP without sending message contents to AI.
 - Common credentials and tokens are redacted before reaching any AI model.
 ==============================================================================
@@ -121,6 +121,11 @@ _COMMAND_PREFIX_RE = re.compile(
     r"^[!/.](?:level|rank|card|stats|xp|leaderboard|top|ranks|repo|github|help|bothelp)\b",
     re.IGNORECASE,
 )
+_CONTEXT_CUE_RE = re.compile(
+    r"^\s*(?:and|but|so|also|then|plus|what about|how about|why|"
+    r"it|this|that|these|those|they|them|he|she|him|her|there)\b",
+    re.IGNORECASE,
+)
 
 _AI_REPLY_EXECUTOR = ThreadPoolExecutor(
     max_workers=AI_REPLY_WORKERS, thread_name_prefix="goose-ai"
@@ -195,6 +200,17 @@ def sanitize_context_text(text: str) -> str:
         text,
         flags=re.DOTALL,
     )
+
+
+def needs_channel_context(text: str) -> bool:
+    """True only for very short or referential messages that cannot stand alone."""
+    cleaned = sanitize_context_text(text or "").strip()
+    if not cleaned:
+        return False
+    words = re.findall(r"[A-Za-z0-9']+", cleaned)
+    if len(words) <= 3:
+        return True
+    return bool(_CONTEXT_CUE_RE.match(cleaned))
 
 
 def is_addressed_to_bot(
@@ -924,10 +940,12 @@ def _run_ai_reply(
                 context_messages = fetch_mentioned_thread_context(
                     client, channel_id, context_thread_ts, current_ts, bot_user_id
                 )
-            else:
+            elif needs_channel_context(user_message):
                 context_messages = fetch_mentioned_channel_context(
                     client, channel_id, current_ts, bot_user_id
                 )
+            else:
+                context_messages = []
             roast_allowed = (not require_decision) and _roast_budget_ok(user_id)
             reply = ai_service.generate_response(
                 user_id=user_id,
