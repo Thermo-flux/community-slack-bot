@@ -1295,9 +1295,15 @@ def _distress_reply_and_alert(client, say, channel_id: str, user_id: str, thread
     _alert_organizers(client, alert)
 
 
+def _safe_log_text(text: str, limit: int = 200) -> str:
+    """Strip control characters and bound length so member input cannot poison logs."""
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", text or "")
+    return cleaned[:limit]
+
+
 def _alert_organizers(client, text: str) -> None:
     if not client or not ORGANIZER_CHANNEL_ID:
-        logger.warning("Organizer alert (no channel configured): %s", text)
+        logger.warning("Organizer alert (no channel configured): %s", _safe_log_text(text))
         return
     try:
         client.chat_postMessage(channel=ORGANIZER_CHANNEL_ID, text=text, parse="none")
