@@ -718,6 +718,30 @@ def set_flag(key: str, value: bool, db_path: str = DB_PATH) -> None:
     set_state(key, "1" if value else "0", db_path)
 
 
+def claim_state(key: str, value: str, db_path: str = DB_PATH) -> bool:
+    """Atomically set key to value and return True only if it changed.
+
+    Used so a scheduled action can be claimed once even on overlapping ticks or restarts.
+    """
+    try:
+        with _DB_LOCK:
+            with _managed_connection(db_path) as conn:
+                with conn:
+                    cur = conn.execute(
+                        """
+                        INSERT INTO bot_state (key, value, updated_at) VALUES (?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                            updated_at = excluded.updated_at
+                        WHERE bot_state.value IS NOT excluded.value
+                        """,
+                        (key, str(value), time.time()),
+                    )
+                    return bool(cur.rowcount)
+    except sqlite3.OperationalError as exc:
+        logger.warning("Could not claim state '%s' (%s)", key, type(exc).__name__)
+        return False
+
+
 def get_all_state(db_path: str = DB_PATH) -> Dict[str, str]:
     with _DB_LOCK:
         with _managed_connection(db_path) as conn:

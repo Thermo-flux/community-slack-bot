@@ -176,6 +176,10 @@ def test_weekly_report_posts_once(monkeypatch):
     monkeypatch.setattr(handlers.crumbs, "format_weekly_report", lambda wk, entries: "REPORT")
     monkeypatch.setattr(handlers.crumbs, "snapshot_week", lambda wk: 0)
     monkeypatch.setattr(handlers, "backup_database", lambda: None)
+    monkeypatch.setattr(
+        handlers, "claim_state",
+        lambda k, v: False if state.get(k) == v else (state.__setitem__(k, v) or True),
+    )
 
     client = MagicMock()
     handlers.run_scheduled_maintenance(client, force=True)
@@ -259,11 +263,13 @@ def test_season_line_and_set_end(monkeypatch):
 
 def test_poisoned_season_state_does_not_crash():
     handlers.set_state("season_end_ts", str(10**30))
+    handlers._refresh_state_cache()
     try:
         assert "open-ended" in handlers._season_line()
         assert handlers._season_ended() is False
     finally:
         handlers.set_state("season_end_ts", "0")
+        handlers._refresh_state_cache()
 
 
 def test_loadout_questions_deflect_to_orry():
@@ -341,9 +347,34 @@ def test_weekly_report_posts_at_most_once(monkeypatch):
     monkeypatch.setattr(handlers.crumbs, "snapshot_week", lambda *a, **k: None)
     monkeypatch.setattr(handlers, "backup_database", lambda: None)
     monkeypatch.setattr(handlers, "ORGANIZER_CHANNEL_ID", "C_ORG")
+    monkeypatch.setattr(
+        handlers, "claim_state",
+        lambda k, v: False if state.get(k) == v else (state.__setitem__(k, v) or True),
+    )
     client = MagicMock()
 
     handlers.run_scheduled_maintenance(client, force=True)
     handlers.run_scheduled_maintenance(client, force=True)
 
     assert client.chat_postMessage.call_count == 1
+
+def test_voice_off_persists_across_restart(monkeypatch):
+    store = {}
+    monkeypatch.setattr(handlers, "get_flag", lambda k, d=False: store.get(k, d))
+    monkeypatch.setattr(handlers, "set_flag", lambda k, v: store.__setitem__(k, v))
+    monkeypatch.setattr(handlers, "add_audit", lambda *a, **k: 0)
+    monkeypatch.setattr(handlers, "_STATE_CACHE", {}, raising=False)
+
+    handlers._set_voice(False)
+    assert handlers._voice_enabled() is False
+
+    monkeypatch.setattr(handlers, "_STATE_CACHE", {}, raising=False)
+    handlers._refresh_state_cache()
+    assert handlers._voice_enabled() is False
+    assert store.get("voice") is False
+
+def test_claim_state_is_atomic_and_value_aware(temp_db):
+    assert database.claim_state("weekly", "2026-W42", db_path=temp_db) is True
+    assert database.claim_state("weekly", "2026-W42", db_path=temp_db) is False
+    assert database.claim_state("weekly", "2026-W43", db_path=temp_db) is True
+    assert database.get_state("weekly", db_path=temp_db) == "2026-W43"

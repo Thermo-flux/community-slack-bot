@@ -47,6 +47,7 @@ from database import (
     add_audit,
     backup_database,
     check_cooldown,
+    claim_state,
     consume_voice_quota,
     create_report,
     get_appeals,
@@ -377,6 +378,11 @@ def parse_card_request_targets(
     return None
 
 
+def _escape_mrkdwn(text: str) -> str:
+    """Neutralize Slack mrkdwn so echoed user input cannot ping or link."""
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def get_cards_response_for_targets(targets: List[str], caller_id: str) -> str:
     """Resolves targets (usernames, user IDs, or mentions) to Pond Level cards."""
     cards = []
@@ -384,7 +390,7 @@ def get_cards_response_for_targets(targets: List[str], caller_id: str) -> str:
         uid, _user_data = resolve_user(target, create_if_missing=False)
         if not uid:
             clean_name = target.strip().lstrip("@")
-            cards.append(f"No activity record found for '{clean_name}' yet.")
+            cards.append(f"No activity record found for '{_escape_mrkdwn(clean_name)}' yet.")
             continue
         status = crumbs.get_pond_status(uid)
         if uid != caller_id and not _is_organizer(caller_id) and not status.get("privacy_show"):
@@ -708,6 +714,7 @@ def _handle_pond_command(
                     _post_private(client, say, channel_id, user_id, "Give me a Unix timestamp or `off`.", thread_ts)
                     return True
                 set_state("season_end_ts", str(end_ts))
+        _refresh_state_cache()
         _post_private(client, say, channel_id, user_id, _season_line(), thread_ts)
         return True
 
@@ -1170,11 +1177,20 @@ _STATE_LOCK = threading.Lock()
 _STATE_CACHE: Dict[str, bool] = {}
 
 
+def _load_season_end_ts() -> float:
+    try:
+        end = float(get_state("season_end_ts", str(SEASON.get("end_ts") or 0)) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return end if 0 < end <= 2**31 - 1 else 0.0
+
+
 def _refresh_state_cache() -> Dict[str, bool]:
     with _STATE_LOCK:
         _STATE_CACHE["paused"] = get_flag("paused", False)
         _STATE_CACHE["frozen"] = get_flag("frozen", False)
-        _STATE_CACHE["voice"] = get_flag("voice_enabled", VOICE_ENABLED)
+        _STATE_CACHE["voice"] = get_flag("voice", VOICE_ENABLED)
+        _STATE_CACHE["season_end"] = _load_season_end_ts()  # type: ignore[assignment]
         return dict(_STATE_CACHE)
 
 
@@ -1226,11 +1242,12 @@ def _status_line() -> str:
 
 
 def _season_end_ts() -> float:
-    try:
-        end = float(get_state("season_end_ts", str(SEASON.get("end_ts") or 0)) or 0)
-    except (TypeError, ValueError):
-        return 0.0
-    return end if 0 < end <= 2**31 - 1 else 0.0
+    with _STATE_LOCK:
+        if "season_end" in _STATE_CACHE:
+            return float(_STATE_CACHE["season_end"])
+    _refresh_state_cache()
+    with _STATE_LOCK:
+        return float(_STATE_CACHE.get("season_end", 0.0))
 
 
 def _season_ended() -> bool:
@@ -1412,23 +1429,33 @@ _bot_user_id_global: Optional[str] = None
 
 
 def run_scheduled_maintenance(client, force: bool = False) -> None:
-    """Daily maintenance: on Monday post the weekly Pond Report, snapshot, and back up the DB.
+    """Maintenance: back up the DB once a day, and on Monday post the weekly Pond Report.
 
-    Idempotent per ISO week (tracked in bot_state) and skipped while paused or frozen, so a
-    restart or repeated tick cannot double-post.
+    The backup runs regardless of pause/freeze so a paused week still gets a snapshot. The
+    weekly report is claimed atomically per ISO week, so overlapping ticks or a restart
+    cannot post it twice.
     """
-    if _is_paused() or _is_frozen():
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if get_state("last_backup_day", "") != today:
+        set_state("last_backup_day", today)
+        try:
+            backup_database()
+        except Exception as exc:
+            logger.warning("Database backup failed (%s)", type(exc).__name__)
+
+    if not (force or time.gmtime().tm_wday == 0):
         return
-    if not force and time.gmtime().tm_wday != 0:
+    if _is_paused() or _is_frozen():
         return
     week = crumbs.week_key_now()
     if get_state("last_weekly_report", "") == week:
         return
-    set_state("last_weekly_report", week)
     try:
         entries = crumbs.get_weekly_leaderboard(week, limit=10)
     except Exception as exc:
         logger.error("Weekly report query failed (%s)", type(exc).__name__)
+        return
+    if not claim_state("last_weekly_report", week):
         return
     if ORGANIZER_CHANNEL_ID and client is not None:
         try:
@@ -1446,10 +1473,6 @@ def run_scheduled_maintenance(client, force: bool = False) -> None:
         crumbs.snapshot_week(week)
     except Exception as exc:
         logger.warning("Weekly snapshot failed (%s)", type(exc).__name__)
-    try:
-        backup_database()
-    except Exception as exc:
-        logger.warning("Database backup failed (%s)", type(exc).__name__)
 
 
 

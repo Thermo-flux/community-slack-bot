@@ -201,7 +201,7 @@ def _quote_history() -> list:
         history = []
     if not isinstance(history, list):
         return []
-    return history[-_QUOTE_HISTORY_LIMIT:]
+    return [h for h in history[-_QUOTE_HISTORY_LIMIT:] if isinstance(h, str)]
 
 
 def _remember_quote(text: str) -> None:
@@ -236,7 +236,7 @@ def pick_quote_image(text: str, tone: str, who: str) -> str:
     """Choose an image that fits the quote's tone and subject."""
     if who == "Goose Lee":
         return random.choice(GOOSE_IMAGES)
-    if re.search(rf"\b(?:{'|'.join(map(re.escape, _FOOD_IMAGE_WORDS))})\b", text.lower()):
+    if re.search(rf"\b(?:{'|'.join(map(re.escape, _FOOD_IMAGE_WORDS))})s?\b", text.lower()):
         return random.choice(SASSY_IMAGES)
     return random.choice(WISE_IMAGES if tone == "wise" else SASSY_IMAGES)
 
@@ -283,12 +283,10 @@ def generate_quote() -> Dict[str, Optional[str]]:
 
 def allow_quote(channel_id: str) -> bool:
     """One prophecy at a time per channel so quote spam cannot rewrite history repeatedly."""
-    if not channel_id:
-        return True
     if _QUOTE_COOLDOWN_SECONDS <= 0:
         return True
     now = time.time()
-    key = f"quote_last:{channel_id}"
+    key = f"quote_last:{channel_id or 'global'}"
     try:
         last = float(get_state(key, "0") or 0)
     except (TypeError, ValueError):
@@ -302,7 +300,7 @@ def allow_quote(channel_id: str) -> bool:
     return True
 
 _QUOTE_RE = re.compile(
-    r"\b(?:tell|give|got|share|drop|send|get|fetch|hit)\b[^.?!]{0,24}\b(?:quote|quotes|wisdom|wise words)\b"
+    r"\b(?:tell|give|got|share|drop|send)\b[^.?!]{0,24}\b(?:quote|quotes|wisdom|wise words)\b"
     r"|\b(?:words? of wisdom|ancient wisdom|sifu wisdom|sifu quote|quote me|something wise)\b"
     r"|^\s*(?:quote|quotes|wisdom)\b"
     r"|\b(?:quote|quotes|wisdom)\b\s*(?:please)?\s*[?!.]*$",

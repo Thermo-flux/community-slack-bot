@@ -1111,3 +1111,12 @@ def test_distress_reply_survives_the_pause_switch(monkeypatch):
         say=MagicMock(),
     )
     alert.assert_called_once()
+
+def test_card_reply_escapes_mrkdwn_targets(monkeypatch):
+    monkeypatch.setattr(handlers, "resolve_user", lambda target, **k: (None, None))
+    reply = handlers.get_cards_response_for_targets(["<!channel>"], "U1")
+    assert "<!channel>" not in reply
+    assert "&lt;!channel&gt;" in reply
+    assert handlers._escape_mrkdwn("<https://evil.example/x|hi> & <@U1>") == (
+        "&lt;https://evil.example/x|hi&gt; &amp; &lt;@U1&gt;"
+    )

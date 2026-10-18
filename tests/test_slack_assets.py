@@ -271,3 +271,15 @@ def test_quote_cooldown_blocks_back_to_back_requests(monkeypatch):
     assert slack_assets.allow_quote("C1") is True
     assert slack_assets.allow_quote("C1") is False
     assert slack_assets.allow_quote("C2") is True
+
+def test_quote_request_ignores_ordinary_quote_talk():
+    assert slack_assets.is_quote_request("tell me a quote") is True
+    assert slack_assets.is_quote_request("get the quote for the API") is False
+    assert slack_assets.is_quote_request("fetch the quote from the vendor") is False
+    assert slack_assets.is_quote_request("hit the quote button please") is False
+
+
+def test_food_plurals_still_pick_sassy(monkeypatch):
+    monkeypatch.setattr(slack_assets, "SASSY_IMAGES", ["sassy.png"])
+    monkeypatch.setattr(slack_assets, "WISE_IMAGES", ["wise.png"])
+    assert slack_assets.pick_quote_image("A plate of dumplings.", "wise", "Sifu Cat") == "sassy.png"
