@@ -158,6 +158,7 @@ def _get_default_config() -> Dict[str, Any]:
         },
         "organizer_channel_id": "",
         "owner_user_id": "",
+        "orry_user_id": "",
         "privacy": {
             "public_board_size": 0,
         },
@@ -450,6 +451,7 @@ def _user_id_setting(env_name: str, config_name: str = "") -> str:
 # Organizer reporting targets (weekly Pond Report + all-time results)
 ORGANIZER_CHANNEL_ID = _channel_id_setting("ORGANIZER_CHANNEL_ID", "organizer_channel_id")
 OWNER_USER_ID = _user_id_setting("OWNER_USER_ID", "owner_user_id")
+ORRY_USER_ID = _user_id_setting("ORRY_USER_ID", "orry_user_id")
 
 _voice_cfg = CONFIG.get("voice") or {}
 VOICE_ENABLED = _bool_setting("VOICE_ENABLED", bool(_voice_cfg.get("enabled", False)))
@@ -489,7 +491,7 @@ def validate_config() -> List[str]:
         if value not in ("", None) and not re.fullmatch(r"C[A-Z0-9]+", str(value)):
             problems.append(f"{key} must be a Slack channel ID like C01234567.")
 
-    for key in ("owner_user_id",):
+    for key in ("owner_user_id", "orry_user_id"):
         value = CONFIG.get(key)
         if value not in ("", None) and not re.fullmatch(r"[UW][A-Z0-9]{6,}", str(value).upper()):
             problems.append(f"{key} must be a Slack user ID like U01234567.")

@@ -49,6 +49,7 @@
   "_comment_targets": "Organizer channel receives the weekly Pond Report and alerts; owner_user_id confirms all-time results.",
   "organizer_channel_id": "",
   "owner_user_id": "",
+  "orry_user_id": "",
   "privacy": {
     "_comment": "Public boards list visible members; 0 means no size cap. Members default to visible and can run 'goose hide'.",
     "public_board_size": 0

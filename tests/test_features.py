@@ -272,17 +272,18 @@ def test_poisoned_season_state_does_not_crash():
         handlers._refresh_state_cache()
 
 
-def test_loadout_questions_deflect_to_orry():
+def test_loadout_policy_answers_basics_and_keeps_orry_as_authority():
     instructions = ai_service.build_system_instructions()
     assert "Orry" in instructions
-    assert "silly goose" in instructions.lower()
     assert "Stay fresh" in instructions
 
 
-def test_knowledge_block_deflects_instead_of_answering():
+def test_knowledge_block_answers_basics_and_hands_off_hard_ones():
     instructions = ai_service.build_system_instructions(knowledge="Ore price for X is 100.")
     assert "LOADOUT PROGRAM KNOWLEDGE" in instructions
-    assert "Orry is the authority" in instructions
+    assert "use it to answer directly" in instructions
+    assert "hand it off" in instructions
+    assert "Orry" in instructions
     assert "Quote exact figures" not in instructions
     assert "Use it as the source of truth for this LOADOUT question" not in instructions
 
@@ -390,3 +391,43 @@ def test_persona_keeps_chinese_american_flavor_and_guards_against_caricature():
     assert "boba" in prompt.lower()
     assert "caricature" in prompt
     assert "not only on special occasions" in prompt
+
+def test_mentions_block_uses_reply_to_and_orry_ids():
+    prompt = ai_service.build_system_instructions(
+        reply_to_user_id="U_REPLY", orry_user_id="U_ORRY"
+    )
+    assert "MENTIONS" in prompt
+    assert "<@U_REPLY>" in prompt
+    assert "<@U_ORRY>" in prompt
+    assert "at most one mention" in prompt
+
+    no_orry = ai_service.build_system_instructions(reply_to_user_id="U_REPLY")
+    assert "never invent an ID" in no_orry
+
+
+def test_direct_mentions_survive_output_cleaning():
+    assert ai_service.clean_ai_output("Hey <@U123>, nice work") == "Hey <@U123>, nice work"
+
+
+def test_generate_response_passes_reply_to_mention(monkeypatch):
+    captured = {}
+
+    def fake_call(messages, timeout=None):
+        captured["messages"] = messages
+        return "ok"
+
+    monkeypatch.setattr(ai_service, "AI_API_KEY", "test-key")
+    monkeypatch.setattr(ai_service, "AI_PROVIDER", "custom")
+    monkeypatch.setattr(ai_service, "_call_openai_compatible", fake_call)
+    monkeypatch.setattr(ai_service, "retrieve_loadout_knowledge", lambda *a, **k: "")
+
+    ai_service.generate_response("U_REPLY", "goose, hi")
+    system = captured["messages"][0]["content"]
+    assert "<@U_REPLY>" in system
+
+def test_orry_user_id_config_exists_and_validates(monkeypatch):
+    assert isinstance(config.ORRY_USER_ID, str)
+    monkeypatch.setenv("ORRY_USER_ID", "not-a-user-id")
+    assert config._user_id_setting("ORRY_USER_ID") == ""
+    monkeypatch.setenv("ORRY_USER_ID", "U0ABCDEFG")
+    assert config._user_id_setting("ORRY_USER_ID") == "U0ABCDEFG"

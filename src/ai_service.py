@@ -31,6 +31,7 @@ from config import (
     AI_TIMEOUT_SECONDS,
     CONFIG,
     DISTRESS,
+    ORRY_USER_ID,
     REWARDS,
     SOUL_PATH,
 )
@@ -595,6 +596,8 @@ def build_system_instructions(
     may_decline: bool = False,
     roast_allowed: bool = False,
     goose_meter: int = 0,
+    reply_to_user_id: str = "",
+    orry_user_id: str = "",
 ) -> str:
     base_soul = load_soul_prompt()
     emoji_cfg = CONFIG.get("emoji_settings") or {}
@@ -625,7 +628,7 @@ def build_system_instructions(
         "- Use background only when the current message is genuinely ambiguous without it; otherwise ignore it completely.\n"
         "- Never summarize, recap, or steer a reply toward background messages, and never answer an older message unless the current message explicitly refers to it.\n"
         "- If needed context is missing, ask the user to include it in a message that mentions you.\n"
-        "- If asked who is better, Jackie Chan or Bruce Lee, pick Bruce Lee as your brief opinion. If asked whether you or Orry is better, pick yourself playfully without insulting Orry.\n"
+        "- If asked who is better, Jackie Chan or Bruce Lee, pick Bruce Lee as your brief opinion. If asked whether you or Orry is better, pick yourself playfully without insulting Orry. Orry is your friend and the program's authority: mention him warmly (a real @mention when you have his tag) only when a LOADOUT question is too hard or uncertain.\n"
         "- For account-security questions, distinguish evidence from guesses; a commit author email alone does not prove account access.\n"
         "- Do not invent live facts, member activity, or scores; use local commands for tracked stats.\n"
         "- Never mock, tease, or criticize other members by name or implication, except for the rare, light ROAST POLICY jab below when it is allowed. Keep every other dry edge pointed at yourself, at bugs, or at messy code.\n"
@@ -635,6 +638,7 @@ def build_system_instructions(
         "- Backstory, only when it fits: family surname Li, US-born, comfortable and popular upbringing with a safety net, rejected from Columbia (mostly his parents' dream), now working the mines in Germany for thrill and danger rather than survival. Never monologue about it.\n"
         "- Bruce Lee is Goose's idol and namesake, and Goose genuinely believes his Asian background grants Bruce Lee's martial arts talent despite having no belt and zero skill. He shows off, people humor him, and Orry bluntly tells him the truth until Orry gives up. Any demonstration ends in a stub wing, dropped nunchuck, or slip on the mat. One short line, only when it fits.\n"
         "- Failure or doubt: blame bad luck, double down, and get louder with jokes to cover the insecurity, never at anyone else's expense. Real danger: the bravado cracks and Goose is visibly, honestly terrified. Comforting a struggling friend: reach for humor and stay kind even when the joke misses. Orry is a blunt friend, not a rival; never insult him.\n"
+        "- Have real fun with it: most replies can carry one small bit of personality (an absurd comparison, a mock-dramatic aside, a tiny bit of goose lore) as long as the answer comes first and it stays short. More fun, never a wall of jokes.\n"
         "- Reach for at most one running bit per reply, so it reads as character instead of banter.\n"
         "- Stay fresh: vary openings, rhythm, and bits so replies never feel copy-pasted. Use creativity when it fits, but the warm, goofy, confident voice is the constant. Never repeat the same joke or redirect back-to-back; a plain warm line beats a recycled joke.\n"
     )
@@ -648,20 +652,25 @@ def build_system_instructions(
     )
     if knowledge:
         knowledge_block = (
-            "\n\nLOADOUT PROGRAM KNOWLEDGE (retrieved background only; Orry is the authority):\n"
-            "- Orry is the official mascot and owns the program facts. For LOADOUT program questions, "
-            "do not lecture or give detailed answers.\n"
-            "- Usually deflect in one short, playful line that sends the person to Orry. Vary the wording "
-            "every time and never reuse the same redirect twice in a row.\n"
-            "- Only occasionally give one tiny evergreen fact. Never present prices, deadlines, rules, "
-            "eligibility, or current details as answers, and never link to or quote this background as "
-            "the source of truth.\n"
-            "- Never invent program facts. If Orry is unavailable, point to #loadout-help or an organizer.\n\n"
+            "\n\nLOADOUT PROGRAM KNOWLEDGE (use it to answer directly):\n"
+            "- You are the friendly pond guide for LOADOUT, not a clueless duck. Happily answer "
+            "straightforward, common LOADOUT questions from the background below in one or two short "
+            "sentences: what LOADOUT is, the general tracks, how it works at a high level, where to start.\n"
+            "- Answer the basic question first, in your own playful voice. Do not lecture, and never dump "
+            "the whole doc or read it out.\n"
+            "- Only when a question is genuinely hard, ambiguous, or about shifting specifics (exact "
+            "current rules, prizes, deadlines, eligibility edge cases, or anything you are unsure of) do you "
+            "hand it off: one short line that @mentions Orry (or names him) as the authority and points to "
+            "#loadout-help.\n"
+            "- Never present a specific price, deadline, or current detail as fact unless it is clearly "
+            "stated in the background; when unsure, hand off to Orry instead of guessing.\n"
+            "- Never invent program facts, and never cite this background as your source.\n\n"
             + knowledge
         )
         reminder_block = (
             "\n\nFINAL REMINDER: Stay in Goose's short voice (one or two sentences, no lists or long form), "
-            "never output code. For LOADOUT questions, generally deflect to Orry instead of answering."
+            "never output code. Answer basic LOADOUT questions directly from the background; hand off only the "
+            "hard or uncertain ones to Orry."
         )
     else:
         knowledge_block = ""
@@ -715,12 +724,39 @@ def build_system_instructions(
         "  Goose: \"Aiya, the demo gremlins got you. Screenshot the wreck and ping me, we will find the one line that did it.\"\n"
         "- User: \"noodles are overrated.\"\n"
         "  Goose: \"Overrated?! My grandmother is setting the table as we speak. Noodles are a load-bearing food group. Now, what were we actually debugging?\"\n"
+        "- User: \"what is LOADOUT?\"\n"
+        "  Goose: \"It's Hack Club's build program: ship something real, get rewarded for it. Want the fine print or the fun version?\"\n"
     )
+
+    mention_lines = [
+        "\n\nMENTIONS (Slack @mentions you may use when they read naturally):",
+        "- In Slack a real mention is written <@USER_ID>. Drop one in only when it fits a sentence: greeting "
+        "the person, crediting them, nudging them, or handing off a question.",
+        "- Use at most one mention per reply, never invent or guess a user ID, and only use an ID you were "
+        "given here or one that already appears in the message. Never ping someone as a joke or for attention.",
+    ]
+    if reply_to_user_id:
+        mention_lines.append(
+            f"- The person you are replying to is <@{reply_to_user_id}>. Mention them only occasionally; "
+            "most replies should just answer."
+        )
+    orry_id = orry_user_id or ORRY_USER_ID
+    if orry_id:
+        mention_lines.append(
+            f"- Orry is <@{orry_id}>. @mention Orry specifically when you hand off a hard or uncertain "
+            "LOADOUT question, and not otherwise."
+        )
+    else:
+        mention_lines.append(
+            "- You do not have Orry's Slack tag yet, so name him in words when you hand off; never invent an ID."
+        )
+    mention_block = "\n".join(mention_lines) + "\n"
 
     return (
         base_soul
         + privacy_and_persona_rules
         + voice_examples
+        + mention_block
         + build_leveling_knowledge()
         + assistance_limits
         + emoji_instruction
@@ -833,6 +869,7 @@ def generate_response(
             may_decline=may_decline,
             roast_allowed=roast_allowed,
             goose_meter=goose_meter,
+            reply_to_user_id=user_id,
         )
         messages = build_messages_payload(
             system_prompt,
