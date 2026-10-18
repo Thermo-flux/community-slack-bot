@@ -21,7 +21,7 @@ ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets" / "goose"
 ASSET_BASE_URL = (
     os.getenv("ASSETS_BASE_URL", "").strip()
     or str(ASSETS.get("base_url") or "").strip()
-    or "https://raw.githubusercontent.com/Thermo-flux/community-slack-bot/9a9d3de/assets/goose"
+    or "https://raw.githubusercontent.com/Thermo-flux/community-slack-bot/feat/goose-lee-v6/assets/goose"
 ).rstrip("/")
 
 QUOTES = [
@@ -137,12 +137,31 @@ def is_quote_request(text: str) -> bool:
     return bool(_QUOTE_RE.search(text or ""))
 
 
+SIFU_IMAGES = [
+    "quotes/paw_tzu_wise.png",
+    "quotes/bearded_shifu_peace.png",
+    "quotes/shifu_deep_sigh.png",
+    "quotes/shifu_frustrated.png",
+    "quotes/pai_mei_smirk.png",
+    "quotes/sifu_cat_stance.png",
+    "quotes/dog_master_staff.png",
+]
+
+GOOSE_IMAGES = [
+    "quotes/goose_typing.gif",
+    "quotes/goose_kick.gif",
+]
+
+
 def pick_quote() -> Dict[str, Optional[str]]:
+    """Pick a quote and attach an unpaired sifu still, or a duck clip for Goose's own line."""
     import random
 
-    with_images = [quote for quote in QUOTES if quote.get("image")]
-    pool = with_images if with_images and random.random() < 0.8 else QUOTES
-    return random.choice(pool)
+    quote = dict(random.choice(QUOTES))
+    if not quote.get("image"):
+        pool = GOOSE_IMAGES if quote.get("who") == "Goose Lee" else SIFU_IMAGES
+        quote["image"] = random.choice(pool)
+    return quote
 
 
 def format_quote(quote: Dict[str, Optional[str]]) -> str:

@@ -19,11 +19,24 @@ def test_quote_requests_are_detected():
     assert not slack_assets.is_quote_request("goose me")
 
 
-def test_pick_quote_prefers_an_image_most_of_the_time(monkeypatch):
-    import random
-
-    monkeypatch.setattr(random, "random", lambda: 0.1)
+def test_pick_quote_always_attaches_an_image():
     assert slack_assets.pick_quote()["image"]
+
+
+def test_goose_quote_uses_a_duck_clip(monkeypatch):
+    monkeypatch.setattr(
+        slack_assets, "QUOTES", [{"text": "Stay lazy.", "who": "Goose Lee", "image": None}]
+    )
+    monkeypatch.setattr(slack_assets, "GOOSE_IMAGES", ["quotes/goose_typing.gif"])
+    assert slack_assets.pick_quote()["image"] == "quotes/goose_typing.gif"
+
+
+def test_sifu_quote_uses_an_unpaired_still(monkeypatch):
+    monkeypatch.setattr(
+        slack_assets, "QUOTES", [{"text": "Stay lazy.", "who": "Sifu Cat", "image": None}]
+    )
+    monkeypatch.setattr(slack_assets, "SIFU_IMAGES", ["quotes/paw_tzu_wise.png"])
+    assert slack_assets.pick_quote()["image"] == "quotes/paw_tzu_wise.png"
 
 
 def test_format_quote():
