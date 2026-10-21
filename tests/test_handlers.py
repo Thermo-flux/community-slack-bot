@@ -1049,6 +1049,7 @@ def test_cross_member_card_respects_privacy(monkeypatch):
     monkeypatch.setattr(handlers, "resolve_user", lambda t, **k: ("U1", {"user_id": "U1"}))
     monkeypatch.setattr(handlers.crumbs, "get_pond_status", lambda uid: status)
     monkeypatch.setattr(handlers, "ORGANIZER_USER_IDS", {"U_ORG"})
+    monkeypatch.setattr(handlers, "ADMIN_COMMANDS_ENABLED", True)
 
     assert "private" in handlers.get_cards_response_for_targets(["U1"], "U_CALLER")
     assert "Level" in handlers.get_cards_response_for_targets(["U1"], "U1")
@@ -1120,3 +1121,23 @@ def test_card_reply_escapes_mrkdwn_targets(monkeypatch):
     assert handlers._escape_mrkdwn("<https://evil.example/x|hi> & <@U1>") == (
         "&lt;https://evil.example/x|hi&gt; &amp; &lt;@U1&gt;"
     )
+
+def test_admin_commands_can_be_locked_for_everyone(monkeypatch):
+    monkeypatch.setattr(handlers, "ORGANIZER_USER_IDS", ["U0ORGANIZER"])
+    monkeypatch.setattr(handlers, "ADMIN_COMMANDS_ENABLED", False)
+    assert handlers._is_organizer("U0ORGANIZER") is False
+
+    monkeypatch.setattr(handlers, "ADMIN_COMMANDS_ENABLED", True)
+    assert handlers._is_organizer("U0ORGANIZER") is True
+
+
+def test_locked_help_hides_organizer_commands(monkeypatch):
+    monkeypatch.setattr(handlers, "ADMIN_COMMANDS_ENABLED", False)
+    posted = {}
+    monkeypatch.setattr(
+        handlers, "_post_private",
+        lambda client, say, channel, user, text, ts: posted.__setitem__("text", text),
+    )
+    handlers._handle_pond_command("help", [], MagicMock(), MagicMock(), "C1", "U1", None)
+    assert "Organizers:" not in posted["text"]
+    assert "goose join" in posted["text"]

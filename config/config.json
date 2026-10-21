@@ -50,6 +50,7 @@
   "organizer_channel_id": "",
   "owner_user_id": "",
   "orry_user_id": "",
+  "admin_commands_enabled": false,
   "privacy": {
     "_comment": "Public boards list visible members; 0 means no size cap. Members default to visible and can run 'goose hide'.",
     "public_board_size": 0

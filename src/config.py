@@ -159,6 +159,9 @@ def _get_default_config() -> Dict[str, Any]:
         "organizer_channel_id": "",
         "owner_user_id": "",
         "orry_user_id": "",
+        # Hard off-switch for every organizer command. Set false while the admin
+        # surface is being fixed; non-organizer commands keep working.
+        "admin_commands_enabled": True,
         "privacy": {
             "public_board_size": 0,
         },
@@ -469,6 +472,9 @@ ASSETS = CONFIG.get("assets") or {}
 PRIVACY = CONFIG.get("privacy") or {}
 PUBLIC_BOARD_SIZE = max(0, int(PRIVACY.get("public_board_size", 0) or 0))
 KILL_SWITCH_ENV = _bool_setting("KILL_SWITCH", bool(CONFIG.get("kill_switch", False)))
+ADMIN_COMMANDS_ENABLED = _bool_setting(
+    "ADMIN_COMMANDS_ENABLED", bool(CONFIG.get("admin_commands_enabled", True))
+)
 
 
 class ConfigValidationError(Exception):

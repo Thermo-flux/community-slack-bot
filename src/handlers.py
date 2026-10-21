@@ -21,6 +21,7 @@ from typing import Dict, List, Optional
 from slack_bolt import App
 
 from config import (
+    ADMIN_COMMANDS_ENABLED,
     AI_REPLY_QUEUE_SIZE,
     AI_REPLY_WORKERS,
     AI_TIMEOUT_SECONDS,
@@ -401,7 +402,7 @@ def get_cards_response_for_targets(targets: List[str], caller_id: str) -> str:
 
 
 def _is_organizer(user_id: Optional[str]) -> bool:
-    if not user_id:
+    if not ADMIN_COMMANDS_ENABLED or not user_id:
         return False
     return user_id.upper() in {u.upper() for u in ORGANIZER_USER_IDS}
 
@@ -535,7 +536,10 @@ def _handle_pond_command(
     thread_ts: Optional[str],
 ) -> bool:
     if sub in ("help", "pond"):
-        _post_private(client, say, channel_id, user_id, POND_HELP_TEXT, thread_ts)
+        help_text = POND_HELP_TEXT
+        if not ADMIN_COMMANDS_ENABLED:
+            help_text = help_text.split(" Organizers:")[0]
+        _post_private(client, say, channel_id, user_id, help_text, thread_ts)
         return True
 
     if sub == "join":
