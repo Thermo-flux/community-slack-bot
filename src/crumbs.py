@@ -33,7 +33,7 @@ BIGSTAR_CRUMBS = 60
 FLOOD_SECONDS = 30
 REPEAT_WINDOW_SECONDS = 3600
 
-_BASE_THRESHOLDS = [0, 10, 25, 50, 100, 155, 235, 330, 445, 580, 735, 890]
+_BASE_THRESHOLDS = [0, 20, 45, 85, 150, 245, 370, 525, 710, 930, 1180, 1480]
 _TITLES: Dict[int, str] = {
     1: "Hatchling", 2: "Duckling", 3: "Paddler", 4: "Dabbler", 5: "Mallard",
     6: "Diver", 7: "Pond Scout", 8: "Flock Leader", 9: "Wing Commander",
@@ -56,7 +56,7 @@ def crumbs_to_reach(level: int) -> int:
     if level <= 12:
         return _BASE_THRESHOLDS[level - 1]
     try:
-        return int(round((890.0 * (1.2 ** min(level - 12, 1200))) / 5.0) * 5)
+        return int(round((_BASE_THRESHOLDS[-1] * (1.2 ** min(level - 12, 1200))) / 5.0) * 5)
     except OverflowError:
         return 10**18
 
@@ -85,10 +85,10 @@ def weekly_crumbs(
     stars: int = 0,
     bigstars: int = 0,
 ) -> float:
-    crumbs = 8.0 * math.log(1 + messages / 5.0)
-    crumbs += min(1.5 * active_days, 10.5)
-    crumbs += 6.0 * math.log(1 + thanks / 3.0)
-    crumbs += 14.0 * math.log(1 + helpful / 3.0)
+    crumbs = 6.0 * math.log(1 + messages / 5.0)
+    crumbs += min(1.0 * active_days, 7.0)
+    crumbs += 5.0 * math.log(1 + thanks / 3.0)
+    crumbs += 11.0 * math.log(1 + helpful / 3.0)
     crumbs += STAR_CRUMBS * stars + BIGSTAR_CRUMBS * bigstars
     return crumbs
 

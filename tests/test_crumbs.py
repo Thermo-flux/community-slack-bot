@@ -27,13 +27,13 @@ def temp_db():
 
 def test_thresholds_match_the_spec():
     assert [crumbs.crumbs_to_reach(n) for n in range(1, 13)] == [
-        0, 10, 25, 50, 100, 155, 235, 330, 445, 580, 735, 890
+        0, 20, 45, 85, 150, 245, 370, 525, 710, 930, 1180, 1480
     ]
     # +20% per level above 12, rounded to the nearest 5
-    assert crumbs.crumbs_to_reach(13) == 1070
-    assert crumbs.crumbs_to_reach(14) == 1280
-    assert crumbs.crumbs_to_reach(15) == 1540
-    assert crumbs.crumbs_to_reach(16) == 1845
+    assert crumbs.crumbs_to_reach(13) == 1775
+    assert crumbs.crumbs_to_reach(14) == 2130
+    assert crumbs.crumbs_to_reach(15) == 2555
+    assert crumbs.crumbs_to_reach(16) == 3070
 
 
 def test_titles():
@@ -45,21 +45,21 @@ def test_titles():
 
 def test_star_gate_caps_at_level_5_without_a_star():
     assert crumbs.level_for_crumbs(0, has_star=False) == 1
-    assert crumbs.level_for_crumbs(100, has_star=False) == 5
+    assert crumbs.level_for_crumbs(150, has_star=False) == 5
     # Huge crumb total but no star still caps at PL.5
     assert crumbs.level_for_crumbs(5000, has_star=False) == 5
     # With a star, higher levels unlock
-    assert crumbs.level_for_crumbs(155, has_star=True) == 6
-    assert crumbs.level_for_crumbs(890, has_star=True) == 12
-    assert crumbs.level_for_crumbs(1070, has_star=True) == 13
+    assert crumbs.level_for_crumbs(245, has_star=True) == 6
+    assert crumbs.level_for_crumbs(1480, has_star=True) == 12
+    assert crumbs.level_for_crumbs(1775, has_star=True) == 13
 
 
 def test_weekly_curves():
     assert crumbs.weekly_crumbs(messages=0) == 0.0
-    expected = 8 * math.log(1 + 5 / 5.0)
+    expected = 6 * math.log(1 + 5 / 5.0)
     assert abs(crumbs.weekly_crumbs(messages=5) - expected) < 1e-9
-    # active-day cap is 10.5 per week
-    assert abs(crumbs.weekly_crumbs(active_days=20) - 10.5) < 1e-9
+    # active-day cap is 7.0 per week
+    assert abs(crumbs.weekly_crumbs(active_days=20) - 7.0) < 1e-9
     assert abs(crumbs.weekly_crumbs(stars=2) - 50.0) < 1e-9
     assert abs(crumbs.weekly_crumbs(bigstars=1) - 60.0) < 1e-9
 
@@ -88,10 +88,10 @@ def test_star_revocation_demotes_and_floors_at_five(temp_db):
     crumbs.set_opted_in(uid, db_path=temp_db)
     # Plenty of crumbs from messages across several weeks/days, above the PL.5 threshold
     now = time.time()
-    for wk in range(8):
+    for wk in range(12):
         base = now - wk * 7 * 86400
-        for d in range(5):
-            for _ in range(4):
+        for d in range(7):
+            for _ in range(8):
                 crumbs.add_ledger_event(uid, "message", source_ts=base - d * 86400, db_path=temp_db)
     # Without a star, still capped at PL.5
     assert crumbs.get_pond_status(uid, db_path=temp_db)["level"] == 5
