@@ -423,6 +423,13 @@ _POND_NO_ARG_COMMANDS = {
     "leaderboard", "season",
 }
 
+# Safe commands that may be typed bare in the official #loadout channel, for everyone.
+# Destructive/ambiguous ones (star, revoke, report, appeal, ...) still need the "goose" prefix.
+_BARE_SAFE_COMMANDS = {
+    "join", "leave", "me", "top", "all", "leaderboard", "show", "hide",
+    "quiet", "season", "help", "pond", "status",
+}
+
 
 def _valid_pond_args(sub: str, args: List[str]) -> bool:
     """Reject bare words that only look like a command because of extra chatter."""
@@ -1530,7 +1537,6 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         )
         is_addressed = is_named or is_thread_followup
         is_prefixed_cmd = bool(_COMMAND_PREFIX_RE.match(text))
-        is_called = is_addressed or is_prefixed_cmd
         clean_addressed = clean_bot_addressing(text, bot_user_id)
         clean_lower = clean_addressed.lower().strip()
         raw_lower = text.lower()
@@ -1538,7 +1544,20 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             raw_lower == p or raw_lower.startswith(p + " ")
             for p in ("!goose", ".goose", "goose", "!g", ".g")
         )
-        allow_bare_command = (is_named and not is_dm) or (is_dm and has_explicit_prefix)
+        bare_pond_ok = False
+        if channel_id == OFFICIAL_LOADOUT_CHANNEL_ID and clean_lower:
+            first_token = clean_lower.split(None, 1)[0]
+            bare_pond_ok = bool(
+                first_token in _BARE_SAFE_COMMANDS
+                and parse_pond_command(clean_lower, allow_bare=True)
+            )
+        is_called = is_addressed or is_prefixed_cmd or bare_pond_ok
+        allow_bare_command = (
+            is_prefixed_cmd
+            or (is_named and not is_dm)
+            or (is_dm and has_explicit_prefix)
+            or bare_pond_ok
+        )
 
         # Distress takes priority over the persona, the kill switch, and every other bit.
         if (

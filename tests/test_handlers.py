@@ -1141,3 +1141,36 @@ def test_locked_help_hides_organizer_commands(monkeypatch):
     handlers._handle_pond_command("help", [], MagicMock(), MagicMock(), "C1", "U1", None)
     assert "Organizers:" not in posted["text"]
     assert "goose join" in posted["text"]
+
+def test_bare_safe_commands_work_for_everyone_in_loadout(monkeypatch):
+    class ListenerApp:
+        def __init__(self):
+            self.events = {}
+
+        def event(self, name):
+            return lambda fn: self.events.setdefault(name, fn)
+
+        def command(self, _name):
+            return lambda fn: fn
+
+    monkeypatch.setattr(handlers, "is_channel_watched", lambda channel: True)
+    monkeypatch.setattr(handlers, "_queue_ai_reply", lambda *a, **k: None)
+    app = ListenerApp()
+    handlers.register_handlers(app, bot_user_id="U123BOT")
+
+    client = MagicMock()
+    app.events["message"](
+        body={"event": {"channel": handlers.OFFICIAL_LOADOUT_CHANNEL_ID, "user": "U_NORMAL",
+                        "text": "me", "ts": "1"}},
+        client=client,
+        say=MagicMock(),
+    )
+    client.chat_postEphemeral.assert_called()
+
+    other = MagicMock()
+    app.events["message"](
+        body={"event": {"channel": "C_OTHER", "user": "U_NORMAL", "text": "me", "ts": "2"}},
+        client=other,
+        say=MagicMock(),
+    )
+    other.chat_postEphemeral.assert_not_called()
