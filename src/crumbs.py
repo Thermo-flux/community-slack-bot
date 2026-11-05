@@ -469,13 +469,23 @@ def format_pond_card(status: Dict[str, Any], mention: Optional[str] = None) -> s
     return "\n".join(lines)
 
 
-def format_pond_leaderboard(entries: List[Dict[str, Any]], limit: int = 10) -> str:
+def _board_name(user_id: str, names: Optional[Dict[str, str]]) -> str:
+    """Plain-text label for a public board row. Never a <@mention>, so nobody is pinged."""
+    if names and names.get(user_id):
+        return names[user_id]
+    from names import fallback_label
+    return fallback_label(user_id)
+
+
+def format_pond_leaderboard(
+    entries: List[Dict[str, Any]], limit: int = 10, names: Optional[Dict[str, str]] = None
+) -> str:
     if not entries:
         return "Nobody is on the board yet. Say `goose join`, then chat in #loadout to start."
     out = ["*Pond standings*"]
     for rank, entry in enumerate(entries[:limit], start=1):
         out.append(
-            f"{rank}. <@{entry['user_id']}> - PL.{entry['level']} "
+            f"{rank}. {_board_name(entry['user_id'], names)} - PL.{entry['level']} "
             f"{entry['title'] or ''} - {entry['crumbs']:g} crumbs"
         )
     return "\n".join(out)
@@ -605,25 +615,29 @@ def is_resting(user_id: str, db_path=None) -> bool:
     return _user_flag(user_id, "resting", db_path)
 
 
-def format_all_time(entries: List[Dict[str, Any]], limit: int = 3) -> str:
+def format_all_time(
+    entries: List[Dict[str, Any]], limit: int = 3, names: Optional[Dict[str, str]] = None
+) -> str:
     if not entries:
         return "Nobody is on the board yet. Say `goose join`, then chat in #loadout to start."
     out = ["*All-time Pond standings*"]
     for rank, entry in enumerate(entries[:limit], start=1):
         out.append(
-            f"{rank}. <@{entry['user_id']}> - PL.{entry['level']} "
+            f"{rank}. {_board_name(entry['user_id'], names)} - PL.{entry['level']} "
             f"{entry['title'] or ''} - {entry['crumbs']:g} crumbs"
         )
     return "\n".join(out)
 
 
-def format_weekly_report(week_key_value: str, entries: List[Dict[str, Any]]) -> str:
+def format_weekly_report(
+    week_key_value: str, entries: List[Dict[str, Any]], names: Optional[Dict[str, str]] = None
+) -> str:
     if not entries:
         return f"*Pond Report - {week_key_value}*\nNo qualifying activity this week."
     out = [f"*Pond Report - {week_key_value}*"]
     for rank, entry in enumerate(entries, start=1):
         out.append(
-            f"{rank}. <@{entry['user_id']}> - {entry.get('week_crumbs', 0):g} crumbs this week "
+            f"{rank}. {_board_name(entry['user_id'], names)} - {entry.get('week_crumbs', 0):g} crumbs this week "
             f"(PL.{entry['level']} {entry['title'] or ''})"
         )
     return "\n".join(out)

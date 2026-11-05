@@ -173,7 +173,7 @@ def test_weekly_report_posts_once(monkeypatch):
     monkeypatch.setattr(handlers.crumbs, "get_weekly_leaderboard", lambda wk, limit=10: [
         {"user_id": "U1", "level": 3, "title": "Paddler", "week_crumbs": 12.0}
     ])
-    monkeypatch.setattr(handlers.crumbs, "format_weekly_report", lambda wk, entries: "REPORT")
+    monkeypatch.setattr(handlers.crumbs, "format_weekly_report", lambda wk, entries, names=None: "REPORT")
     monkeypatch.setattr(handlers.crumbs, "snapshot_week", lambda wk: 0)
     monkeypatch.setattr(handlers, "backup_database", lambda: None)
     monkeypatch.setattr(
@@ -233,7 +233,7 @@ def test_pond_leaderboard_is_posted_publicly(monkeypatch):
         handlers.crumbs, "get_pond_leaderboard", lambda **kwargs: entries
     )
     monkeypatch.setattr(
-        handlers.crumbs, "format_pond_leaderboard", lambda items, limit=10: f"{len(items)} entries"
+        handlers.crumbs, "format_pond_leaderboard", lambda items, limit=10, names=None: f"{len(items)} entries"
     )
 
     handled = handlers._handle_pond_command(

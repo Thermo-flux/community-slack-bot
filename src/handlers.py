@@ -75,6 +75,7 @@ from leveling import (
 )
 import ai_service
 import crumbs
+import names
 import slack_assets
 
 logger = logging.getLogger("SlackBotHandlers")
@@ -525,6 +526,15 @@ def _resolve_target_identifier(args: List[str]) -> Optional[str]:
     return uid
 
 
+def _public_board(client, limit: int = LEADERBOARD_DISPLAY_LIMIT) -> str:
+    """Public pond board with plain-text names, so posting it never pings anyone on it."""
+    entries = crumbs.get_pond_leaderboard(limit=limit, public=True)
+    labels = names.board_labels(
+        client, [e["user_id"] for e in entries[:limit]], reserved_ids=[_bot_user_id_global or ""]
+    )
+    return crumbs.format_pond_leaderboard(entries, limit=limit, names=labels)
+
+
 def _post_private(client, say, channel_id: str, user_id: str, text: str, thread_ts: Optional[str]) -> None:
     """Send a private note: ephemeral in-channel if possible, else a DM. Never post publicly."""
     try:
@@ -597,9 +607,7 @@ def _handle_pond_command(
         return True
 
     if sub in ("top", "all", "leaderboard"):
-        entries = crumbs.get_pond_leaderboard(limit=LEADERBOARD_DISPLAY_LIMIT, public=True)
-        board = crumbs.format_pond_leaderboard(entries, limit=LEADERBOARD_DISPLAY_LIMIT)
-        _safe_say(say, text=board, thread_ts=thread_ts)
+        _safe_say(say, text=_public_board(client), thread_ts=thread_ts)
         return True
 
     if sub in ("show", "hide"):
@@ -1494,7 +1502,13 @@ def run_scheduled_maintenance(client, force: bool = False) -> None:
             client.chat_postMessage(
                 channel=ORGANIZER_CHANNEL_ID,
                 text=(f"Monday check-in for <#{OFFICIAL_LOADOUT_CHANNEL_ID}>:\n"
-                      + crumbs.format_weekly_report(week, entries)),
+                      + crumbs.format_weekly_report(
+                          week, entries,
+                          names=names.board_labels(
+                              client, [e["user_id"] for e in entries],
+                              reserved_ids=[_bot_user_id_global or ""],
+                          ),
+                      )),
                 parse="none",
             )
         except Exception as exc:
@@ -1603,10 +1617,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
                 "/leaderboard", "!leaderboard", ".leaderboard", "leaderboard",
                 "/top", "!top", ".top", "top", "ranks", "pond leaderboard",
             ):
-                board = crumbs.format_pond_leaderboard(
-                    crumbs.get_pond_leaderboard(limit=LEADERBOARD_DISPLAY_LIMIT, public=True),
-                    limit=LEADERBOARD_DISPLAY_LIMIT,
-                )
+                board = _public_board(client)
                 _safe_say(say, text=board, channel=channel_id, thread_ts=target_thread_ts)
                 return
 
@@ -1710,10 +1721,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
             "/leaderboard", "!leaderboard", ".leaderboard", "leaderboard",
             "/top", "!top", ".top", "top", "ranks", "scores", "pond leaderboard",
         ):
-            board = crumbs.format_pond_leaderboard(
-                crumbs.get_pond_leaderboard(limit=LEADERBOARD_DISPLAY_LIMIT, public=True),
-                limit=LEADERBOARD_DISPLAY_LIMIT,
-            )
+            board = _public_board(client)
             _safe_say(say, text=board, thread_ts=target_thread_ts)
             return
 
@@ -1829,12 +1837,9 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         _handle_card_slash_command(ack, command, respond, say)
 
     @app.command("/leaderboard")
-    def handle_leaderboard_command(ack, respond, say):
+    def handle_leaderboard_command(ack, respond, say, client):
         ack()
-        board = crumbs.format_pond_leaderboard(
-                crumbs.get_pond_leaderboard(limit=LEADERBOARD_DISPLAY_LIMIT, public=True),
-                limit=LEADERBOARD_DISPLAY_LIMIT,
-            )
+        board = _public_board(client)
         try:
             respond(text=board, response_type="in_channel")
         except Exception:
