@@ -1182,3 +1182,57 @@ def test_join_survives_reaction_failure(monkeypatch):
     assert handlers._handle_pond_command(
         "join", [], client, MagicMock(), "C1", "U_JOIN_ERR", None, "3.3"
     ) is True
+
+
+def test_parse_snooze_board_commands():
+    assert handlers.parse_pond_command("goose snooze boards") == ("snooze", ["boards"])
+    assert handlers.parse_pond_command("goose unsnooze boards") == ("unsnooze", ["boards"])
+    assert handlers.parse_pond_command("goose snooze") == ("snooze", [])
+    assert handlers.parse_pond_command("goose snooze everything") is None
+
+
+def test_public_board_snoozes_without_reading_standings(monkeypatch):
+    monkeypatch.setattr(handlers, "_boards_snoozed", lambda: True)
+    called = []
+    monkeypatch.setattr(
+        handlers.crumbs, "get_pond_leaderboard",
+        lambda **kwargs: called.append(kwargs) or [],
+    )
+    text = handlers._public_board(None)
+    assert "snooz" in text.lower()
+    assert "unsnooze boards" in text
+    assert called == []
+
+
+def test_organizers_can_snooze_and_wake_boards(monkeypatch):
+    state = {}
+    monkeypatch.setattr(handlers, "_is_organizer", lambda uid: uid == "U_ORG")
+    monkeypatch.setattr(handlers, "set_state", lambda key, value: state.__setitem__(key, value))
+    monkeypatch.setattr(handlers, "_post_private", lambda *a, **k: None)
+
+    assert handlers._handle_pond_command(
+        "snooze", ["boards"], MagicMock(), MagicMock(), "C1", "U_ORG", None
+    ) is True
+    assert state["boards_snoozed"] == "1"
+
+    assert handlers._handle_pond_command(
+        "unsnooze", ["boards"], MagicMock(), MagicMock(), "C1", "U_ORG", None
+    ) is True
+    assert state["boards_snoozed"] == "0"
+
+
+def test_non_organizers_cannot_snooze_boards(monkeypatch):
+    state = {}
+    posted = {}
+    monkeypatch.setattr(handlers, "_is_organizer", lambda uid: False)
+    monkeypatch.setattr(handlers, "set_state", lambda key, value: state.__setitem__(key, value))
+    monkeypatch.setattr(
+        handlers, "_post_private",
+        lambda client, say, channel, user, text, ts: posted.__setitem__("text", text),
+    )
+
+    assert handlers._handle_pond_command(
+        "snooze", ["boards"], MagicMock(), MagicMock(), "C1", "U1", None
+    ) is True
+    assert "organizer" in posted["text"].lower()
+    assert "boards_snoozed" not in state

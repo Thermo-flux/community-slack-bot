@@ -414,7 +414,7 @@ POND_HELP_TEXT = (
     "`goose quiet on/off`, `goose leave` to opt out, `goose report <text>`, `goose appeal <id> [reason]`, "
     "`goose season`. Organizers: `goose star|bigstar @person`, `goose revoke <id>`, `goose roster`, "
     "`goose results`, `goose reports`, `goose resolve <appeal id>`, `goose pause|resume`, `goose freeze|unfreeze`, "
-    "`goose voice on|off|status`, `goose set-end <unix ts|off>`, `goose status`."
+    "`goose voice on|off|status`, `goose snooze|unsnooze boards`, `goose set-end <unix ts|off>`, `goose status`."
 )
 
 
@@ -435,6 +435,8 @@ def _valid_pond_args(sub: str, args: List[str]) -> bool:
         return len(args) == 1
     if sub in ("report", "appeal", "star", "bigstar", "revoke", "resolve"):
         return bool(args)
+    if sub in ("snooze", "unsnooze"):
+        return len(args) <= 1 and (not args or args[0] == "boards")
     return True
 
 
@@ -468,6 +470,7 @@ def parse_pond_command(text: str, allow_bare: bool = False) -> Optional[tuple]:
         "quiet", "report", "appeal", "star", "bigstar", "revoke", "roster",
         "results", "reports", "resolve", "pause", "resume", "status",
         "freeze", "unfreeze", "voice", "leaderboard", "season", "set-end",
+        "snooze", "unsnooze",
     ) and _valid_pond_args(sub, parts[1:]):
         return (sub, parts[1:])
     return None
@@ -526,8 +529,24 @@ def _resolve_target_identifier(args: List[str]) -> Optional[str]:
     return uid
 
 
+BOARDS_SNOOZE_TEXT = (
+    "The public boards are snoozing right now. "
+    "An organizer can wake them with `goose unsnooze boards`."
+)
+
+
+def _boards_snoozed() -> bool:
+    """Organizer switch that hides public board replies without touching scores."""
+    try:
+        return get_state("boards_snoozed", "0") == "1"
+    except Exception:
+        return False
+
+
 def _public_board(client, limit: int = LEADERBOARD_DISPLAY_LIMIT) -> str:
     """Public pond board with plain-text names, so posting it never pings anyone on it."""
+    if _boards_snoozed():
+        return BOARDS_SNOOZE_TEXT
     entries = crumbs.get_pond_leaderboard(limit=limit, public=True)
     labels = names.board_labels(
         client, [e["user_id"] for e in entries[:limit]], reserved_ids=[_bot_user_id_global or ""]
@@ -608,6 +627,21 @@ def _handle_pond_command(
 
     if sub in ("top", "all", "leaderboard"):
         _safe_say(say, text=_public_board(client), thread_ts=thread_ts)
+        return True
+
+    if sub in ("snooze", "unsnooze"):
+        if not _is_organizer(user_id):
+            _post_private(client, say, channel_id, user_id,
+                          "Only organizers can snooze or wake the public boards.", thread_ts)
+            return True
+        snoozed = sub == "snooze"
+        set_state("boards_snoozed", "1" if snoozed else "0")
+        _post_private(
+            client, say, channel_id, user_id,
+            ("The public boards are snoozing now. `goose unsnooze boards` wakes them."
+             if snoozed else "The public boards are awake again."),
+            thread_ts,
+        )
         return True
 
     if sub in ("show", "hide"):
