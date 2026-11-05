@@ -1141,3 +1141,44 @@ def test_locked_help_hides_organizer_commands(monkeypatch):
     handlers._handle_pond_command("help", [], MagicMock(), MagicMock(), "C1", "U1", None)
     assert "Organizers:" not in posted["text"]
     assert "goose join" in posted["text"]
+
+
+def test_join_reacts_green_check_to_a_new_member(monkeypatch):
+    monkeypatch.setattr(handlers, "_post_private", lambda *a, **k: None)
+    handlers.crumbs.set_opted_out("U_JOIN_NEW")
+    client = MagicMock()
+    assert handlers._handle_pond_command(
+        "join", [], client, MagicMock(), "C1", "U_JOIN_NEW", None, "111.222"
+    ) is True
+    client.reactions_add.assert_called_once_with(
+        channel="C1", timestamp="111.222", name="white_check_mark"
+    )
+
+
+def test_repeat_join_does_not_react_again(monkeypatch):
+    monkeypatch.setattr(handlers, "_post_private", lambda *a, **k: None)
+    handlers.crumbs.set_opted_out("U_JOIN_TWICE")
+    client = MagicMock()
+    handlers._handle_pond_command("join", [], client, MagicMock(), "C1", "U_JOIN_TWICE", None, "1.1")
+    client.reactions_add.reset_mock()
+    handlers._handle_pond_command("join", [], client, MagicMock(), "C1", "U_JOIN_TWICE", None, "1.2")
+    client.reactions_add.assert_not_called()
+
+
+def test_join_skips_reaction_for_quiet_member(monkeypatch):
+    monkeypatch.setattr(handlers, "_post_private", lambda *a, **k: None)
+    handlers.crumbs.set_opted_out("U_JOIN_QUIET")
+    handlers.crumbs.set_quiet("U_JOIN_QUIET", True)
+    client = MagicMock()
+    handlers._handle_pond_command("join", [], client, MagicMock(), "C1", "U_JOIN_QUIET", None, "2.2")
+    client.reactions_add.assert_not_called()
+
+
+def test_join_survives_reaction_failure(monkeypatch):
+    monkeypatch.setattr(handlers, "_post_private", lambda *a, **k: None)
+    handlers.crumbs.set_opted_out("U_JOIN_ERR")
+    client = MagicMock()
+    client.reactions_add.side_effect = RuntimeError("slack down")
+    assert handlers._handle_pond_command(
+        "join", [], client, MagicMock(), "C1", "U_JOIN_ERR", None, "3.3"
+    ) is True

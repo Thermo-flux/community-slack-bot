@@ -481,6 +481,18 @@ def _parse_event_id(value: str) -> Optional[int]:
     return number if 0 < number < 2**63 else None
 
 
+def _add_reaction(client, channel_id: str, message_ts: str, emoji: str) -> None:
+    """Add a reaction to a message. Reactions never ping, and failures are non-fatal."""
+    if client is None or not channel_id or not message_ts:
+        return
+    try:
+        client.reactions_add(
+            channel=channel_id, timestamp=message_ts, name=emoji.strip(":")
+        )
+    except Exception as exc:
+        logger.debug("Could not add %s reaction (%s)", emoji, type(exc).__name__)
+
+
 def _dispatch_pond_command(
     sub: str,
     args: List[str],
@@ -489,10 +501,13 @@ def _dispatch_pond_command(
     channel_id: str,
     user_id: str,
     thread_ts: Optional[str],
+    message_ts: str = "",
 ) -> bool:
     """Run a Pond command without letting bad input crash the Slack listener."""
     try:
-        return _handle_pond_command(sub, args, client, say, channel_id, user_id, thread_ts)
+        return _handle_pond_command(
+            sub, args, client, say, channel_id, user_id, thread_ts, message_ts
+        )
     except Exception as exc:
         logger.error("Pond command %s failed (%s)", sub, type(exc).__name__)
         _post_private(
@@ -534,6 +549,7 @@ def _handle_pond_command(
     channel_id: str,
     user_id: str,
     thread_ts: Optional[str],
+    message_ts: str = "",
 ) -> bool:
     if sub in ("help", "pond"):
         help_text = POND_HELP_TEXT
@@ -545,6 +561,15 @@ def _handle_pond_command(
     if sub == "join":
         already = crumbs.is_opted_in(user_id)
         crumbs.set_opted_in(user_id)
+        if not already:
+            # Quietly greet a brand-new duckling with a green check on their own
+            # message. Reactions do not notify or ping them.
+            try:
+                quiet = crumbs.is_quiet(user_id)
+            except Exception:
+                quiet = False
+            if not quiet:
+                _add_reaction(client, channel_id, message_ts, ":white_check_mark:")
         status = crumbs.get_pond_status(user_id)
         lead = "You're already in the pond. " if already else "Welcome to the pond. "
         lead += "You're on the public board now. "
@@ -1429,10 +1454,7 @@ def _react_to_message(client, channel_id: str, text: str, author_id: str, messag
     if used > budget:
         return
     emoji = ":duck:"
-    try:
-        client.reactions_add(channel=channel_id, timestamp=message_ts, name=emoji.strip(":"))
-    except Exception as exc:
-        logger.debug("Could not add reaction (%s)", type(exc).__name__)
+    _add_reaction(client, channel_id, message_ts, emoji)
 
 
 _bot_user_id_global: Optional[str] = None
@@ -1566,7 +1588,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
         if not is_direct_bot_mention:
             pond_cmd = parse_pond_command(clean_lower, allow_bare=allow_bare_command)
             if pond_cmd is not None:
-                if _dispatch_pond_command(pond_cmd[0], pond_cmd[1], client, say, channel_id, user_id, target_thread_ts):
+                if _dispatch_pond_command(pond_cmd[0], pond_cmd[1], client, say, channel_id, user_id, target_thread_ts, event.get("ts") or ""):
                     return
 
             card_targets = parse_card_request_targets(
@@ -1673,7 +1695,7 @@ def register_handlers(app: App, bot_user_id: Optional[str] = None) -> None:
 
         pond_cmd = parse_pond_command(clean_lower, allow_bare=True)
         if pond_cmd is not None:
-            if _dispatch_pond_command(pond_cmd[0], pond_cmd[1], client, say, channel_id, user_id, target_thread_ts):
+            if _dispatch_pond_command(pond_cmd[0], pond_cmd[1], client, say, channel_id, user_id, target_thread_ts, event.get("ts") or ""):
                 return
 
         card_targets = parse_card_request_targets(
